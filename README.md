@@ -40,12 +40,18 @@ Same 37 ms of memory traffic either way — that's the whole game.
 is what LORE Appendix A is about: what would happen if a model fit in cache.
 
 You write code in `app/`. You never edit `tests/` — the tests are the spec.
-Stage 01 and 02 are wired up and passing against a reference implementation, so
-the harness is proven; `app/s01_naive.py` and `app/s02_cache.py` are stubbed for
-you to fill in.
 
-`.solutions/` holds reference implementations for the wired stages. It exists so
-you can unstick yourself, not so you can start there.
+**All 20 stages are wired.** 229 tests, and every one of them passes against a
+reference implementation, so nothing here is aspirational: if a test fails, it
+is your code, not the harness. Prove it yourself any time:
+
+```bash
+dev/verify.sh          # install reference solutions, run everything, restore stubs
+dev/verify.sh 7 8      # or just some stages
+```
+
+`.solutions/` holds those reference implementations. They exist so you can
+unstick yourself, not so you can start there.
 
 ## What makes this different from a tutorial
 
@@ -78,6 +84,12 @@ that you need to have seen before you meet it in production.
 | A4 | 12-14 | CUDA graphs, batched sampler, streaming detokenization |
 | A5 | 15-16 | Async engine, OpenAI-compatible API, the metrics that matter |
 | A6 | 17-20 | Speculative decoding, quantization, guided decoding, tensor parallel |
+
+Roughly half the stages need no GPU at all — the allocator, scheduler, prefix
+cache, sampler, detokenizer, metrics, guided decoding and speculative sampling
+are all pure logic, and they are tested to destruction because their failure
+modes (leaks, starvation, livelock, distribution skew) are the ones that look
+like "the server just got slow" in production.
 
 Read [LORE.md](LORE.md) first. It's the conceptual spine: one physical fact
 about memory bandwidth, and the twenty forced moves that follow from it.
