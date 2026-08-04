@@ -84,6 +84,24 @@ waiting, run them in the *same* pass:
 **128x the output for the same wall-clock time**, because the expensive part
 (dragging 14 GB across the memory bus) got shared by all 128.
 
+Said the other way round: one weight is fetched from VRAM **once**, and while it
+sits in registers it gets multiplied against request 1's activation, then
+request 2's, then request 3's... up to B. Same byte, B multiply-adds. Bytes are
+what's expensive, so the game is squeezing more work out of every byte you
+already paid to drag in.
+
+In linear-algebra terms, batching changes *which operation you are running*:
+
+```
+batch 1:   y = W @ x     matrix x vector  (GEMV)  -> each weight used once
+batch B:   Y = W @ X     matrix x matrix  (GEMM)  -> each weight used B times
+```
+
+Batching turns a GEMV into a GEMM. GEMMs are what GPUs are built for; GEMVs
+waste them. If you have ever done cache blocking or loop tiling on a CPU, it is
+the identical instinct: load the line once, extract every bit of work from it
+before it is evicted.
+
 Notice the two time columns just became equal — 37 ms reading, 36 ms computing.
 That's not a coincidence, it's where the batch size came from:
 
@@ -102,6 +120,62 @@ set `max_num_seqs` (the batch size knob) in the hundreds.
 You won't quite reach it, because each concurrent request also needs its own KV
 cache in VRAM, and you run out of memory before you run out of arithmetic.
 Relaxing *that* constraint is what PagedAttention is for.
+
+### "Why not batch to infinity, then?"
+
+Being compute-bound is the *goal* — it means the silicon you paid for is finally
+busy instead of idling on memory. So why stop at ~150?
+
+Because past the ridge you gain nothing. 7B on this card, read = 37 ms,
+compute = 0.25 ms per request:
+
+| Batch | Read | Compute (`0.25 x B`) | Step time | Throughput | Latency/user |
+|---|---|---|---|---|---|
+| 1 | 37 ms | 0.25 ms | 37 ms | `1/0.037` = 27 tok/s | 37 ms |
+| 50 | 37 ms | 12 ms | 37 ms | `50/0.037` = 1,351 tok/s | 37 ms |
+| **150** | 37 ms | 37 ms | **37 ms** | `150/0.037` = **4,054 tok/s** | **37 ms** |
+| 300 | 37 ms | 75 ms | 75 ms | `300/0.075` = 4,000 tok/s | 75 ms |
+| 600 | 37 ms | 150 ms | 150 ms | `600/0.150` = 4,000 tok/s | 150 ms |
+
+Look at the last two rows. **Throughput is flat.** Double the batch, double the
+step time, produce twice the tokens in twice the time — net zero. Meanwhile
+every user's inter-token latency doubled.
+
+The reason is mechanical. Past the ridge, step time is `0.25ms x B`, so:
+
+```
+      B tokens              1
+------------------  =  ----------  =  constant, the B cancels
+   0.25ms x B sec         0.25ms
+```
+
+You have hit the compute roofline and it does not move. Hence "ridge point": a
+peak you sit on, not a wall you push through.
+
+### "But the weights never change — can't they just stay in cache?"
+
+They never change, true. The only thing that alters them is retraining. But
+read-only does not mean free to read, and they are far too large to cache:
+
+```
+L2 cache on this GPU       50 MB
+7B model in bf16       14,000 MB   ->  278x too big
+Qwen3-0.6B in bf16      1,200 MB   ->   24x too big
+```
+
+So the weights live in **VRAM**, and "read 14 GB from VRAM" *is* the 37 ms.
+Residency in VRAM is not a saving, it is the cost. Every forward pass drags the
+full 14 GB across the bus again, token after token, forever.
+
+Immutability *is* exploited — just never by caching:
+
+- **Batching** — the same unchanging weights serve all B requests (stages 04-05)
+- **Quantization** — shrink them offline to fp8/int4, so 14 GB becomes 7 or 3.5,
+  and read time falls proportionally (stage 18)
+- **Tensor parallelism** — shard them so each GPU reads only its slice (stage 20)
+
+All three attack the same denominator. None makes the read free, because 14 GB
+does not fit in 50 MB.
 
 ### The compressed form you'll see everywhere else
 

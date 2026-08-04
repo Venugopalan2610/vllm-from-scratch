@@ -91,6 +91,18 @@ print(f"\n  Neither ratio is something a profiler shows you. A profiler shows")
 print(f"  achieved RATES (GB/s, GFLOP/s). These two numbers are what you work")
 print(f"  out beforehand to predict which of those rates will be pegged.{X}")
 
+# --- why the weights can't just live in cache ---
+l2 = getattr(p, "L2_cache_size", 0)
+if l2:
+    print(f"\n\033[1mWhy the weights can't just stay in cache\033[0m")
+    print(f"  L2 cache on this GPU   {l2 / 1e6:>8,.0f} MB")
+    for name, gb in [("Qwen3-0.6B bf16", 1.2), ("7B bf16", 14.0)]:
+        print(f"  {name:<22} {gb * 1000:>8,.0f} MB   "
+              f"{D}-> {gb * 1e9 / l2:.0f}x too big{X}")
+    print(f"  {D}So weights live in VRAM, and 'read them from VRAM' IS the")
+    print(f"  {14.0 / bw * 1000:.0f} ms that a 7B forward pass costs above.")
+    print(f"  Read-only does not mean free to read.{X}")
+
 # --- what this implies for a 7B model ---
 print(f"\n\033[1mImplied ceilings\033[0m (bf16, batch=1, weights-only traffic)")
 for name, gb in [("0.6B", 1.2), ("1B", 2.0), ("7B", 14.0), ("8B (fp8)", 8.0)]:
