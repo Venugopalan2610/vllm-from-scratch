@@ -1,0 +1,247 @@
+# The ladder. Each stage is a testable milestone that makes the previous one faster
+# or more correct. Stages are ordered the way vLLM's ideas were actually discovered.
+#
+# difficulty: how hard the code is, 1-5
+# insight:    the one thing you should walk away understanding
+
+arcs:
+  - id: A0
+    name: "The Naive Loop"
+    blurb: "Build the slow thing first, and measure it, so every later win is a number."
+    stages:
+      - id: "01-forward-pass"
+        name: "Greedy decode, no cache"
+        difficulty: 1
+        insight: >
+          A transformer forward pass is a pure function of the whole prefix.
+          Generating N tokens naively costs O(N^2) attention work because you
+          recompute every previous token's K and V on every single step.
+        deliver: "generate() that emits tokens one at a time from a HF model."
+        measure: "tokens/sec at 128 output tokens. This is your rock bottom."
+
+      - id: "02-kv-cache"
+        name: "The KV cache"
+        difficulty: 2
+        insight: >
+          K and V for a token never change once computed. Cache them and each
+          decode step becomes a single-token forward pass: O(N) total.
+          This is also the moment memory becomes your enemy instead of compute.
+        deliver: "Per-sequence contiguous KV cache; decode attends over cache+new token."
+        measure: "tokens/sec (expect a large multiple of stage 1) and bytes of KV per token."
+
+      - id: "03-roofline"
+        name: "Prefill vs decode: two different machines"
+        difficulty: 2
+        insight: >
+          Prefill is compute-bound (big GEMMs, high arithmetic intensity).
+          Decode is memory-bandwidth-bound (batch size 1 means every weight is
+          read from HBM to produce one token). They want opposite optimizations.
+          This is THE fact that explains every design decision downstream.
+        deliver: "A microbenchmark separating prefill ms/token from decode ms/token."
+        measure: "Achieved GB/s during decode vs your GPU's peak. You'll be near peak."
+
+  - id: A1
+    name: "Batching"
+    blurb: "Decode is bandwidth-bound, so extra sequences are nearly free. Exploit that."
+    stages:
+      - id: "04-static-batching"
+        name: "Static batching with padding"
+        difficulty: 2
+        insight: >
+          Batching amortizes the weight read across sequences: 8x the tokens for
+          almost 1x the time. But a static batch runs until its SLOWEST member
+          finishes, and short sequences sit padded and idle, burning the slot.
+        deliver: "Left-padded batch of N prompts, shared decode loop, attention mask."
+        measure: "Throughput vs batch size, AND the % of decoded token-slots wasted on padding."
+
+      - id: "05-continuous-batching"
+        name: "Continuous batching (iteration-level scheduling)"
+        difficulty: 3
+        insight: >
+          Schedule per ITERATION, not per request. When a sequence emits EOS,
+          evict it that same step and admit a waiting one into its slot.
+          From Orca (OSDI '22). Typically 2-4x over static batching on real traffic,
+          and it is the single largest throughput win in this entire repo.
+        deliver: "A step() loop over a mutable running-set; requests join and leave mid-flight."
+        measure: "Throughput on a Poisson arrival trace + p50/p99 latency vs stage 4."
+
+  - id: A2
+    name: "PagedAttention"
+    blurb: "The idea vLLM is named after. Virtual memory, applied to the KV cache."
+    stages:
+      - id: "06-block-allocator"
+        name: "Blocks, block tables, free list"
+        difficulty: 3
+        insight: >
+          Contiguous per-sequence caches force you to pre-allocate for max_len,
+          so real serving wastes 60-80% of KV memory to internal fragmentation
+          and reservation. Chop the cache into fixed 16-token blocks, hand them
+          out on demand, and keep a per-sequence block table (a page table).
+          Waste drops to under one block per sequence.
+        deliver: "BlockAllocator + BlockTable. No attention changes yet."
+        measure: "Sequences resident in 12GB, paged vs contiguous. Expect a big jump."
+
+      - id: "07-paged-attention"
+        name: "Attention that reads through the page table"
+        difficulty: 4
+        insight: >
+          The kernel must gather K/V from scattered blocks instead of striding a
+          contiguous tensor. Do it in PyTorch first (index_select + SDPA) to get
+          it CORRECT, then keep that as the reference oracle forever.
+        deliver: "paged_attn() in pure PyTorch, bit-comparable to stage 2's output."
+        measure: "Correctness vs the contiguous implementation, then the slowdown you just ate."
+
+      - id: "08-paged-attention-triton"
+        name: "The same thing, fast"
+        difficulty: 5
+        insight: >
+          One program per (sequence, head, block); stream K/V tiles through SRAM;
+          online-softmax so you never materialize the full score row. Decode
+          attention is bandwidth-bound, so your kernel's job is coalesced reads.
+        deliver: "A Triton paged decode kernel that beats the PyTorch version."
+        measure: "us/token vs stage 7, and vs real vLLM's kernel on the same shapes."
+
+      - id: "09-prefix-sharing"
+        name: "Copy-on-write and automatic prefix caching"
+        difficulty: 4
+        insight: >
+          Block tables make sharing trivial: two sequences can point at the same
+          physical block. Refcount them, copy-on-write when one diverges. Then
+          hash block contents and reuse across REQUESTS: a shared system prompt
+          gets prefilled once for everybody. This is why APC feels like cheating.
+        deliver: "Refcounted blocks, CoW on write, content-hash prefix cache with LRU eviction."
+        measure: "TTFT for a 2000-token shared system prompt, cold vs warm."
+
+  - id: A3
+    name: "The Scheduler"
+    blurb: "You have finite KV memory and infinite requests. Decide who runs."
+    stages:
+      - id: "10-admission-preemption"
+        name: "Waiting / running / swapped, and preemption"
+        difficulty: 4
+        insight: >
+          Sequences grow one block at a time, so the batch you admitted can run
+          out of memory mid-decode. You need preemption: either SWAP blocks to
+          CPU or DROP them and recompute later. Recompute usually wins, because
+          prefill is fast and PCIe is not.
+        deliver: "Three queues, a KV budget check per step, preempt-by-recompute."
+        measure: "Behavior under overload: does throughput degrade gracefully or collapse?"
+
+      - id: "11-chunked-prefill"
+        name: "Chunked prefill and mixed batches"
+        difficulty: 4
+        insight: >
+          One 8000-token prefill stalls every decoding sequence for a whole step,
+          wrecking inter-token latency for everyone. Split prefill into chunks and
+          co-schedule chunks with decodes in the SAME batch. From Sarathi-Serve.
+          This is the throughput/latency dial in every modern serving stack.
+        deliver: "A unified batch of [prefill chunks + decode tokens] with correct positions."
+        measure: "p99 inter-token latency with a long prompt in flight. Before vs after."
+
+  - id: A4
+    name: "Making It Actually Fast"
+    blurb: "Everything left is overhead removal."
+    stages:
+      - id: "12-cuda-graphs"
+        name: "CUDA graphs for the decode step"
+        difficulty: 4
+        insight: >
+          At batch 1 a decode step is ~1ms of GPU work and can be ~1ms of Python
+          and kernel-launch overhead. Capture the whole step as a graph and replay
+          it. Requires static shapes, so you capture at bucketed batch sizes and
+          pad up to the nearest bucket.
+        deliver: "Graph capture per bucket, replay path, eager fallback."
+        measure: "us/step at batch 1, 2, 4, 8. Watch the Python tax vanish."
+
+      - id: "13-sampling"
+        name: "A real batched sampler"
+        difficulty: 3
+        insight: >
+          Every request has its own temperature, top-k, top-p, penalties, and seed,
+          and they all must be applied in ONE vectorized pass over the batch. The
+          naive per-request Python loop silently becomes your bottleneck once the
+          kernels are fast.
+        deliver: "Vectorized temp/top-k/top-p/repetition penalty, per-request seeded RNG."
+        measure: "Sampler ms/step at batch 64, plus a distributional test that top-p is exact."
+
+      - id: "14-detokenization"
+        name: "Incremental detokenization and stop conditions"
+        difficulty: 3
+        insight: >
+          You cannot decode tokens independently: BPE pieces, multi-byte UTF-8, and
+          leading-space rules mean naive streaming emits mojibake and doubled spaces.
+          Stop STRINGS can also straddle a token boundary, so you must buffer.
+          Boring, and the source of most user-visible bugs in real servers.
+        deliver: "Streaming detokenizer with a lookback window + straddling stop-string check."
+        measure: "Fuzz test: streamed output must equal batch-decoded output, always."
+
+  - id: A5
+    name: "The Server"
+    blurb: "Turn the engine into something you can curl."
+    stages:
+      - id: "15-async-engine"
+        name: "Async engine + OpenAI-compatible API"
+        difficulty: 3
+        insight: >
+          The engine loop must never block on HTTP, and HTTP must never block on
+          the GPU. One process runs step() forever; requests are futures/queues
+          fed into it. Real vLLM V1 pushes this further, into a separate EngineCore
+          process, so Python overhead on the API side cannot stall the GPU.
+        deliver: "/v1/chat/completions with SSE streaming, cancellation, backpressure."
+        measure: "TTFT under concurrent load; verify a client disconnect frees KV blocks."
+
+      - id: "16-observability"
+        name: "The metrics that matter"
+        difficulty: 2
+        insight: >
+          TTFT, TPOT/ITL, throughput, queue wait, KV utilization, preemption rate.
+          If you cannot see KV utilization and preemption count, you cannot tune
+          anything, and you will misdiagnose every performance problem you hit.
+        deliver: "Prometheus-style metrics + a load generator with a Poisson arrival trace."
+        measure: "A throughput/latency Pareto curve as you sweep max_num_seqs."
+
+  - id: A6
+    name: "Modern vLLM"
+    blurb: "Optional, but this is where the field currently is."
+    stages:
+      - id: "17-speculative-decoding"
+        name: "Draft, verify, reject"
+        difficulty: 5
+        insight: >
+          Decode is bandwidth-bound, so verifying K tokens costs about the same as
+          generating 1. Propose K with something cheap (n-gram lookup or a tiny
+          model), verify in one pass, accept the longest correct prefix. Modified
+          rejection sampling keeps the output distribution EXACTLY unchanged.
+        deliver: "N-gram speculator + rejection sampler + acceptance-rate telemetry."
+        measure: "Speedup vs acceptance rate. Prove the output distribution is unbiased."
+
+      - id: "18-quantization"
+        name: "Weight-only quantization"
+        difficulty: 4
+        insight: >
+          Decode reads every weight per token, so halving weight bytes nearly halves
+          decode time. INT8/FP8 weight-only with per-channel scales, dequantized in
+          the kernel epilogue. Also quantize the KV cache: it is the other big reader.
+        deliver: "INT8 weight-only linear + FP8 KV cache, with a perplexity guard."
+        measure: "tokens/sec and VRAM vs perplexity delta on a fixed text sample."
+
+      - id: "19-guided-decoding"
+        name: "Constrained output via logit masking"
+        difficulty: 4
+        insight: >
+          Compile a grammar/JSON schema to an FSM over token ids, and mask illegal
+          logits each step. The hard parts are tokenizer alignment and doing the
+          mask build off the critical path so it does not stall the GPU.
+        deliver: "JSON-schema-constrained sampling with a precomputed token mask cache."
+        measure: "100% schema-valid outputs, and the ms/step the mask costs you."
+
+      - id: "20-tensor-parallel"
+        name: "Tensor parallelism (simulated on one GPU)"
+        difficulty: 5
+        insight: >
+          Shard attention heads and MLP columns across ranks; one all-reduce per
+          layer. You have one GPU, so run 2 ranks on it with NCCL to get the
+          collectives and the sharding logic right. The lesson is where the
+          communication lands, not the speedup.
+        deliver: "Column/row-parallel Linear, 2-rank sharded model, output matches 1-rank."
+        measure: "Correctness first. Then all-reduce bytes per token per layer."

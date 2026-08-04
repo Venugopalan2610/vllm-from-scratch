@@ -1,0 +1,155 @@
+"""vc - the stage runner.
+
+    vc list              show the ladder and where you are
+    vc info              environment + roofline facts for your GPU
+    vc test [stage]      run the current stage's tests (or a named one)
+    vc pass              mark current stage complete, advance
+    vc bench             run the benchmark for the current stage
+    vc lore [stage]      print the insight you're supposed to walk away with
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+PROGRESS = ROOT / ".progress.json"
+PY = ROOT / ".venv" / "bin" / "python"
+
+
+def load_stages():
+    import yaml
+
+    data = yaml.safe_load((ROOT / "stages.yaml").read_text())
+    flat = []
+    for arc in data["arcs"]:
+        for s in arc["stages"]:
+            s["arc"] = arc["name"]
+            s["arc_id"] = arc["id"]
+            flat.append(s)
+    return data, flat
+
+
+def progress():
+    if PROGRESS.exists():
+        return json.loads(PROGRESS.read_text())
+    return {"completed": []}
+
+
+def save_progress(p):
+    PROGRESS.write_text(json.dumps(p, indent=2))
+
+
+def current_stage(flat, p):
+    for s in flat:
+        if s["id"] not in p["completed"]:
+            return s
+    return None
+
+
+C = {
+    "dim": "\033[2m", "b": "\033[1m", "g": "\033[32m", "y": "\033[33m",
+    "c": "\033[36m", "r": "\033[31m", "x": "\033[0m",
+}
+
+
+def cmd_list(flat, p):
+    _, cur = None, current_stage(flat, p)
+    arc = None
+    for s in flat:
+        if s["arc"] != arc:
+            arc = s["arc"]
+            print(f"\n{C['b']}{C['c']}{s['arc_id']}  {arc}{C['x']}")
+        done = s["id"] in p["completed"]
+        is_cur = cur and s["id"] == cur["id"]
+        mark = f"{C['g']}[x]{C['x']}" if done else (f"{C['y']}[>]{C['x']}" if is_cur else "[ ]")
+        name = f"{C['b']}{s['name']}{C['x']}" if is_cur else s["name"]
+        stars = "*" * s["difficulty"]
+        print(f"  {mark} {s['id']:<26} {name}  {C['dim']}{stars}{C['x']}")
+    n = len(p["completed"])
+    print(f"\n{C['dim']}{n}/{len(flat)} stages complete{C['x']}\n")
+
+
+def cmd_lore(flat, p, stage_id=None):
+    s = next((x for x in flat if x["id"] == stage_id), None) if stage_id else current_stage(flat, p)
+    if not s:
+        print("All stages complete.")
+        return
+    print(f"\n{C['b']}{C['c']}{s['id']}  {s['name']}{C['x']}  {C['dim']}({'*' * s['difficulty']}){C['x']}")
+    print(f"\n{C['b']}The insight{C['x']}\n  " + s["insight"].strip().replace("\n", "\n  "))
+    print(f"\n{C['b']}Deliver{C['x']}\n  {s['deliver']}")
+    print(f"\n{C['b']}Measure{C['x']}\n  {s['measure']}\n")
+
+
+def cmd_test(flat, p, stage_id=None):
+    s = next((x for x in flat if x["id"] == stage_id), None) if stage_id else current_stage(flat, p)
+    if not s:
+        print("All stages complete.")
+        return 0
+    tdir = ROOT / "tests" / f"stage_{s['id'].replace('-', '_')}"
+    if not tdir.exists():
+        print(f"{C['y']}No tests authored yet for {s['id']}.{C['x']}")
+        print(f"{C['dim']}Expected at: {tdir.relative_to(ROOT)}{C['x']}")
+        print(f"{C['dim']}Run `vc lore` for the spec, then write the test first.{C['x']}")
+        return 1
+    print(f"{C['b']}{C['c']}== {s['id']}  {s['name']} =={C['x']}\n")
+    r = subprocess.run(
+        [str(PY), "-m", "pytest", str(tdir), "-q", "--timeout=600", "-x"],
+        cwd=ROOT,
+    )
+    if r.returncode == 0:
+        print(f"\n{C['g']}{C['b']}PASS{C['x']}  -- `vc pass` to advance to the next stage.")
+    return r.returncode
+
+
+def cmd_pass(flat, p):
+    s = current_stage(flat, p)
+    if not s:
+        print("All stages complete.")
+        return
+    p["completed"].append(s["id"])
+    save_progress(p)
+    print(f"{C['g']}Completed {s['id']} - {s['name']}{C['x']}")
+    nxt = current_stage(flat, p)
+    if nxt:
+        print(f"\nNext up:")
+        cmd_lore(flat, p)
+    else:
+        print(f"\n{C['b']}You built vLLM.{C['x']}")
+
+
+def cmd_bench(flat, p):
+    s = current_stage(flat, p)
+    script = ROOT / "bench" / f"{s['id']}.py"
+    if not script.exists():
+        print(f"{C['y']}No benchmark for {s['id']} yet.{C['x']}  Measure: {s['measure']}")
+        return 1
+    return subprocess.run([str(PY), str(script)], cwd=ROOT).returncode
+
+
+def cmd_info():
+    subprocess.run([str(PY), str(ROOT / "runner" / "envinfo.py")], cwd=ROOT)
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "list"
+    arg = args[1] if len(args) > 1 else None
+    if cmd == "info":
+        return cmd_info()
+    data, flat = load_stages()
+    p = progress()
+    return {
+        "list": lambda: cmd_list(flat, p),
+        "ls": lambda: cmd_list(flat, p),
+        "lore": lambda: cmd_lore(flat, p, arg),
+        "test": lambda: sys.exit(cmd_test(flat, p, arg) or 0),
+        "pass": lambda: cmd_pass(flat, p),
+        "bench": lambda: cmd_bench(flat, p),
+    }.get(cmd, lambda: print(__doc__))()
+
+
+if __name__ == "__main__":
+    main()
