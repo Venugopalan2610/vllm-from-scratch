@@ -5,42 +5,126 @@ the system stops being a pile of tricks and becomes a series of forced moves.
 
 ---
 
-## 1. The fact: decode is memory-bound
+## 1. The fact: is this IO-bound or CPU-bound?
 
-Generating one token with a batch of 1 requires reading **every weight in the model**
-from HBM into the SMs, doing a tiny amount of math with each, and throwing it away.
+That's the whole question. It's the same question you'd ask about any service.
+Everything else in this document falls out of the answer.
 
-For a 7B model in bf16 that is ~14 GB of reads to produce **one token**.
+**No number below appears without its arithmetic.** You should never have to
+reconstruct where one came from.
+
+### The setup
+
+A 7B model is a pile of numbers ("weights") sitting in GPU RAM:
 
 ```
-time_per_token  >=  model_bytes / memory_bandwidth
+7,000,000,000 weights  x  2 bytes each (bf16)  =  14 GB
 ```
 
-On your card (~380 GB/s measured): `14 GB / 380 GB/s ~= 37 ms/token ~= 27 tok/s`.
-That is a hard ceiling. No kernel is beating it, because the data has to move.
+To generate **one token**, the GPU must read all 14 GB and do arithmetic on it.
+Two steps. Time them separately.
 
-The mirror image of this: a bf16 weight element costs 2 bytes to fetch and is
-used in exactly one multiply-add, or 2 FLOP. So batch-1 decode runs at
-**1 FLOP per byte**, while your GPU's roofline ridge point is ~125-130. You are
-using well under 1% of the compute you paid for.
+### Step 1: read the weights
 
-At batch B you fetch the weights *once* and do B times the math, so intensity is
-exactly **B FLOP/byte**. Which gives the punchline a number:
+```
+    14 GB          GB cancels, leaving seconds
+------------  =  0.037 s  =  37 ms
+  380 GB/s          ^-- your card, measured by ./vc info
+```
 
-> **Batch ~128 is roughly where decode stops being memory-bound on this GPU.**
+### Step 2: do the math
+
+Each weight is used in exactly one multiply-and-add. That's 2 operations
+per weight:
+
+```
+7e9 weights  x  2 ops  =  14e9 operations  =  14 GFLOP
+```
+
+("FLOP" = one arithmetic operation on a decimal number. Not energy. Not
+physics. Just an op, the way a request is a request.)
+
+```
+    14 GFLOP          GFLOP cancels, leaving seconds
+---------------  =  0.00028 s  =  0.28 ms
+  50,000 GFLOP/s        ^-- your card, measured by ./vc info
+```
+
+### Compare the two
+
+| Step | The division | Time |
+|---|---|---|
+| Read 14 GB of weights | `14 GB / 380 GB/s` | **37 ms** |
+| Compute on them | `14 GFLOP / 50000 GFLOP/s` | **0.28 ms** |
+
+```
+37 ms reading  /  0.28 ms computing  =  132x more time spent waiting
+```
+
+**The GPU is idle over 99% of the time, waiting for memory.** It is not
+short of arithmetic. It is short of *bytes arriving*.
+
+This is the N+1 query problem. Generating one token at a time is doing a full
+table scan to answer a single question.
+
+### The fix, and where the batch size comes from
+
+Read the weights once, answer many questions with them. If 128 requests are
+waiting, run them in the *same* pass:
+
+| | 1 request | 128 requests |
+|---|---|---|
+| Bytes read | 14 GB | **14 GB** — same weights, read once |
+| Read time | `14 / 380` = 37 ms | `14 / 380` = **37 ms** |
+| Operations | 14 GFLOP | `14 x 128` = 1792 GFLOP |
+| Compute time | `14 / 50000` = 0.28 ms | `1792 / 50000` = **36 ms** |
+| Tokens out | 1 | **128** |
+| Wall clock | ~37 ms | ~40 ms |
+
+**128x the output for the same wall-clock time**, because the expensive part
+(dragging 14 GB across the memory bus) got shared by all 128.
+
+Notice the two time columns just became equal — 37 ms reading, 36 ms computing.
+That's not a coincidence, it's where the batch size came from:
+
+```
+   37 ms of reading
+--------------------  =  132 requests before compute becomes the bottleneck
+ 0.28 ms per request
+```
+
+> **Batch ~130 is where decode stops being memory-bound on this GPU.**
+> Below it, extra requests are nearly free. Above it, you're paying for math.
 
 That is the entire argument for continuous batching, and why production servers
-set `max_num_seqs` in the hundreds. You won't quite reach it — KV cache traffic
-grows with B too — and relaxing *that* constraint is what PagedAttention is for.
+set `max_num_seqs` (the batch size knob) in the hundreds.
 
-Now the punchline. If you decode **64 sequences at once**, you read those same 14 GB
-*once* and produce **64 tokens**. The math per weight went up 64x; the bytes moved
-stayed flat. Time per step barely changes.
+You won't quite reach it, because each concurrent request also needs its own KV
+cache in VRAM, and you run out of memory before you run out of arithmetic.
+Relaxing *that* constraint is what PagedAttention is for.
 
-> **Decode throughput is almost free in batch size, until you run out of memory to
-> hold the batch.**
+### The compressed form you'll see everywhere else
 
-That single sentence generates the entire system:
+Papers and blog posts don't write out both timings. They divide them away into
+one number, **arithmetic intensity** (FLOP per byte), and compare it against the
+hardware's ratio:
+
+```
+ 50,000 GFLOP/s
+----------------  =  ~130 FLOP per byte    <- your GPU's "ridge point"
+    380 GB/s
+```
+
+Batch-1 decode does 2 ops per 2-byte weight = **1 FLOP/byte**, against a machine
+that wants 130. Same conclusion, one number instead of two timings.
+
+It's a convenience for people who do this daily. You do not need it. The two
+timings say the same thing and you can actually see them.
+
+### Everything else follows
+
+That single fact — *decode waits on memory, so extra requests are nearly free* —
+generates the entire system:
 
 - Batch as hard as possible → **continuous batching** (stage 5)
 - What limits the batch? KV cache memory → **PagedAttention** (stages 6-9)

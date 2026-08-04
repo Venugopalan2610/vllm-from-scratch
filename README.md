@@ -26,6 +26,16 @@ cd ~/vllm-from-scratch
 ./vc pass      # advance when green
 ```
 
+Stuck on why a number is what it is? `./vc math <billions-of-params> <batch>`
+prints the read-vs-compute timings with every division written out:
+
+```bash
+./vc math 7 1      # 7B model, one request:  37 ms reading, 0.25 ms computing
+./vc math 7 128    # same model, 128 at once: 37 ms reading, 33 ms computing
+```
+
+Same 37 ms of memory traffic either way — that's the whole game.
+
 You write code in `app/`. You never edit `tests/` — the tests are the spec.
 Stage 01 and 02 are wired up and passing against a reference implementation, so
 the harness is proven; `app/s01_naive.py` and `app/s02_cache.py` are stubbed for

@@ -6,6 +6,8 @@
     vc pass              mark current stage complete, advance
     vc bench             run the benchmark for the current stage
     vc lore [stage]      print the insight you're supposed to walk away with
+    vc math [B] [batch]  read-vs-compute timings for a B-billion-param model,
+                         every division shown. e.g. `vc math 7 128`
 """
 
 import json
@@ -139,6 +141,10 @@ def main():
     arg = args[1] if len(args) > 1 else None
     if cmd == "info":
         return cmd_info()
+    if cmd == "math":
+        return subprocess.run(
+            [str(PY), str(ROOT / "runner" / "timings.py")] + args[1:], cwd=ROOT
+        ).returncode
     data, flat = load_stages()
     p = progress()
     return {
