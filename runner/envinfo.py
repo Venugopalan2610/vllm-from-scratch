@@ -3,6 +3,9 @@ explain every design decision in the repo."""
 
 import torch
 
+D = "\033[2m"
+X = "\033[0m"
+
 p = torch.cuda.get_device_properties(0)
 print(f"\n\033[1m{p.name}\033[0m")
 print(f"  VRAM         {p.total_memory / 1e9:.1f} GB")
@@ -58,23 +61,35 @@ print(f"  sustained workload, so the second number is the one to plan with.")
 print(f"  It also means benchmarks you run cold will lie to you.\033[0m")
 
 ridge = tflops * 1e12 / (bw * 1e9)
-print(f"\n\033[1mMachine balance\033[0m (the roofline ridge point)")
-print(f"  {ridge:.0f} FLOP per byte of HBM traffic.")
-print(f"  \033[2mBelow this arithmetic intensity you are memory-bound; above it,")
-print(f"  compute-bound.\033[0m")
+print(f"\n\033[1mHARDWARE ratio\033[0m  {D}-- a property of this chip{X}")
+print(f"     {tflops * 1000:,.0f} GFLOP/s")
+print(f"  {'-' * 20}  =  \033[1m{ridge:.0f} FLOP per byte\033[0m")
+print(f"      {bw:.0f} GB/s")
+print(f"  {D}The /s cancels top and bottom, so this is a plain count ratio,")
+print(f"  not a rate. That is what makes it comparable to the number below.{X}")
 
-print(f"\n\033[1mWhere decode sits\033[0m")
-print(f"  A weight element is used in exactly ONE multiply-add = 2 FLOP,")
-print(f"  and in bf16 it costs 2 bytes to fetch. So batch-1 decode runs at")
-print(f"  \033[1m1 FLOP/byte\033[0m against a balance of {ridge:.0f}: about "
-      f"{100 / ridge:.1f}% of peak compute.")
-print(f"\n  At batch B you fetch the weights ONCE and do B times the math,")
-print(f"  so intensity is exactly \033[1mB FLOP/byte\033[0m. Which means:")
+print(f"\n\033[1mWORKLOAD ratio\033[0m  {D}-- a property of how you batch{X}")
+print(f"  A weight is 2 bytes (bf16) and is used in one multiply-add = 2 FLOP.")
+print(f"  With N weights and batch B, per forward pass:")
+print(f"     bytes read = 2N   {D}(weights fetched ONCE, whatever B is){X}")
+print(f"     operations = 2NB")
+print(f"\n     2NB")
+print(f"  {'-' * 8}  =  \033[1mB FLOP per byte\033[0m   {D}(the 2 and the N cancel){X}")
+print(f"      2N")
+
+print(f"\n\033[1mCompare them\033[0m")
+print(f"  B  <  {ridge:.0f}   ->  memory-bound, GPU sits waiting on bytes")
+print(f"  B  >  {ridge:.0f}   ->  compute-bound, GPU sits waiting on math")
+print(f"\n  At batch 1 the workload sits at 1, against {ridge:.0f}. "
+      f"{D}({100 / ridge:.1f}% of peak compute.){X}")
 print(f"\n    \033[1mbatch ~{ridge:.0f} is where decode stops being memory-bound.\033[0m")
 print(f"\n  \033[2mThat is the whole argument for continuous batching, and why")
 print(f"  real servers set max_num_seqs in the hundreds. (You will not quite")
 print(f"  reach it -- KV cache traffic grows with B too, and that is the")
-print(f"  constraint PagedAttention exists to relax.)\033[0m")
+print(f"  constraint PagedAttention exists to relax.)")
+print(f"\n  Neither ratio is something a profiler shows you. A profiler shows")
+print(f"  achieved RATES (GB/s, GFLOP/s). These two numbers are what you work")
+print(f"  out beforehand to predict which of those rates will be pegged.{X}")
 
 # --- what this implies for a 7B model ---
 print(f"\n\033[1mImplied ceilings\033[0m (bf16, batch=1, weights-only traffic)")

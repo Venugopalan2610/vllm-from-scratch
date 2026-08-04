@@ -105,21 +105,86 @@ Relaxing *that* constraint is what PagedAttention is for.
 
 ### The compressed form you'll see everywhere else
 
-Papers and blog posts don't write out both timings. They divide them away into
-one number, **arithmetic intensity** (FLOP per byte), and compare it against the
-hardware's ratio:
+Papers and blog posts don't write out both timings. They divide them away into a
+single number and compare it against the hardware. This is the "roofline model",
+and it trips everyone up, so here it is slowly.
+
+**Two different quantities that happen to share the same units.**
+
+|  | What it is | Changes when... |
+|---|---|---|
+| **~138 FLOP/byte** | a property of your **hardware** | you buy a different GPU |
+| **B FLOP/byte** | a property of your **workload** | you change the batch size |
+
+Neither one is something you observe by probing a running GPU. Both are computed
+on paper, in advance, and then compared. That comparison is the entire model.
+
+**Why they share units.** The hardware number is a rate divided by a rate, so
+the seconds cancel out:
 
 ```
- 50,000 GFLOP/s
-----------------  =  ~130 FLOP per byte    <- your GPU's "ridge point"
-    380 GB/s
+  57,000 GFLOP/s          GFLOP     /s
+------------------  =  ---------- x ---  =  150 FLOP per byte
+     380 GB/s               GB       /s
 ```
 
-Batch-1 decode does 2 ops per 2-byte weight = **1 FLOP/byte**, against a machine
-that wants 130. Same conclusion, one number instead of two timings.
+That leaves a plain count ratio -- FLOP per byte, no time in it -- which is
+exactly the same shape as the workload's ratio. That is the *only* reason anyone
+performs this division: to get hardware and workload onto comparable footing.
 
-It's a convenience for people who do this daily. You do not need it. The two
-timings say the same thing and you can actually see them.
+(This number bounces between ~124 and ~150 run to run on a laptop GPU as clocks
+throttle. Don't chase the exact value.)
+
+**Why the workload's ratio is exactly B.** Let `N` = number of weights, bf16:
+
+```
+Bytes moved  = 2 bytes/weight x N             = 2N     (read ONCE, whatever B is)
+Operations   = 2 ops/weight x N x B requests  = 2NB
+
+   2NB
+--------  =  B FLOP per byte        <- the 2 and the N cancel out
+    2N
+```
+
+At batch 8 you do 8 FLOP per byte fetched; at batch 128, 128. It is not a
+measurement, it is a description of the work you asked for.
+
+That clean `= B` is an accident of bf16, where 2 bytes/weight cancels
+2 ops/weight. In fp8 (1 byte/weight) it becomes `2NB / N` = **2B** -- twice the
+intensity at the same batch size. That is a second, independent reason
+quantization helps, separate from the halved read time.
+
+**It is your two timings, rearranged.** Nothing new is being said:
+
+```
+memory-bound  means   time_reading   >   time_computing
+
+                        Bytes             FLOPs
+                       -------      >    -------
+                          BW               Rate
+
+  multiply both sides by Rate, divide both sides by Bytes:
+
+                         Rate             FLOPs
+                        ------      >    -------
+                          BW              Bytes
+
+                    138 (hardware)   >   B (workload)
+```
+
+Identical inequality, terms shuffled. The intensity form is preferred only
+because the model size drops out, so one number covers every model.
+
+**What a profiler actually shows you.** Neither ratio. It shows achieved *rates*.
+Batch 1 on a 7B model:
+
+```
+memory:   14 GB     / 0.037 s  =    378 GB/s      vs    380 peak  ->  ~100% busy
+compute:  14 GFLOP  / 0.037 s  =    378 GFLOP/s   vs 57,000 peak  ->   ~0.7% busy
+```
+
+The 138 never appears in any profiler output. It is what you compute beforehand
+to predict *which of those two lines will be pegged*.
 
 ### Everything else follows
 
