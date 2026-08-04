@@ -51,6 +51,34 @@ def current_stage(flat, p):
     return None
 
 
+def resolve(flat, p, stage_id):
+    """Find the stage the user meant. Accepts '1', '01', '01-forward-pass',
+    'forward', 'kv-cache'. Returns (stage, error_message)."""
+    if stage_id is None:
+        s = current_stage(flat, p)
+        return s, None if s else "All stages complete."
+
+    q = stage_id.strip().lower()
+    for pred in (
+        lambda s: s["id"] == q,                              # exact
+        lambda s: s["id"].split("-")[0] == q.zfill(2),        # 1 -> 01
+        lambda s: s["id"].startswith(q),                      # prefix
+        lambda s: q in s["id"] or q in s["name"].lower(),      # substring
+    ):
+        hits = [s for s in flat if pred(s)]
+        if len(hits) == 1:
+            return hits[0], None
+        if len(hits) > 1:
+            ids = ", ".join(h["id"] for h in hits)
+            return None, f"{C['y']}'{stage_id}' is ambiguous:{C['x']} {ids}"
+
+    return None, (
+        f"{C['y']}No stage matching '{stage_id}'.{C['x']}\n"
+        f"{C['dim']}Try a number (1, 7), an id (07-paged-attention), or a word "
+        f"(prefix). `vc list` shows them all.{C['x']}"
+    )
+
+
 C = {
     "dim": "\033[2m", "b": "\033[1m", "g": "\033[32m", "y": "\033[33m",
     "c": "\033[36m", "r": "\033[31m", "x": "\033[0m",
@@ -75,10 +103,10 @@ def cmd_list(flat, p):
 
 
 def cmd_lore(flat, p, stage_id=None):
-    s = next((x for x in flat if x["id"] == stage_id), None) if stage_id else current_stage(flat, p)
+    s, err = resolve(flat, p, stage_id)
     if not s:
-        print("All stages complete.")
-        return
+        print(err)
+        return 1
     print(f"\n{C['b']}{C['c']}{s['id']}  {s['name']}{C['x']}  {C['dim']}({'*' * s['difficulty']}){C['x']}")
     print(f"\n{C['b']}The insight{C['x']}\n  " + s["insight"].strip().replace("\n", "\n  "))
     print(f"\n{C['b']}Deliver{C['x']}\n  {s['deliver']}")
@@ -86,10 +114,10 @@ def cmd_lore(flat, p, stage_id=None):
 
 
 def cmd_test(flat, p, stage_id=None):
-    s = next((x for x in flat if x["id"] == stage_id), None) if stage_id else current_stage(flat, p)
+    s, err = resolve(flat, p, stage_id)
     if not s:
-        print("All stages complete.")
-        return 0
+        print(err)
+        return 1
     tdir = ROOT / "tests" / f"stage_{s['id'].replace('-', '_')}"
     if not tdir.exists():
         print(f"{C['y']}No tests authored yet for {s['id']}.{C['x']}")
