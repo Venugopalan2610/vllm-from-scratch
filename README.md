@@ -39,10 +39,15 @@ you can unstick yourself, not so you can start there.
 **The oracle is real.** Correctness tests compare your output against
 HuggingFace transformers, token for token. There is no partial credit.
 
-**The measurements are real.** `./vc info` measured *your* card at 379 GB/s and
-53 TFLOP/s, which means 139 FLOP per byte of HBM traffic, which means a batch-1
-decode step wastes ~98% of your compute. Every optimization from stage 4 onward
-is a different way of spending that waste. The tests print the numbers.
+**The measurements are real.** `./vc info` measures *your* card: ~380 GB/s of
+HBM bandwidth and ~50 TFLOP/s sustained bf16, so its roofline ridge point is
+~125-130 FLOP per byte. A batch-1 decode step runs at 1 FLOP/byte — under 1% of
+peak compute. Every optimization from stage 4 onward is a different way of
+spending that waste, and the tests print the numbers as you claw it back.
+
+The same command also reports burst vs sustained TFLOP/s, because this is a
+150 W laptop GPU that boosts and then throttles. Benchmarks you run cold will
+lie to you by ~25%, which is a lesson in itself.
 
 **The failures are real.** Stage 02 has a test that demonstrates the same model
 and the same prompt producing *different sentences* in bf16 depending on whether

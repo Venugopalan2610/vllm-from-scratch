@@ -16,8 +16,22 @@ For a 7B model in bf16 that is ~14 GB of reads to produce **one token**.
 time_per_token  >=  model_bytes / memory_bandwidth
 ```
 
-On a GPU with ~430 GB/s of bandwidth: `14 GB / 430 GB/s ~= 33 ms/token ~= 30 tok/s`.
+On your card (~380 GB/s measured): `14 GB / 380 GB/s ~= 37 ms/token ~= 27 tok/s`.
 That is a hard ceiling. No kernel is beating it, because the data has to move.
+
+The mirror image of this: a bf16 weight element costs 2 bytes to fetch and is
+used in exactly one multiply-add, or 2 FLOP. So batch-1 decode runs at
+**1 FLOP per byte**, while your GPU's roofline ridge point is ~125-130. You are
+using well under 1% of the compute you paid for.
+
+At batch B you fetch the weights *once* and do B times the math, so intensity is
+exactly **B FLOP/byte**. Which gives the punchline a number:
+
+> **Batch ~128 is roughly where decode stops being memory-bound on this GPU.**
+
+That is the entire argument for continuous batching, and why production servers
+set `max_num_seqs` in the hundreds. You won't quite reach it — KV cache traffic
+grows with B too — and relaxing *that* constraint is what PagedAttention is for.
 
 Now the punchline. If you decode **64 sequences at once**, you read those same 14 GB
 *once* and produce **64 tokens**. The math per weight went up 64x; the bytes moved
