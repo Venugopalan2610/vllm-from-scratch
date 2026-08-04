@@ -14,7 +14,7 @@ class IncrementalDetokenizer:
         self.stopped = False
         self.stop_reason = None
 
-    def _decode_delta(self):
+    def _decode_delta(self, force=False):
         """vLLM's prefix/read offset trick.
 
         Decode two overlapping windows and diff them. If the new window ends in
@@ -31,7 +31,7 @@ class IncrementalDetokenizer:
         )
         if len(new_text) <= len(prefix_text):
             return ""
-        if new_text.endswith("�"):
+        if new_text.endswith("\ufffd") and not force:
             return ""                       # incomplete UTF-8, keep buffering
         delta = new_text[len(prefix_text):]
         self.prefix_offset = self.read_offset
@@ -67,6 +67,13 @@ class IncrementalDetokenizer:
         return ""
 
     def finalize(self):
+        # Generation can stop mid-codepoint (max_tokens landing between the
+        # bytes of an emoji). Batch decode emits U+FFFD there, so we must too,
+        # or streaming and non-streaming responses disagree.
+        if not self.stopped:
+            delta = self._decode_delta(force=True)
+            if delta:
+                self.text += delta
         out = self.text[len(self.emitted):]
         self.emitted = self.text
         return out

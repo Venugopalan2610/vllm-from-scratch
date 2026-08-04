@@ -65,5 +65,12 @@ class IncrementalDetokenizer:
         raise NotImplementedError
 
     def finalize(self):
-        """Emit the held-back tail. Call once, when generation ends."""
+        """Emit the held-back tail. Call once, when generation ends.
+
+        It must also FORCE-flush an incomplete codepoint. Generation can stop
+        mid-character -- max_tokens landing between the bytes of an emoji --
+        and batch decoding emits U+FFFD in that position. If you keep buffering
+        it forever, your streaming and non-streaming responses disagree on the
+        last character. (The fuzz test finds this; hand-written cases do not.)
+        """
         raise NotImplementedError
