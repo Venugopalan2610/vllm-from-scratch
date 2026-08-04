@@ -16,7 +16,7 @@ fi
 
 BAK=$(mktemp -d)
 cp app/*.py "$BAK"/ 2>/dev/null
-restore() { cp "$BAK"/*.py app/ 2>/dev/null; rm -rf "$BAK"; }
+restore() { rm -f app/*.py; cp "$BAK"/*.py app/ 2>/dev/null; rm -rf "$BAK"; }
 trap restore EXIT INT TERM
 
 cp .solutions/*.py app/ 2>/dev/null
