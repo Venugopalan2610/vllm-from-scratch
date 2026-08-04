@@ -36,6 +36,9 @@ prints the read-vs-compute timings with every division written out:
 
 Same 37 ms of memory traffic either way — that's the whole game.
 
+`./vc cliff` measures the L2-vs-VRAM bandwidth cliff on your card (~5x), which
+is what LORE Appendix A is about: what would happen if a model fit in cache.
+
 You write code in `app/`. You never edit `tests/` — the tests are the spec.
 Stage 01 and 02 are wired up and passing against a reference implementation, so
 the harness is proven; `app/s01_naive.py` and `app/s02_cache.py` are stubbed for

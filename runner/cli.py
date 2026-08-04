@@ -8,6 +8,7 @@
     vc lore [stage]      print the insight you're supposed to walk away with
     vc math [B] [batch]  read-vs-compute timings for a B-billion-param model,
                          every division shown. e.g. `vc math 7 128`
+    vc cliff             measure the L2-vs-VRAM bandwidth cliff (LORE Appendix A)
 """
 
 import json
@@ -169,6 +170,10 @@ def main():
     arg = args[1] if len(args) > 1 else None
     if cmd == "info":
         return cmd_info()
+    if cmd == "cliff":
+        return subprocess.run(
+            [str(PY), str(ROOT / "runner" / "cliff.py")], cwd=ROOT
+        ).returncode
     if cmd == "math":
         return subprocess.run(
             [str(PY), str(ROOT / "runner" / "timings.py")] + args[1:], cwd=ROOT

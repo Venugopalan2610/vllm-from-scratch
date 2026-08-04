@@ -467,3 +467,89 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
 - **Preemption** — evicting a running sequence under memory pressure (swap or recompute).
 - **Online softmax** — the running max/sum trick letting you softmax in tiles, from
   FlashAttention. You'll implement it in stage 8.
+
+---
+
+## Appendix A: "What if a model fit entirely in cache?"
+
+A reasonable thing to wonder, once you accept that decode is memory-bound: what
+if the weights were small enough to live in the GPU's on-chip cache instead of
+VRAM? Run `./vc cliff` to measure it on your own card.
+
+### The cliff is real
+
+```
+working set   achieved bandwidth
+    8 MB       1,531 GB/s   fits in 50MB L2
+   32 MB       1,985 GB/s   fits in 50MB L2
+   64 MB         412 GB/s   spills to VRAM     <- cliff
+  256 MB         380 GB/s   spills to VRAM
+```
+
+**~5x the bandwidth**, and the cliff lands exactly where L2 runs out. A
+cache-resident model really would decode ~5x faster at batch 1, and the whole
+"you must batch to ~150" argument would soften enormously.
+
+### But look what fits in 50 MB
+
+| Precision | Params that fit |
+|---|---|
+| bf16 (2 bytes) | 25M |
+| int8 (1 byte) | 50M |
+| int4 (0.5 bytes) | 100M |
+| 1.58-bit ternary | ~250M |
+
+GPT-2 small was 124M. BERT-base was 110M. "Fits in cache" means roughly
+2019-era capability. Getting frontier intelligence down there needs something
+like a 1000x gain in intelligence-per-parameter, and scaling laws run the other
+way: capability climbs roughly logarithmically in parameters.
+
+### The catch that doesn't go away
+
+Grant the magic 25M-parameter genius anyway. **The KV cache does not shrink.**
+Its size is set by context length and layer count, not parameter count. A long
+conversation is still hundreds of MB.
+
+So the bottleneck does not vanish, it *relocates*. Weights stop being the
+dominant read, KV becomes essentially all of it, and everything in stages 06-09
+-- paging, prefix sharing, eviction -- becomes **more** important, not less.
+The memory-bound problem is scale-invariant that way.
+
+### The industry already made this bet -- in silicon, not models
+
+Nobody waited for models to shrink. They built chips with enough SRAM to hold
+the model:
+
+- **Groq's LPU**: a few hundred MB of on-chip SRAM and *no external DRAM at all*.
+  The entire pitch is what the roofline predicts -- exceptional batch-1 latency,
+  because HBM is never touched.
+- **Cerebras**: wafer-scale, tens of GB of on-chip SRAM.
+
+They scale by wiring many chips together so one model spans their combined SRAM,
+and the theory holds -- the latency win is real.
+
+The open question is cost per token. GPUs claw back their bandwidth disadvantage
+through batching (the 4,000 tok/s row in section 1). SRAM machines win latency
+but need a lot of silicon per model. Whether that pencils out at scale is a live
+commercial argument, not a settled one.
+
+You cannot easily run this trick on a GPU, because L2 is a *cache*, not a
+scratchpad -- residency cannot be pinned, the hardware evicts what it likes.
+Groq uses explicitly-managed SRAM with deterministic scheduling, which is exactly
+why it works there and is awkward here.
+
+### Where the idea already pays off
+
+- **Speculative decoding** (stage 17) -- the draft model is tiny and effectively
+  cache-resident. You get the small model's speed *and* the big model's output
+  distribution. That is the closest thing to having it both ways, and it is why
+  the technique works at all.
+- **MoE** -- a 400B model with 15B active parameters per token moves 15B worth of
+  bytes, not 400B. Same instinct: cut bytes-per-token without cutting capability.
+- **On-device** -- phone NPUs running a few-hundred-MB model live in this regime
+  already.
+
+**Verdict:** the mechanism is real. The bet is not "models shrink to fit cache"
+but "hardware grows enough SRAM," and that bet is already funded and shipping.
+What kills the pure version is the KV cache, which scales with context rather
+than parameters and therefore refuses to disappear.
