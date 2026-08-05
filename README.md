@@ -120,7 +120,19 @@ dev/verify.sh 7 8      # or just some stages
 
 ## Read this first
 
-[LORE.md](LORE.md) is the conceptual spine: one physical fact about memory
+This course is the build half of a book. **[Deriving Systems](https://derivingsystems.com)**
+is the derivation half: twelve chapters working out, from arithmetic you
+can do on a napkin, why an inference engine has to look like this at all.
+Chapters 7 through 12 lead directly into these stages.
+
+- [The Ridge](https://derivingsystems.com/07-the-ridge.html) sets up stages 01-03
+- [The Cache That Ate the Batch](https://derivingsystems.com/08-kv-cache.html) sets up stage 02
+- [The Slot That Waited](https://derivingsystems.com/09-the-slot-that-waited.html) sets up stages 04-05
+- [A Page Table for Tokens](https://derivingsystems.com/10-a-page-table-for-tokens.html) sets up stages 06-09
+- [Below the Floor](https://derivingsystems.com/11-below-the-floor.html) sets up stages 03 and 12
+- [Spending the Idle](https://derivingsystems.com/12-spending-the-idle.html) sets up stage 17
+
+[LORE.md](LORE.md) is the in-repo conceptual spine: one physical fact about memory
 bandwidth, and the twenty forced moves that follow from it. Section 1 answers
 "is this IO-bound or CPU-bound?" with no jargon and every division written out.
 
