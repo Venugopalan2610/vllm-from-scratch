@@ -7,11 +7,24 @@ code runs, you advance because it got faster in the way the stage predicted.
 
 Runs entirely on one consumer GPU.
 
+## Start
+
+**Fork this repo**, then clone your fork. You want your own copy: `./vc submit`
+commits your work, and you'll want somewhere to push it.
+
+```bash
+gh repo fork Venugopalan2610/vllm-from-scratch --clone
+cd vllm-from-scratch
+./setup.sh        # python 3.12 venv + torch + the model. one time, ~5 min.
+```
+
+No GPU? Setup still works, and about half the stages still run — the allocator,
+scheduler, prefix cache, metrics, speculative sampling, guided decoding and
+tensor-parallel stages are pure logic.
+
 ## The loop
 
 ```bash
-cd ~/vllm-from-scratch
-
 ./vc              # where am I?
 ./vc guide        # what to build for this stage, and why
                   # ... now go edit the file it names ...
