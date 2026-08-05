@@ -1,0 +1,37 @@
+name: traffic
+
+# GitHub's traffic API only exposes the last 14 days. Snapshot it daily so the
+# history accumulates instead of rolling off.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch traffic
+        env:
+          # GITHUB_TOKEN usually suffices. If this 403s, create a fine-grained
+          # PAT with "Administration: read" and save it as secret TRAFFIC_TOKEN.
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN || github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/traffic/clones" > /tmp/clones.json
+          gh api "repos/${{ github.repository }}/traffic/views"  > /tmp/views.json
+
+      - name: Merge into history
+        run: python3 .github/merge_traffic.py
+
+      - name: Commit
+        run: |
+          git config user.name  "traffic-bot"
+          git config user.email "traffic-bot@users.noreply.github.com"
+          git add .traffic/history.json
+          git diff --staged --quiet || git commit -m "traffic: $(date -u +%Y-%m-%d)"
+          git push
