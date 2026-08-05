@@ -1,2 +1,7 @@
 #!/usr/bin/env bash
-exec "$(dirname "$0")/.venv/bin/python" "$(dirname "$0")/runner/cli.py" "$@"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -x "$DIR/.venv/bin/python" ]; then
+  echo "No virtualenv yet. Run:  ./setup.sh"
+  exit 1
+fi
+exec "$DIR/.venv/bin/python" "$DIR/runner/cli.py" "$@"
