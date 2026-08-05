@@ -18,10 +18,26 @@ jobs:
 
       - name: Fetch traffic
         env:
-          # GITHUB_TOKEN usually suffices. If this 403s, create a fine-grained
-          # PAT with "Administration: read" and save it as secret TRAFFIC_TOKEN.
-          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN || github.token }}
+          # The default GITHUB_TOKEN CANNOT read traffic (403) -- those
+          # endpoints need Administration:read, which Actions does not grant.
+          # A PAT is required. See the error message below for setup.
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
         run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::TRAFFIC_TOKEN secret is not set."
+            echo ""
+            echo "GitHub's traffic API needs Administration:read, which the"
+            echo "default GITHUB_TOKEN does not have. To enable this workflow:"
+            echo ""
+            echo "  1. https://github.com/settings/personal-access-tokens/new"
+            echo "  2. Repository access -> Only select repositories -> this one"
+            echo "  3. Repository permissions -> Administration -> Read-only"
+            echo "  4. gh secret set TRAFFIC_TOKEN --body '<the token>'"
+            echo ""
+            echo "Until then, run ./dev/traffic.sh locally -- your own gh login"
+            echo "already has the scope."
+            exit 1
+          fi
           gh api "repos/${{ github.repository }}/traffic/clones" > /tmp/clones.json
           gh api "repos/${{ github.repository }}/traffic/views"  > /tmp/views.json
 
