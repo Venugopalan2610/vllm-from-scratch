@@ -1,7 +1,8 @@
 name: traffic
 
-# GitHub's traffic API only exposes the last 14 days. Snapshot it daily so the
-# history accumulates instead of rolling off.
+# GitHub's traffic API only exposes the last 14 days, so snapshot it daily.
+# The history is published to the `traffic` branch -- master never receives a
+# commit from this workflow.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -20,34 +21,64 @@ jobs:
         env:
           # The default GITHUB_TOKEN CANNOT read traffic (403) -- those
           # endpoints need Administration:read, which Actions does not grant.
-          # A PAT is required. See the error message below for setup.
+          # A PAT is required; see the message below.
           GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
         run: |
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::TRAFFIC_TOKEN secret is not set."
-            echo ""
             echo "GitHub's traffic API needs Administration:read, which the"
             echo "default GITHUB_TOKEN does not have. To enable this workflow:"
-            echo ""
             echo "  1. https://github.com/settings/personal-access-tokens/new"
             echo "  2. Repository access -> Only select repositories -> this one"
             echo "  3. Repository permissions -> Administration -> Read-only"
             echo "  4. gh secret set TRAFFIC_TOKEN --body '<the token>'"
-            echo ""
-            echo "Until then, run ./dev/traffic.sh locally -- your own gh login"
-            echo "already has the scope."
+            echo "Until then, ./dev/traffic.sh works locally with your own login."
             exit 1
           fi
           gh api "repos/${{ github.repository }}/traffic/clones" > /tmp/clones.json
           gh api "repos/${{ github.repository }}/traffic/views"  > /tmp/views.json
 
-      - name: Merge into history
-        run: python3 .github/merge_traffic.py
-
-      - name: Commit
+      - name: Load existing history from the traffic branch
         run: |
-          git config user.name  "traffic-bot"
-          git config user.email "traffic-bot@users.noreply.github.com"
-          git add .traffic/history.json
-          git diff --staged --quiet || git commit -m "traffic: $(date -u +%Y-%m-%d)"
-          git push
+          git fetch origin traffic --depth=1 2>/dev/null || true
+          if git rev-parse --verify origin/traffic >/dev/null 2>&1; then
+            git show origin/traffic:history.json > /tmp/history.json
+          else
+            echo '{}' > /tmp/history.json
+          fi
+
+      - name: Merge
+        run: |
+          python3 .github/merge_traffic.py \
+            /tmp/history.json /tmp/clones.json /tmp/views.json
+
+      - name: Publish to the traffic branch
+        run: |
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          git init -q -b traffic
+          git remote add origin \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          # If the branch exists, start from it so history is preserved.
+          if git fetch -q --depth=1 origin traffic 2>/dev/null; then
+            git reset -q --soft FETCH_HEAD
+          fi
+          cp /tmp/history.json history.json
+          cat > README.md <<'EOD'
+          # traffic
+
+          Daily snapshots of this repo's clone and view counts.
+
+          GitHub's traffic API only keeps the last 14 days. A scheduled workflow
+          on `master` folds each window into `history.json`, so the record
+          accumulates instead of rolling off.
+
+          This branch is data only. Nothing here is part of the course, and
+          `master` never receives a commit from it.
+          EOD
+          git add -A
+          git -c user.name=traffic-bot \
+              -c user.email=traffic-bot@users.noreply.github.com \
+              commit -qm "traffic: $(date -u +%F)" || { echo "no change"; exit 0; }
+          git push -q origin traffic
+          echo "published to the traffic branch"

@@ -1,38 +1,40 @@
-"""Merge today's 14-day traffic window into a permanent history file.
+"""Merge one 14-day traffic window into a permanent history file.
 
-GitHub only keeps 14 days of traffic data. This runs daily, merges the new
-window into .traffic/history.json keyed by date, and never drops old entries --
-so the history grows past GitHub's window instead of rolling off it.
+    merge_traffic.py <history.json> <clones.json> <views.json>
+
+GitHub only exposes the last 14 days of traffic. This runs daily, folds the
+new window into the history keyed by date, and never drops old entries -- so
+the record grows past GitHub's window instead of rolling off it.
 """
+
 import json
-import os
 import pathlib
+import sys
 
-OUT = pathlib.Path(".traffic")
-OUT.mkdir(exist_ok=True)
-hist_path = OUT / "history.json"
-hist = json.loads(hist_path.read_text()) if hist_path.exists() else {}
+hist_path = pathlib.Path(sys.argv[1])
+raw = hist_path.read_text().strip() if hist_path.exists() else ""
+hist = json.loads(raw) if raw else {}
 
-for kind in ("clones", "views"):
-    payload = json.load(open(f"/tmp/{kind}.json"))
+for kind, src in (("clones", sys.argv[2]), ("views", sys.argv[3])):
+    payload = json.load(open(src))
     bucket = hist.setdefault(kind, {})
     for day in payload.get(kind, []):
-        # key by date; later snapshots of the same day overwrite with the
-        # more complete count
+        # Key by date. A later snapshot of the same day overwrites the earlier
+        # one, because GitHub's count for "today" is still climbing when we
+        # first see it.
         bucket[day["timestamp"][:10]] = {
             "count": day["count"],
             "uniques": day["uniques"],
         }
 
-summary = {}
-for kind in ("clones", "views"):
-    days = hist.get(kind, {})
-    summary[kind] = {
-        "days_recorded": len(days),
-        "total": sum(d["count"] for d in days.values()),
-        "total_uniques": sum(d["uniques"] for d in days.values()),
+hist["summary"] = {
+    kind: {
+        "days_recorded": len(hist.get(kind, {})),
+        "total": sum(d["count"] for d in hist.get(kind, {}).values()),
+        "total_uniques": sum(d["uniques"] for d in hist.get(kind, {}).values()),
     }
-hist["summary"] = summary
-hist_path.write_text(json.dumps(hist, indent=2, sort_keys=True))
+    for kind in ("clones", "views")
+}
 
-print(json.dumps(summary, indent=2))
+hist_path.write_text(json.dumps(hist, indent=2, sort_keys=True) + "\n")
+print(json.dumps(hist["summary"], indent=2))
