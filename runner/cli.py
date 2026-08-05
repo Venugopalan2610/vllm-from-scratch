@@ -12,7 +12,8 @@
     vc info          your GPU's roofline
     vc math [B] [n]  read-vs-compute timings, every division shown
     vc cliff         the L2-vs-VRAM bandwidth cliff
-    vc peek [stage]  show the reference solution
+    vc peek [stage]  show the reference solution (from the solutions branch)
+    vc peek [n] --apply   write it straight into the stage's file
     vc reset <n>     rewind to stage n (your code is untouched)
 """
 
@@ -300,18 +301,64 @@ def cmd_lore(flat, p, stage_id=None):
     return 0
 
 
+def solution_text(name):
+    """Reference solutions live on the `solutions` branch, not on master.
+
+    Order: a local .solutions/ checkout, then the branch, then the remote
+    branch, fetching it once if we have never seen it.
+    """
+    local = ROOT / ".solutions" / name
+    if local.exists():
+        return local.read_text()
+
+    def show(ref):
+        r = subprocess.run(["git", "show", f"{ref}:.solutions/{name}"],
+                           cwd=ROOT, capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
+
+    for ref in ("solutions", "origin/solutions"):
+        t = show(ref)
+        if t:
+            return t
+
+    print(f"{C['dim']}fetching the solutions branch...{C['x']}")
+    subprocess.run(
+        ["git", "fetch", "origin", "solutions:refs/remotes/origin/solutions"],
+        cwd=ROOT, capture_output=True,
+    )
+    return show("origin/solutions")
+
+
 def cmd_peek(flat, p, stage_id=None):
     s, err = resolve(flat, p, stage_id)
     if not s:
         print(err)
         return 1
-    src = ROOT / ".solutions" / Path(s["file"]).name
-    if not src.exists():
-        print(f"{C['y']}No reference solution for {s['id']}.{C['x']}")
+    name = Path(s["file"]).name
+    text = solution_text(name)
+    if text is None:
+        print(f"{C['y']}Could not reach the solutions branch.{C['x']}")
+        print(f"{C['dim']}Try: git fetch origin solutions{C['x']}")
         return 1
     print(f"\n{C['y']}Reference solution for {s['id']}{C['x']}")
-    print(f"{C['dim']}cp .solutions/{src.name} {s['file']}   to use it.{C['x']}\n")
-    print(src.read_text())
+    print(f"{C['dim']}To use it:  ./vc peek {stage_index(flat, s)} --apply"
+          f"   (or copy it by hand){C['x']}\n")
+    print(text)
+    return 0
+
+
+def cmd_peek_apply(flat, p, stage_id=None):
+    s, err = resolve(flat, p, stage_id)
+    if not s:
+        print(err)
+        return 1
+    text = solution_text(Path(s["file"]).name)
+    if text is None:
+        print(f"{C['y']}Could not reach the solutions branch.{C['x']}")
+        return 1
+    (ROOT / s["file"]).write_text(text)
+    print(f"{C['y']}Wrote the reference solution into {s['file']}.{C['x']}")
+    print(f"{C['dim']}Read it before you submit -- the point was the reading.{C['x']}")
     return 0
 
 
@@ -345,7 +392,7 @@ def main():
             [str(PY), str(ROOT / "runner" / "timings.py")] + args[1:],
             cwd=ROOT).returncode)
 
-    arg = args[1] if len(args) > 1 else None
+    arg = next((a for a in args[1:] if not a.startswith("-")), None)
     _, flat = load_stages()
     p = progress()
     table = {
@@ -357,7 +404,8 @@ def main():
         "list": lambda: cmd_list(flat, p),
         "ls": lambda: cmd_list(flat, p),
         "lore": lambda: cmd_lore(flat, p, arg),
-        "peek": lambda: cmd_peek(flat, p, arg),
+        "peek": lambda: (cmd_peek_apply(flat, p, arg)
+                         if "--apply" in args else cmd_peek(flat, p, arg)),
         "reset": lambda: cmd_reset(flat, p, arg),
     }
     if cmd not in table:

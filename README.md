@@ -84,22 +84,37 @@ the specific traps — lives in the docstrings of the file you're editing. Open 
 ./vc cliff            the L2-vs-VRAM bandwidth cliff
 ```
 
-Stuck? `./vc peek` prints the reference implementation. It exists so you can
-unstick yourself, not so you can start there — but a stage you peeked at beats a
-repo you abandoned.
+## If you get stuck
+
+Reference solutions exist for all 20 stages, but they are **not on this branch**.
+They live on `solutions`, so a fresh clone shows you stubs and nothing else.
+
+```bash
+./vc peek             # print this stage's reference solution
+./vc peek 7           # any stage
+./vc peek 7 --apply   # write it straight into the file
+```
+
+It fetches the branch on first use. Reach for it when you're stuck rather than
+stalling — a stage you read the answer to beats a repo you abandoned. You can
+also browse them directly:
+
+```bash
+git show solutions:.solutions/s07_paged_attn.py
+```
 
 ## Rules
 
 - You edit `app/`. You never edit `tests/` — the checks are the spec.
 - Progress lives in `.progress.json` (gitignored). Delete it to start over.
-- `.solutions/` holds a reference implementation for every stage.
 
-**All 229 checks pass against those reference implementations.** Nothing here is
+**All 229 checks pass against the reference solutions.** Nothing here is
 aspirational: if a check fails, it is your code, not the harness. Verify that
-claim yourself any time:
+claim yourself any time — it pulls the solutions branch, runs everything, and
+puts your stubs back:
 
 ```bash
-dev/verify.sh          # solutions in, whole suite, stubs restored
+dev/verify.sh          # whole suite
 dev/verify.sh 7 8      # or just some stages
 ```
 
