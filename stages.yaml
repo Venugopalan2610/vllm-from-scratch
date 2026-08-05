@@ -10,6 +10,7 @@ arcs:
     blurb: "Build the slow thing first, and measure it, so every later win is a number."
     stages:
       - id: "01-forward-pass"
+        file: "app/s01_naive.py"
         name: "Greedy decode, no cache"
         difficulty: 1
         insight: >
@@ -20,6 +21,7 @@ arcs:
         measure: "tokens/sec at 128 output tokens. This is your rock bottom."
 
       - id: "02-kv-cache"
+        file: "app/s02_cache.py"
         name: "The KV cache"
         difficulty: 2
         insight: >
@@ -30,6 +32,7 @@ arcs:
         measure: "tokens/sec (expect a large multiple of stage 1) and bytes of KV per token."
 
       - id: "03-roofline"
+        file: "app/s03_roofline.py"
         name: "Prefill vs decode: two different machines"
         difficulty: 2
         insight: >
@@ -45,6 +48,7 @@ arcs:
     blurb: "Decode is bandwidth-bound, so extra sequences are nearly free. Exploit that."
     stages:
       - id: "04-static-batching"
+        file: "app/s04_static_batch.py"
         name: "Static batching with padding"
         difficulty: 2
         insight: >
@@ -55,6 +59,7 @@ arcs:
         measure: "Throughput vs batch size, AND the % of decoded token-slots wasted on padding."
 
       - id: "05-continuous-batching"
+        file: "app/s05_continuous.py"
         name: "Continuous batching (iteration-level scheduling)"
         difficulty: 3
         insight: >
@@ -70,6 +75,7 @@ arcs:
     blurb: "The idea vLLM is named after. Virtual memory, applied to the KV cache."
     stages:
       - id: "06-block-allocator"
+        file: "app/s06_blocks.py"
         name: "Blocks, block tables, free list"
         difficulty: 3
         insight: >
@@ -82,6 +88,7 @@ arcs:
         measure: "Sequences resident in 12GB, paged vs contiguous. Expect a big jump."
 
       - id: "07-paged-attention"
+        file: "app/s07_paged_attn.py"
         name: "Attention that reads through the page table"
         difficulty: 4
         insight: >
@@ -92,6 +99,7 @@ arcs:
         measure: "Correctness vs the contiguous implementation, then the slowdown you just ate."
 
       - id: "08-paged-attention-triton"
+        file: "app/s08_paged_triton.py"
         name: "The same thing, fast"
         difficulty: 5
         insight: >
@@ -102,6 +110,7 @@ arcs:
         measure: "us/token vs stage 7, and vs real vLLM's kernel on the same shapes."
 
       - id: "09-prefix-sharing"
+        file: "app/s09_prefix.py"
         name: "Copy-on-write and automatic prefix caching"
         difficulty: 4
         insight: >
@@ -117,6 +126,7 @@ arcs:
     blurb: "You have finite KV memory and infinite requests. Decide who runs."
     stages:
       - id: "10-admission-preemption"
+        file: "app/s10_scheduler.py"
         name: "Waiting / running / swapped, and preemption"
         difficulty: 4
         insight: >
@@ -128,6 +138,7 @@ arcs:
         measure: "Behavior under overload: does throughput degrade gracefully or collapse?"
 
       - id: "11-chunked-prefill"
+        file: "app/s11_chunked.py"
         name: "Chunked prefill and mixed batches"
         difficulty: 4
         insight: >
@@ -143,6 +154,7 @@ arcs:
     blurb: "Everything left is overhead removal."
     stages:
       - id: "12-cuda-graphs"
+        file: "app/s12_cudagraph.py"
         name: "CUDA graphs for the decode step"
         difficulty: 4
         insight: >
@@ -154,6 +166,7 @@ arcs:
         measure: "us/step at batch 1, 2, 4, 8. Watch the Python tax vanish."
 
       - id: "13-sampling"
+        file: "app/s13_sampler.py"
         name: "A real batched sampler"
         difficulty: 3
         insight: >
@@ -165,6 +178,7 @@ arcs:
         measure: "Sampler ms/step at batch 64, plus a distributional test that top-p is exact."
 
       - id: "14-detokenization"
+        file: "app/s14_detokenizer.py"
         name: "Incremental detokenization and stop conditions"
         difficulty: 3
         insight: >
@@ -180,6 +194,7 @@ arcs:
     blurb: "Turn the engine into something you can curl."
     stages:
       - id: "15-async-engine"
+        file: "app/s15_server.py"
         name: "Async engine + OpenAI-compatible API"
         difficulty: 3
         insight: >
@@ -191,6 +206,7 @@ arcs:
         measure: "TTFT under concurrent load; verify a client disconnect frees KV blocks."
 
       - id: "16-observability"
+        file: "app/s16_metrics.py"
         name: "The metrics that matter"
         difficulty: 2
         insight: >
@@ -205,6 +221,7 @@ arcs:
     blurb: "Optional, but this is where the field currently is."
     stages:
       - id: "17-speculative-decoding"
+        file: "app/s17_speculative.py"
         name: "Draft, verify, reject"
         difficulty: 5
         insight: >
@@ -216,6 +233,7 @@ arcs:
         measure: "Speedup vs acceptance rate. Prove the output distribution is unbiased."
 
       - id: "18-quantization"
+        file: "app/s18_quantization.py"
         name: "Weight-only quantization"
         difficulty: 4
         insight: >
@@ -226,6 +244,7 @@ arcs:
         measure: "tokens/sec and VRAM vs perplexity delta on a fixed text sample."
 
       - id: "19-guided-decoding"
+        file: "app/s19_guided.py"
         name: "Constrained output via logit masking"
         difficulty: 4
         insight: >
@@ -236,6 +255,7 @@ arcs:
         measure: "100% schema-valid outputs, and the ms/step the mask costs you."
 
       - id: "20-tensor-parallel"
+        file: "app/s20_tensor_parallel.py"
         name: "Tensor parallelism (simulated on one GPU)"
         difficulty: 5
         insight: >
