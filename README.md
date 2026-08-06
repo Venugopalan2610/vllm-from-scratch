@@ -7,7 +7,23 @@ code runs, you advance because it got faster in the way the stage predicted.
 
 Runs entirely on one consumer GPU.
 
-## Start
+The derivations behind these stages are at
+[derivingsystems.com](https://derivingsystems.com), and
+[The Course](https://derivingsystems.com/course.html) is the whole ladder on one
+page if you want to read it before you build it.
+
+## Start without installing anything
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Venugopalan2610/vllm-from-scratch/blob/master/colab.ipynb)
+
+A free Colab T4, no local setup, about three minutes to stage 1. It also puts
+the GPU stages (8, 12, 18) within reach of a machine that can't run them.
+
+The catch is that a Colab runtime is temporary, so your work dies with the
+session. The notebook's last two cells save it, either as a download or pushed
+to your fork. Past about stage 5, do this locally instead.
+
+## Or start locally
 
 **Fork this repo**, then clone your fork. You want your own copy: `./vc submit`
 commits your work, and you'll want somewhere to push it.
