@@ -11,12 +11,118 @@ sys.path.insert(0, str(ROOT))
 
 MODEL = os.environ.get("VC_MODEL", "Qwen/Qwen3-0.6B")
 
+# JAX preallocates 75% of VRAM the moment it touches the GPU, and torch is on
+# the same card in the same session. Set before anything imports jax.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+# Stage 20 needs a multi-device mesh; one GPU is one device, so the CPU backend
+# supplies the ranks. Must be set before jax initialises its backends.
+_flags = os.environ.get("XLA_FLAGS", "")
+if "xla_force_host_platform_device_count" not in _flags:
+    os.environ["XLA_FLAGS"] = (
+        _flags + " --xla_force_host_platform_device_count=8").strip()
+
+
+# ---------------------------------------------------------------- backends
+#
+# Two tracks share this tree. A stage with a JAX twin has both a test_stage.py
+# (torch) and a test_jax.py; a stage that is pure logic -- the allocator, the
+# scheduler, the detokenizer -- has only test_stage.py and belongs to BOTH
+# tracks, because there is nothing framework-shaped in it to port.
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--backend", action="store", default=None,
+        choices=["torch", "jax", "both"],
+        help="which track to check. default: $VC_BACKEND, else torch.",
+    )
+
+
+def backend(config):
+    return (config.getoption("--backend")
+            or os.environ.get("VC_BACKEND") or "torch")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "jax: a check on the JAX track")
+
+
+def pytest_collection_modifyitems(config, items):
+    want = backend(config)
+    if want == "both":
+        return
+    keep, dropped = [], []
+    for item in items:
+        path = Path(str(item.fspath))
+        is_jax = path.name == "test_jax.py"
+        stage_has_jax_twin = (path.parent / "test_jax.py").exists()
+        if want == "jax":
+            take = is_jax or not stage_has_jax_twin
+        else:
+            take = not is_jax
+        (keep if take else dropped).append(item)
+    items[:] = keep
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+
 
 @pytest.fixture(scope="session")
 def dev():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     return "cuda"
+
+
+# ---------------------------------------------------------------- jax side
+
+@pytest.fixture(scope="session")
+def jdev():
+    """A JAX GPU device, or skip. Importing jvllm pins the allocator first."""
+    pytest.importorskip("jvllm", reason="JAX not installed -- ./setup.sh --jax")
+    import jax
+
+    if jax.default_backend() == "cpu":
+        pytest.skip("JAX sees no GPU")
+    return jax.devices()[0]
+
+
+@pytest.fixture(scope="session")
+def jmodel(jdev):
+    """Qwen3 in JAX, bf16. The counterpart of the `hf` fixture.
+
+    Use for PERFORMANCE tests. This is how you would really serve.
+    """
+    from jvllm import load_model
+
+    return load_model(MODEL)
+
+
+@pytest.fixture(scope="session")
+def jmodel_exact(jdev):
+    """Qwen3 in JAX, fp32. The counterpart of `hf_exact`, for the same reason.
+
+    In bf16, two correct implementations of greedy decode can produce
+    different SENTENCES: they reduce in different orders, logits move by ~1e-2,
+    and argmax flips wherever the top two candidates are near-tied. Correctness
+    is checked in fp32 where the margin swamps the noise.
+    """
+    import jax.numpy as jnp
+
+    from jvllm import load_model
+
+    return load_model(MODEL, dtype=jnp.float32)
+
+
+@pytest.fixture(scope="session")
+def jpallas(jdev):
+    """Skip unless a Pallas GPU backend can actually compile here."""
+    from jvllm import compat
+
+    compat.silence_pallas_deprecations()
+    kind = compat.pallas_backend()
+    if kind is None:
+        pytest.skip("no usable Pallas GPU backend on this device")
+    return kind
 
 
 def _load(dev, dtype):

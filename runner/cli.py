@@ -6,6 +6,11 @@
     vc test          run the current stage's checks
     vc submit        run the checks; if green, bank it and open the next stage
 
+  BACKENDS
+    vc backend       which track you are on: torch or jax
+    vc backend jax   switch to it. progress is tracked per track.
+    vc <cmd> --jax   one command on the other track, without switching
+
   REFERENCE
     vc list          the whole ladder
     vc lore [stage]  the one-paragraph insight for any stage
@@ -45,14 +50,66 @@ def load_stages():
     return data, flat
 
 
+BACKENDS = ("torch", "jax")
+
+
 def progress():
-    if PROGRESS.exists():
-        return json.loads(PROGRESS.read_text())
-    return {"completed": []}
+    """Progress is per TRACK. Clearing stage 08 in Triton says nothing about
+    whether you can write the same kernel in Pallas, so the two ladders are
+    banked separately and you can walk them in either order.
+
+    `p["completed"]` is the active track's list -- the same list object that
+    lives in p["tracks"], so mutating it mutates the track.
+    """
+    p = json.loads(PROGRESS.read_text()) if PROGRESS.exists() else {}
+    if "tracks" not in p:
+        p = {"backend": "torch", "tracks": {"torch": p.get("completed", [])}}
+    p.setdefault("backend", "torch")
+    for b in BACKENDS:
+        p["tracks"].setdefault(b, [])
+    p["completed"] = p["tracks"][p["backend"]]
+    p["_persist"] = p["backend"]
+    return p
+
+
+def set_backend(p, name, persist=False):
+    """`persist=False` is the `--jax` flag: act on the other track for one
+    command, then go back to where you were living."""
+    p["backend"] = name
+    p["completed"] = p["tracks"][name]
+    if persist:
+        p["_persist"] = name
+    return p
 
 
 def save_progress(p):
-    PROGRESS.write_text(json.dumps(p, indent=2))
+    PROGRESS.write_text(json.dumps(
+        {"backend": p.get("_persist", p["backend"]), "tracks": p["tracks"]},
+        indent=2))
+
+
+def stage_file(s, p):
+    """The file the learner edits for this stage, on the active track.
+
+    A stage with no `jax_file` is FRAMEWORK-FREE -- the block allocator, the
+    scheduler, the detokenizer. There is nothing to port, so both tracks build
+    and test the same file.
+    """
+    if p["backend"] == "jax":
+        return s.get("jax_file", s["file"])
+    return s["file"]
+
+
+def is_shared(s):
+    return "jax_file" not in s
+
+
+def stage_name(s, p):
+    """Two stages read differently per track: 08 is Triton or Pallas, 12 is
+    CUDA graphs or shape buckets. Everything else shares a name."""
+    if p["backend"] == "jax":
+        return s.get("jax_name", s["name"])
+    return s["name"]
 
 
 def current_stage(flat, p):
@@ -94,11 +151,22 @@ def stage_index(flat, s):
     return next(i for i, x in enumerate(flat) if x["id"] == s["id"]) + 1
 
 
-def checks_for(s):
-    """(name, one-line description) for every check in the stage."""
+def check_files(s, p):
+    """The test files that belong to the active track."""
     d = test_dir(s)
+    if not d.exists():
+        return []
+    files = sorted(d.glob("test_*.py"))
+    twin = d / "test_jax.py"
+    if p["backend"] == "jax":
+        return [twin] if twin.exists() else files
+    return [f for f in files if f.name != "test_jax.py"]
+
+
+def checks_for(s, p):
+    """(name, one-line description) for every check in the stage."""
     out = []
-    for f in sorted(d.glob("test_*.py")) if d.exists() else []:
+    for f in check_files(s, p):
         src = f.read_text()
         for m in re.finditer(r"^def (test_\w+)\(", src, re.M):
             dm = re.match(r'[^)]*\):\n\s*"""(.*?)(?:\n|""")', src[m.end():], re.S)
@@ -137,24 +205,32 @@ def cmd_guide(flat, p, stage_id=None):
     done = s["id"] in p["completed"]
 
     print(f"\n{C['b']}{C['c']}{'=' * 74}{C['x']}")
-    print(f"{C['b']}{C['c']}  Stage {idx:02d}/{total}   {s['name']}{C['x']}"
+    print(f"{C['b']}{C['c']}  Stage {idx:02d}/{total}   {stage_name(s, p)}{C['x']}"
           f"   {C['dim']}[{stars}]{C['x']}")
-    print(f"{C['dim']}  {s['arc_id']} - {s['arc']}"
+    print(f"{C['dim']}  {s['arc_id']} - {s['arc']}   [{p['backend']}]"
           + ("   (already completed)" if done else "") + f"{C['x']}")
     print(f"{C['b']}{C['c']}{'=' * 74}{C['x']}")
 
     print(f"\n{C['b']}WHY THIS STAGE EXISTS{C['x']}")
     print(wrap(" ".join(s["insight"].split())))
 
+    if p["backend"] == "jax" and s.get("jax_insight"):
+        print(f"\n{C['b']}WHAT CHANGES IN JAX{C['x']}")
+        print(wrap(" ".join(s["jax_insight"].split())))
+
     print(f"\n{C['b']}WHAT YOU'RE BUILDING{C['x']}")
-    print(wrap(s["deliver"]))
-    print(f"\n  {C['u']}{s['file']}{C['x']}"
+    print(wrap(s.get("jax_deliver", s["deliver"])
+               if p["backend"] == "jax" else s["deliver"]))
+    print(f"\n  {C['u']}{stage_file(s, p)}{C['x']}"
           f"   {C['dim']}<- edit this; the full spec is in its docstrings{C['x']}")
+    if p["backend"] == "jax" and is_shared(s):
+        print(f"  {C['dim']}(framework-free: both tracks build this same file)"
+              f"{C['x']}")
 
     print(f"\n{C['b']}HOW YOU'LL KNOW IT WORKED{C['x']}")
     print(wrap(s["measure"]))
 
-    checks = checks_for(s)
+    checks = checks_for(s, p)
     if checks:
         print(f"\n{C['b']}THE CHECKS{C['x']} {C['dim']}({len(checks)}){C['x']}")
         for name, desc in checks:
@@ -170,13 +246,13 @@ def cmd_guide(flat, p, stage_id=None):
     return 0
 
 
-def run_checks(s):
+def run_checks(s, p):
     d = test_dir(s)
     if not d.exists():
         return 1, 0, 0, f"No checks authored for {s['id']}."
     r = subprocess.run(
         [str(PY), "-m", "pytest", str(d), "-q", "--timeout=900",
-         "--no-header", "-rN"],
+         "--no-header", "-rN", "--backend", p["backend"]],
         cwd=ROOT, capture_output=True, text=True,
     )
     out = r.stdout + r.stderr
@@ -193,7 +269,7 @@ def show_failures(out, passed, failed, s):
     body = out.split("= FAILURES =")[-1] if "FAILURES" in out else out
     print(body.strip()[:4000])
     print(f"\n{C['r']}{C['b']}  {passed}/{passed + failed} checks passing{C['x']}")
-    print(f"\n  {C['dim']}Spec: {s['file']}   |   ./vc guide   |   ./vc peek{C['x']}\n")
+    print(f"\n  {C['dim']}Spec: {s['_file']}   |   ./vc guide   |   ./vc peek{C['x']}\n")
 
 
 def cmd_test(flat, p, stage_id=None):
@@ -201,9 +277,11 @@ def cmd_test(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    print(f"\n{C['b']}{C['c']}Stage {stage_index(flat, s):02d}  {s['name']}{C['x']}")
+    s = dict(s, _file=stage_file(s, p))
+    print(f"\n{C['b']}{C['c']}Stage {stage_index(flat, s):02d}  "
+          f"{stage_name(s, p)}{C['x']}   {C['dim']}[{p['backend']}]{C['x']}")
     print(f"{C['dim']}running checks...{C['x']}\n")
-    rc, passed, failed, out = run_checks(s)
+    rc, passed, failed, out = run_checks(s, p)
     if rc == 0:
         print(f"{C['g']}{C['b']}  ALL {passed} CHECKS PASSED{C['x']}")
         print(f"\n  {C['c']}./vc submit{C['x']} to bank it and open the next stage.\n")
@@ -218,9 +296,11 @@ def cmd_submit(flat, p):
         print(f"\n{C['b']}All stages complete. You built vLLM.{C['x']}\n")
         return 0
     idx = stage_index(flat, s)
-    print(f"\n{C['b']}{C['c']}Submitting stage {idx:02d}  {s['name']}{C['x']}")
+    s = dict(s, _file=stage_file(s, p))
+    print(f"\n{C['b']}{C['c']}Submitting stage {idx:02d}  "
+          f"{stage_name(s, p)}{C['x']}   {C['dim']}[{p['backend']}]{C['x']}")
     print(f"{C['dim']}running checks...{C['x']}\n")
-    rc, passed, failed, out = run_checks(s)
+    rc, passed, failed, out = run_checks(s, p)
 
     if rc != 0:
         show_failures(out, passed, failed, s)
@@ -234,7 +314,8 @@ def cmd_submit(flat, p):
     # harness edits and anything else lying around, and a later rewind would
     # throw them away along with the stage.
     subprocess.run(["git", "add", "app/"], cwd=ROOT, capture_output=True)
-    msg = f"stage {idx:02d} complete: {s['name']}"
+    track = "" if p["backend"] == "torch" else f" [{p['backend']}]"
+    msg = f"stage {idx:02d} complete: {stage_name(s, p)}{track}"
     cm = subprocess.run(
         ["git", "-c", "user.email=you@localhost", "-c", "user.name=you",
          "commit", "-m", msg],
@@ -258,16 +339,47 @@ def cmd_submit(flat, p):
 def cmd_status(flat, p):
     s = current_stage(flat, p)
     n, total = len(p["completed"]), len(flat)
-    print(f"\n  {bar(n, total)}  {n}/{total} stages complete")
+    other = "jax" if p["backend"] == "torch" else "torch"
+    print(f"\n  {bar(n, total)}  {n}/{total} stages complete"
+          f"  {C['dim']}[{p['backend']}]{C['x']}")
+    print(f"  {C['dim']}{other}: {len(p['tracks'][other])}/{total}"
+          f"   (./vc backend {other}){C['x']}")
     if not s:
         print(f"\n  {C['b']}All done. You built vLLM.{C['x']}\n")
         return 0
-    print(f"\n  {C['b']}Current: stage {stage_index(flat, s):02d}  {s['name']}{C['x']}")
-    print(f"  {C['dim']}{s['file']}{C['x']}")
+    print(f"\n  {C['b']}Current: stage {stage_index(flat, s):02d}  "
+          f"{stage_name(s, p)}{C['x']}")
+    print(f"  {C['dim']}{stage_file(s, p)}{C['x']}")
     print(f"\n  {C['c']}./vc guide{C['x']}   what to build and why")
     print(f"  {C['c']}./vc test{C['x']}    run the checks")
     print(f"  {C['c']}./vc submit{C['x']}  bank it, open the next stage\n")
     return 0
+
+
+def cmd_backend(flat, p, name=None):
+    if name is None:
+        print(f"\n  backend: {C['b']}{p['backend']}{C['x']}")
+        for b in BACKENDS:
+            mark = ">" if b == p["backend"] else " "
+            print(f"  {mark} {b:<6} {len(p['tracks'][b])}/{len(flat)} stages")
+        print(f"\n  {C['dim']}./vc backend jax   switch tracks"
+              f"   |   ./vc test --jax   just this once{C['x']}\n")
+        return 0
+    if name not in BACKENDS:
+        print(f"{C['y']}Unknown backend '{name}'.{C['x']} "
+              f"Pick one of: {', '.join(BACKENDS)}")
+        return 1
+    if name == "jax":
+        try:
+            subprocess.run([str(PY), "-c", "import jax"], check=True,
+                           capture_output=True)
+        except subprocess.CalledProcessError:
+            print(f"{C['y']}JAX is not installed.{C['x']} "
+                  f"{C['dim']}Run: ./setup.sh --jax{C['x']}")
+            return 1
+    save_progress(set_backend(p, name, persist=True))
+    print(f"{C['g']}Switched to the {name} track.{C['x']}")
+    return cmd_status(flat, p)
 
 
 def cmd_list(flat, p):
@@ -281,10 +393,15 @@ def cmd_list(flat, p):
         is_cur = cur and s["id"] == cur["id"]
         mark = (f"{C['g']}[x]{C['x']}" if done
                 else f"{C['y']}[>]{C['x']}" if is_cur else "[ ]")
-        name = f"{C['b']}{s['name']}{C['x']}" if is_cur else s["name"]
+        nm = stage_name(s, p)
+        name = f"{C['b']}{nm}{C['x']}" if is_cur else nm
+        tag = ""
+        if p["backend"] == "jax":
+            tag = f"  {C['dim']}{'shared' if is_shared(s) else 'jax'}{C['x']}"
         print(f"  {mark} {i:02d} {s['id']:<26} {name}  "
-              f"{C['dim']}{'*' * s['difficulty']}{C['x']}")
-    print(f"\n{C['dim']}{len(p['completed'])}/{len(flat)} complete{C['x']}\n")
+              f"{C['dim']}{'*' * s['difficulty']}{C['x']}{tag}")
+    print(f"\n{C['dim']}{len(p['completed'])}/{len(flat)} complete "
+          f"on the {p['backend']} track{C['x']}\n")
     return 0
 
 
@@ -293,10 +410,15 @@ def cmd_lore(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    print(f"\n{C['b']}{C['c']}{s['id']}  {s['name']}{C['x']}  "
+    print(f"\n{C['b']}{C['c']}{s['id']}  {stage_name(s, p)}{C['x']}  "
           f"{C['dim']}({'*' * s['difficulty']}){C['x']}")
     print(f"\n{C['b']}The insight{C['x']}\n" + wrap(" ".join(s["insight"].split())))
-    print(f"\n{C['b']}Deliver{C['x']}\n  {s['deliver']}")
+    if p["backend"] == "jax" and s.get("jax_insight"):
+        print(f"\n{C['b']}In JAX{C['x']}\n"
+              + wrap(" ".join(s["jax_insight"].split())))
+    print(f"\n{C['b']}Deliver{C['x']}\n  "
+          + (s.get("jax_deliver", s["deliver"]) if p["backend"] == "jax"
+             else s["deliver"]))
     print(f"\n{C['b']}Measure{C['x']}\n  {s['measure']}\n")
     return 0
 
@@ -334,7 +456,7 @@ def cmd_peek(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    name = Path(s["file"]).name
+    name = Path(stage_file(s, p)).name
     text = solution_text(name)
     if text is None:
         print(f"{C['y']}Could not reach the solutions branch.{C['x']}")
@@ -352,12 +474,13 @@ def cmd_peek_apply(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    text = solution_text(Path(s["file"]).name)
+    target = stage_file(s, p)
+    text = solution_text(Path(target).name)
     if text is None:
         print(f"{C['y']}Could not reach the solutions branch.{C['x']}")
         return 1
-    (ROOT / s["file"]).write_text(text)
-    print(f"{C['y']}Wrote the reference solution into {s['file']}.{C['x']}")
+    (ROOT / target).write_text(text)
+    print(f"{C['y']}Wrote the reference solution into {target}.{C['x']}")
     print(f"{C['dim']}Read it before you submit -- the point was the reading.{C['x']}")
     return 0
 
@@ -395,7 +518,15 @@ def main():
     arg = next((a for a in args[1:] if not a.startswith("-")), None)
     _, flat = load_stages()
     p = progress()
+
+    # `--jax` / `--torch` on any command: run it against the other track
+    # WITHOUT switching. Handy for `./vc test 8 --jax` while you live in torch.
+    for b in BACKENDS:
+        if f"--{b}" in args:
+            set_backend(p, b)
+
     table = {
+        "backend": lambda: cmd_backend(flat, p, arg),
         "status": lambda: cmd_status(flat, p),
         "guide": lambda: cmd_guide(flat, p, arg),
         "start": lambda: cmd_guide(flat, p, arg),

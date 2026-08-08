@@ -5,7 +5,9 @@ CUDA-graphed, speculatively-decoding inference server. Every stage is gated by
 checks, and most are gated by a **measurement** — you don't advance because your
 code runs, you advance because it got faster in the way the stage predicted.
 
-Runs entirely on one consumer GPU.
+Runs entirely on one consumer GPU. **In PyTorch or in JAX** — the same ladder,
+two backends, and about half the stages are shared between them because they
+are pure logic and no framework appears in them at all.
 
 The derivations behind these stages are at
 [derivingsystems.com](https://derivingsystems.com), and
@@ -32,6 +34,7 @@ commits your work, and you'll want somewhere to push it.
 gh repo fork Venugopalan2610/vllm-from-scratch --clone
 cd vllm-from-scratch
 ./setup.sh        # python 3.12 venv + torch + the model. one time, ~5 min.
+./setup.sh --jax  # ...and JAX, if you want the second track. +~400MB.
 ```
 
 No GPU? Setup still works, and about half the stages still run — the allocator,
@@ -53,6 +56,41 @@ stage by accident. When it passes it commits **only `app/`** — your work — a
 prints the next stage's guide.
 
 That's the whole thing. Everything below is reference.
+
+## Two tracks
+
+```bash
+./vc backend          which track you're on, and how far you got on each
+./vc backend jax      switch. progress is banked per track.
+./vc test 8 --jax     one command on the other track, without switching
+```
+
+The JAX track walks the same twenty stages with the same insights and the same
+measurements. Eleven of them get a JAX twin — you edit `app/j08_paged_pallas.py`
+instead of `app/s08_paged_triton.py`, and `./vc guide` points you at the right
+one. The other nine are **framework-free**: the block allocator, prefix cache,
+scheduler, chunked prefill, detokenizer, async server, metrics, speculative
+decoding and guided decoding contain no tensors worth porting, so both tracks
+build and test the identical file.
+
+| | torch track | jax track |
+|---|---|---|
+| model | HuggingFace `transformers` | `jvllm/model.py`, ~250 lines of jnp |
+| KV cache | grows by concatenation | preallocated, written into |
+| stage 08 kernel | Triton | Pallas |
+| stage 12 | CUDA graphs, to delete launch overhead | shape buckets, to delete recompiles |
+| stage 20 | 2 gloo ranks on CPU | `shard_map` over a CPU device mesh |
+
+`jvllm/` is provided, like `tests/helpers.py` — the JAX track needs a Qwen3 to
+build on and there is no Flax one, so there is one here. Read
+`jvllm/model.py` before stage 01; the cache API it hands you is why the two
+ladders diverge where they do. [LORE.md §10](LORE.md) is the full argument.
+
+Why bother, if the ideas are the same? Because the ideas being the same is the
+finding. Bucketing shapes is not a CUDA trick — you rediscover it on the JAX
+track for a completely unrelated reason. And the nine shared stages are a
+direct measurement of how much of an inference engine is actually framework
+code: not much.
 
 ## What a guide looks like
 
@@ -124,15 +162,19 @@ git show solutions:.solutions/s07_paged_attn.py
 - You edit `app/`. You never edit `tests/` — the checks are the spec.
 - Progress lives in `.progress.json` (gitignored). Delete it to start over.
 
-**All 229 checks pass against the reference solutions.** Nothing here is
-aspirational: if a check fails, it is your code, not the harness. Verify that
-claim yourself any time — it pulls the solutions branch, runs everything, and
-puts your stubs back:
+**All 289 torch checks and all 282 JAX checks pass against the reference
+solutions.** Nothing here is aspirational: if a check fails, it is your code,
+not the harness. Verify that claim yourself any time — it pulls the solutions
+branch, runs everything, and puts your stubs back:
 
 ```bash
-dev/verify.sh          # whole suite
+dev/verify.sh          # whole suite, torch track
+dev/verify.sh --jax    # whole suite, jax track
 dev/verify.sh 7 8      # or just some stages
 ```
+
+Run the two tracks as separate invocations rather than `--both`: together they
+want four models resident on one card.
 
 ## Read this first
 
@@ -158,7 +200,7 @@ bandwidth, and the twenty forced moves that follow from it. Section 1 answers
 |---|---|---|
 | A0 | 01-03 | Naive loop, KV cache, and the roofline that explains everything |
 | A1 | 04-05 | Static batching, then continuous batching (the Orca idea) |
-| A2 | 06-09 | **PagedAttention**: block allocator, Triton kernel, prefix caching |
+| A2 | 06-09 | **PagedAttention**: block allocator, Triton/Pallas kernel, prefix caching |
 | A3 | 10-11 | Scheduler: admission, preemption, chunked prefill |
 | A4 | 12-14 | CUDA graphs, batched sampler, streaming detokenization |
 | A5 | 15-16 | Async engine, OpenAI-compatible API, the metrics that matter |
@@ -180,3 +222,8 @@ just got slow" in production.
   right; on one GPU there is no speedup to be had.
 - No system CUDA toolkit needed — Triton ships its own compiler and PyTorch
   bundles its runtime.
+- On the JAX track, Pallas's default Mosaic GPU backend needs sm_90+, so stage
+  08 goes through the older Triton backend — which JAX gates on a hardcoded
+  allowlist of device kinds that no laptop GPU is on. `jvllm/compat.py` reads
+  your card's compute capability and registers it. If neither backend can
+  compile, stage 08's checks skip rather than fail.

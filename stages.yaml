@@ -19,6 +19,13 @@ arcs:
           recompute every previous token's K and V on every single step.
         deliver: "generate() that emits tokens one at a time from a HF model."
         measure: "tokens/sec at 128 output tokens. This is your rock bottom."
+        jax_file: "app/j01_naive.py"
+        jax_insight: >
+          Same quadratic recompute, but you feel the OTHER cost immediately:
+          every new prompt length is a new shape, and every new shape is an
+          XLA compile. The naive loop in JAX is slow twice over, and only one
+          of those two is the algorithm's fault.
+        jax_deliver: "naive_generate() over jvllm's Qwen3, no cache, one token at a time."
 
       - id: "02-kv-cache"
         file: "app/s02_cache.py"
@@ -30,6 +37,14 @@ arcs:
           This is also the moment memory becomes your enemy instead of compute.
         deliver: "Per-sequence contiguous KV cache; decode attends over cache+new token."
         measure: "tokens/sec (expect a large multiple of stage 1) and bytes of KV per token."
+        jax_file: "app/j02_cache.py"
+        jax_insight: >
+          torch hands you a cache that grows by concatenation. XLA compiles for
+          exact shapes, so a growing cache means a recompile per token. The JAX
+          cache is PREALLOCATED to max_len and written into with a dynamic
+          slice: shapes never change, one compile serves the whole decode.
+          You now own the bookkeeping torch was doing for you.
+        jax_deliver: "Preallocated (layers, B, max_len, kv_heads, head_dim) cache, written at cache_len."
 
       - id: "03-roofline"
         file: "app/s03_roofline.py"
@@ -42,6 +57,13 @@ arcs:
           This is THE fact that explains every design decision downstream.
         deliver: "A microbenchmark separating prefill ms/token from decode ms/token."
         measure: "Achieved GB/s during decode vs your GPU's peak. You'll be near peak."
+        jax_file: "app/j03_roofline.py"
+        jax_insight: >
+          Same roofline, one new trap: JAX dispatch is ASYNCHRONOUS. A timing
+          loop without block_until_ready() measures how fast Python can enqueue
+          work, which on a small model looks like a 50x speedup that isn't
+          there. Warm up separately too, or you time the XLA compiler.
+        jax_deliver: "Prefill vs decode ms/token, with compile excluded and the device actually waited on."
 
   - id: A1
     name: "Batching"
@@ -57,6 +79,14 @@ arcs:
           finishes, and short sequences sit padded and idle, burning the slot.
         deliver: "Left-padded batch of N prompts, shared decode loop, attention mask."
         measure: "Throughput vs batch size, AND the % of decoded token-slots wasted on padding."
+        jax_file: "app/j04_static_batch.py"
+        jax_insight: >
+          torch left-pads so the last index is everyone's last real token. With
+          a written-into cache you RIGHT-pad instead: each row's prompt starts
+          at slot 0, and you read logits from a per-row index. Padding still
+          costs you the same wasted compute -- that part is not a layout
+          problem, it is the batch shape itself.
+        jax_deliver: "Right-padded batch, per-row cache_len and logits_index, shared decode loop."
 
       - id: "05-continuous-batching"
         file: "app/s05_continuous.py"
@@ -69,6 +99,14 @@ arcs:
           and it is the single largest throughput win in this entire repo.
         deliver: "A step() loop over a mutable running-set; requests join and leave mid-flight."
         measure: "Throughput on a Poisson arrival trace + p50/p99 latency vs stage 4."
+        jax_file: "app/j05_continuous.py"
+        jax_insight: >
+          Eviction is where the two tracks really part. torch re-indexes the
+          cache tensor and gets a new shape; you cannot, because the shape is
+          the compilation. So a finished row's SLOT is reused in place: the
+          batch dimension is fixed and rows are occupied or free. That is
+          already half of the block allocator you build in stage 06.
+        jax_deliver: "Fixed-width slot table, admit into a free slot, evict by marking free."
 
   - id: A2
     name: "PagedAttention"
@@ -97,6 +135,13 @@ arcs:
           it CORRECT, then keep that as the reference oracle forever.
         deliver: "paged_attn() in pure PyTorch, bit-comparable to stage 2's output."
         measure: "Correctness vs the contiguous implementation, then the slowdown you just ate."
+        jax_file: "app/j07_paged_attn.py"
+        jax_insight: >
+          No Python loop over sequences this time -- jnp.take on the block
+          table gathers every sequence's blocks at once, and vmap handles the
+          batch. It is still the slow reference implementation, because it
+          materialises the whole gathered K/V, but it is the oracle.
+        jax_deliver: "paged_attention() in jnp: gather by block table, mask, softmax."
 
       - id: "08-paged-attention-triton"
         file: "app/s08_paged_triton.py"
@@ -108,6 +153,16 @@ arcs:
           attention is bandwidth-bound, so your kernel's job is coalesced reads.
         deliver: "A Triton paged decode kernel that beats the PyTorch version."
         measure: "us/token vs stage 7, and vs real vLLM's kernel on the same shapes."
+        jax_file: "app/j08_paged_pallas.py"
+        jax_name: "The same thing, fast (Pallas)"
+        jax_insight: >
+          Pallas is the same idea as Triton with a different surface: you get
+          Refs and BlockSpecs instead of raw pointers and strides, and an
+          index_map decides which tile each program sees. The online softmax is
+          identical. What changes is that the block table lookup has to happen
+          INSIDE the kernel, so you read the cache with a computed index rather
+          than letting a BlockSpec do it for you.
+        jax_deliver: "A Pallas paged decode kernel that beats the jnp version."
 
       - id: "09-prefix-sharing"
         file: "app/s09_prefix.py"
@@ -164,6 +219,16 @@ arcs:
           pad up to the nearest bucket.
         deliver: "Graph capture per bucket, replay path, eager fallback."
         measure: "us/step at batch 1, 2, 4, 8. Watch the Python tax vanish."
+        jax_file: "app/j12_compiled.py"
+        jax_name: "Killing recompilation with shape buckets"
+        jax_insight: >
+          JAX has no launch overhead to remove -- XLA already fused the step
+          into one graph. Its equivalent tax is RECOMPILATION: every distinct
+          batch size traces and compiles from scratch, seconds each, on the
+          critical path. Same fix as CUDA graphs for a different reason: pad to
+          bucketed shapes so the compilation cache hits. Then donate the
+          buffers, so the cache is updated in place instead of copied.
+        jax_deliver: "Bucketed AOT compile + donate_argnums, with a compile counter proving cache hits."
 
       - id: "13-sampling"
         file: "app/s13_sampler.py"
@@ -176,6 +241,13 @@ arcs:
           kernels are fast.
         deliver: "Vectorized temp/top-k/top-p/repetition penalty, per-request seeded RNG."
         measure: "Sampler ms/step at batch 64, plus a distributional test that top-p is exact."
+        jax_file: "app/j13_sampler.py"
+        jax_insight: >
+          JAX has no global RNG, and that turns out to be the right shape for a
+          server: per-request seeds are just per-row PRNG keys, split and
+          carried with the request. Gumbel-max then samples the whole batch in
+          one vectorized pass, with each row's draw reproducible on its own.
+        jax_deliver: "Vectorized temp/top-k/top-p/penalty, one PRNG key per request."
 
       - id: "14-detokenization"
         file: "app/s14_detokenizer.py"
@@ -242,6 +314,14 @@ arcs:
           the kernel epilogue. Also quantize the KV cache: it is the other big reader.
         deliver: "INT8 weight-only linear + FP8 KV cache, with a perplexity guard."
         measure: "tokens/sec and VRAM vs perplexity delta on a fixed text sample."
+        jax_file: "app/j18_quantization.py"
+        jax_insight: >
+          Same arithmetic, but the model is a pytree, not a module tree, so
+          quantizing it is a tree_map instead of a walk over named_modules.
+          Watch that the dequantize stays FUSED into the matmul -- if XLA
+          materialises the bf16 weight first you have added a full-size write
+          and read, and made decode slower rather than faster.
+        jax_deliver: "int8 per-channel and fp8 e4m3 over the params pytree, with a perplexity guard."
 
       - id: "19-guided-decoding"
         file: "app/s19_guided.py"
@@ -265,3 +345,10 @@ arcs:
           communication lands, not the speedup.
         deliver: "Column/row-parallel Linear, 2-rank sharded model, output matches 1-rank."
         measure: "Correctness first. Then all-reduce bytes per token per layer."
+        jax_file: "app/j20_tensor_parallel.py"
+        jax_insight: >
+          This is the stage JAX makes honest. shard_map gives you real devices,
+          real shardings and a real psum -- not a Python loop pretending to be
+          ranks. Column-parallel then row-parallel with exactly one psum
+          between blocks, expressed as a mesh and two PartitionSpecs.
+        jax_deliver: "shard_map MLP and attention over a multi-device CPU mesh, one psum per block."

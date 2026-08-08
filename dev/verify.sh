@@ -5,10 +5,29 @@
 # Solutions live on the `solutions` branch, not on master. This pulls them
 # from there (or from a local .solutions/ if you have one checked out).
 #
-#   dev/verify.sh          all stages
-#   dev/verify.sh 7 8      just those
+#   dev/verify.sh              all stages, torch track
+#   dev/verify.sh 7 8          just those
+#   dev/verify.sh --jax        the JAX track (shared stages included)
+#   dev/verify.sh --both       both tracks, in ONE pytest run
+#   dev/verify.sh --jax 7 8    combine freely
+#
+# --both loads four models onto one GPU (torch bf16 + fp32, jax bf16 + fp32).
+# On a 12GB card that is tight; running the tracks as two invocations is safer
+# and is what CI does.
 set -u
 cd "$(dirname "$0")/.."
+
+BACKEND=torch
+args=()
+for a in "$@"; do
+  case "$a" in
+    --jax)   BACKEND=jax ;;
+    --torch) BACKEND=torch ;;
+    --both)  BACKEND=both ;;
+    *)       args+=("$a") ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
 
 if grep -lq "Reference solution" app/*.py 2>/dev/null; then
   echo "ERROR: app/ already contains reference solutions, not stubs:"
@@ -40,12 +59,13 @@ restore() { rm -f app/*.py; cp "$BAK"/*.py app/ 2>/dev/null; rm -rf "$BAK" "$SOL
 trap restore EXIT INT TERM
 
 cp "$SOL"/*.py app/
+echo "==> backend: $BACKEND"
 if [ $# -eq 0 ]; then
-  .venv/bin/python -m pytest tests/ -q --timeout=900
+  .venv/bin/python -m pytest tests/ -q --timeout=900 --backend "$BACKEND"
 else
   dirs=""
   for s in "$@"; do
     dirs="$dirs $(ls -d tests/stage_$(printf '%02d' "$s")_* 2>/dev/null)"
   done
-  .venv/bin/python -m pytest $dirs -q --timeout=900
+  .venv/bin/python -m pytest $dirs -q --timeout=900 --backend "$BACKEND"
 fi

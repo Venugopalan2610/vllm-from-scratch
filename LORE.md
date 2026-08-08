@@ -470,6 +470,89 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
 
 ---
 
+## 10. The second track: what changes when shapes are frozen
+
+Everything above is about a physical fact — memory bandwidth — and the moves it
+forces. None of it depends on PyTorch. But the *shape* of the code that
+implements those moves depends enormously on whether your framework dispatches
+kernels at runtime or compiles programs ahead of time.
+
+Run `./vc backend jax` and you rebuild the ladder on XLA. Eleven of the twenty
+stages get a JAX twin; the other nine — the allocator, prefix cache, scheduler,
+chunked prefill, detokenizer, server, metrics, speculative decoding, guided
+decoding — are pure logic and are literally the same file on both tracks. That
+split is itself the lesson: **most of an inference engine is not framework
+code.** The bookkeeping is the product.
+
+Where the twins diverge, they diverge from one root cause.
+
+### XLA compiles for exact shapes
+
+PyTorch dispatches a kernel per op, at runtime, from whatever shape the tensor
+happens to have. XLA compiles a whole program for one specific set of shapes,
+and a different set means a different program — traced and compiled from
+scratch, seconds of wall clock, on the critical path.
+
+So the tax you are trying to remove is not the same tax:
+
+| | torch | jax |
+|---|---|---|
+| stage 12's enemy | thousands of kernel launches per step | one compile per unseen shape |
+| the fix | CUDA graphs | shape buckets + AOT compile |
+| what makes it work | static pointers and shapes | static shapes |
+
+Same fix. Completely different reason. That is worth sitting with, because it
+is the strongest evidence that bucketing is not a CUDA trick — it is what you
+do whenever the cost of *preparing* to run work is large compared to the work.
+
+### The KV cache stops being a thing you grow
+
+torch hands you a cache one token longer each step. In JAX that is a recompile
+per token, so the cache is **preallocated to max_len and written into** with a
+dynamic slice. Shapes never change; one compile serves the whole decode.
+
+Which drags four stages sideways:
+
+- **02** — you own the cache. `init_cache(batch, max_len)`, and you carry
+  `cache_len` yourself. Round max_len up to a bucket and prompts of 200 and 250
+  tokens share a compiled decode step. Stage 12's idea, arrived at on stage 2.
+- **04** — right-pad instead of left-pad, and read logits from a per-row index.
+  The padding waste is identical; only the layout moved.
+- **05** — eviction cannot shrink the batch, because the batch dimension *is*
+  the compilation. So the batch is a fixed **slot table**: finishing frees a
+  slot, admitting fills one, nothing is copied. That is a page table with one
+  page per sequence, two stages before you build the real one.
+- **05, again** — a step costs the same whether one slot is busy or eight.
+  Continuous batching's win therefore shows up entirely as **useful tokens per
+  forward pass**, not as faster steps. On this track, occupancy is the whole
+  game.
+
+### Two places the JAX version is simply better
+
+- **Stage 08** is Pallas rather than Triton, and the online softmax is
+  identical. What changes is that the block-table lookup has to happen inside
+  the kernel, with a computed index, because no BlockSpec can express "which
+  page do I need? ask the page table."
+- **Stage 20** stops being a simulation. `shard_map` over a mesh of CPU devices
+  gives you real shardings and a real `psum`, so "column-parallel then
+  row-parallel, exactly one all-reduce" becomes two PartitionSpecs you can
+  read — and the test counts the collectives in the compiled HLO to prove
+  there is exactly one.
+
+### And one place it is honestly worse
+
+The preallocated cache is rewritten functionally every step, per layer, inside
+the scan. So decode time grows with the ceiling you *chose*, not the context
+you *hold* — roughly 1.3x from a 128-slot cache to a 1024-slot one, where the
+torch track is nearly flat. Buffer donation does not fix it; the copy is inside
+the scan.
+
+What fixes it is making the buffer granular so a step only touches the blocks
+it needs. Which is PagedAttention. The JAX track gives you a reason to want
+stages 06-09 before you get there.
+
+---
+
 ## Appendix A: "What if a model fit entirely in cache?"
 
 A reasonable thing to wonder, once you accept that decode is memory-bound: what
