@@ -4,6 +4,7 @@ __pycache__/
 .progress.json
 .measurements.json
 .pytest_cache/
+.cudacache/
 
 # runtime
 .venv/

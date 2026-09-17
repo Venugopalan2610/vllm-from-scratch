@@ -29,16 +29,16 @@ for a in "$@"; do
 done
 set -- ${args[@]+"${args[@]}"}
 
-if grep -lq "Reference solution" app/*.py 2>/dev/null; then
+if grep -lq "Reference solution" app/*.py app/cuda/*.cu 2>/dev/null; then
   echo "ERROR: app/ already contains reference solutions, not stubs:"
-  grep -l "Reference solution" app/*.py
+  grep -l "Reference solution" app/*.py app/cuda/*.cu
   echo "Restore them with: git checkout -- app/"
   exit 2
 fi
 
 SOL=$(mktemp -d)
 if [ -d .solutions ]; then
-  cp .solutions/*.py "$SOL"/
+  cp .solutions/*.py .solutions/*.cu "$SOL"/ 2>/dev/null
 else
   REF=solutions
   git rev-parse --verify --quiet "$REF" >/dev/null || REF=origin/solutions
@@ -53,19 +53,35 @@ else
   done
 fi
 
+# The CUDA stages are two files each: a .cu kernel and a .py wrapper. Back up
+# and restore both, or a run leaves the reference kernels sitting in app/.
 BAK=$(mktemp -d)
+mkdir -p "$BAK/cuda"
 cp app/*.py "$BAK"/ 2>/dev/null
-restore() { rm -f app/*.py; cp "$BAK"/*.py app/ 2>/dev/null; rm -rf "$BAK" "$SOL"; }
+cp app/cuda/*.cu "$BAK/cuda"/ 2>/dev/null
+restore() {
+  rm -f app/*.py app/cuda/*.cu
+  cp "$BAK"/*.py app/ 2>/dev/null
+  cp "$BAK"/cuda/*.cu app/cuda/ 2>/dev/null
+  rm -rf "$BAK" "$SOL"
+}
 trap restore EXIT INT TERM
 
 cp "$SOL"/*.py app/
+cp "$SOL"/*.cu app/cuda/ 2>/dev/null
 echo "==> backend: $BACKEND"
 if [ $# -eq 0 ]; then
   .venv/bin/python -m pytest tests/ -q --timeout=900 --backend "$BACKEND"
 else
   dirs=""
   for s in "$@"; do
-    dirs="$dirs $(ls -d tests/stage_$(printf '%02d' "$s")_* 2>/dev/null)"
+    # accepts 7, 07, 8b and 08b. A sub-stage carries a letter, so pad the
+    # digits and keep the letter where it was.
+    n=$(printf '%s' "$s" | tr -cd '[:digit:]')
+    n=$((10#$n))                       # "08" is not octal here
+    a=$(printf '%s' "$s" | tr -cd '[:alpha:]')
+    pat="tests/stage_$(printf '%02d' "$n")${a}_*"
+    dirs="$dirs $(ls -d $pat 2>/dev/null)"
   done
   .venv/bin/python -m pytest $dirs -q --timeout=900 --backend "$BACKEND"
 fi

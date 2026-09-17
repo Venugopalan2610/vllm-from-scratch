@@ -17,6 +17,7 @@
     vc info          your GPU's roofline
     vc math [B] [n]  read-vs-compute timings, every division shown
     vc cliff         the L2-vs-VRAM bandwidth cliff
+    vc ncu [stage]   hardware counters for a CUDA stage's kernel
     vc peek [stage]  show the reference solution (from the solutions branch)
     vc peek [n] --apply   write it straight into the stage's file
     vc reset <n>     rewind to stage n (your code is untouched)
@@ -38,13 +39,22 @@ C = {
 }
 
 
-def load_stages():
+def load_stages(backend="torch"):
+    """The ladder for one track.
+
+    A stage may carry `tracks: [torch]`, which keeps it off the other
+    ladders. The CUDA stages do: a JAX learner has Pallas at stage 08 and no
+    reason to write __shfl_xor_sync. A stage with no `tracks` key belongs to
+    every track, which is almost all of them.
+    """
     import yaml
 
     data = yaml.safe_load((ROOT / "stages.yaml").read_text())
     flat = []
     for arc in data["arcs"]:
         for s in arc["stages"]:
+            if backend not in s.get("tracks", BACKENDS):
+                continue
             s["arc"], s["arc_id"] = arc["name"], arc["id"]
             flat.append(s)
     return data, flat
@@ -100,6 +110,17 @@ def stage_file(s, p):
     return s["file"]
 
 
+def stage_files(s, p):
+    """Every file the learner edits for this stage.
+
+    The CUDA stages are two: a .cu with the kernel and a .py wrapper that
+    builds and calls it. Everything else is one, and `files` is absent.
+    """
+    if p["backend"] == "torch" and s.get("files"):
+        return s["files"]
+    return [stage_file(s, p)]
+
+
 def is_shared(s):
     return "jax_file" not in s
 
@@ -127,6 +148,8 @@ def resolve(flat, p, stage_id):
     for pred in (
         lambda s: s["id"] == q,
         lambda s: s["id"].split("-")[0] == q.zfill(2),
+        # "8b" never zfills to "08b", so compare without the leading zeros
+        lambda s: s["id"].split("-")[0].lstrip("0") == q.lstrip("0"),
         lambda s: s["id"].startswith(q),
         lambda s: q in s["id"] or q in s["name"].lower(),
     ):
@@ -151,6 +174,16 @@ def stage_index(flat, s):
     return next(i for i, x in enumerate(flat) if x["id"] == s["id"]) + 1
 
 
+def stage_label(s):
+    """The number a learner says out loud: "08", "08b", "12".
+
+    Not the position in the ladder. Inserting 08b and 08c would otherwise
+    renumber every stage after them on one track but not the other, and the
+    two tracks share nine files.
+    """
+    return s["id"].split("-")[0]
+
+
 def check_files(s, p):
     """The test files that belong to the active track."""
     d = test_dir(s)
@@ -159,7 +192,10 @@ def check_files(s, p):
     files = sorted(d.glob("test_*.py"))
     twin = d / "test_jax.py"
     if p["backend"] == "jax":
-        return [twin] if twin.exists() else files
+        if twin.exists():
+            return [twin]
+        # test_cuda.py is a torch-only stage; it never reaches this track.
+        return [f for f in files if f.name != "test_cuda.py"]
     return [f for f in files if f.name != "test_jax.py"]
 
 
@@ -205,8 +241,8 @@ def cmd_guide(flat, p, stage_id=None):
     done = s["id"] in p["completed"]
 
     print(f"\n{C['b']}{C['c']}{'=' * 74}{C['x']}")
-    print(f"{C['b']}{C['c']}  Stage {idx:02d}/{total}   {stage_name(s, p)}{C['x']}"
-          f"   {C['dim']}[{stars}]{C['x']}")
+    print(f"{C['b']}{C['c']}  Stage {stage_label(s)} of {total}   "
+          f"{stage_name(s, p)}{C['x']}   {C['dim']}[{stars}]{C['x']}")
     print(f"{C['dim']}  {s['arc_id']} - {s['arc']}   [{p['backend']}]"
           + ("   (already completed)" if done else "") + f"{C['x']}")
     print(f"{C['b']}{C['c']}{'=' * 74}{C['x']}")
@@ -221,8 +257,11 @@ def cmd_guide(flat, p, stage_id=None):
     print(f"\n{C['b']}WHAT YOU'RE BUILDING{C['x']}")
     print(wrap(s.get("jax_deliver", s["deliver"])
                if p["backend"] == "jax" else s["deliver"]))
-    print(f"\n  {C['u']}{stage_file(s, p)}{C['x']}"
+    files = stage_files(s, p)
+    print(f"\n  {C['u']}{files[0]}{C['x']}"
           f"   {C['dim']}<- edit this; the full spec is in its docstrings{C['x']}")
+    for extra in files[1:]:
+        print(f"  {C['u']}{extra}{C['x']}   {C['dim']}<- and this{C['x']}")
     if p["backend"] == "jax" and is_shared(s):
         print(f"  {C['dim']}(framework-free: both tracks build this same file)"
               f"{C['x']}")
@@ -241,7 +280,9 @@ def cmd_guide(flat, p, stage_id=None):
 
     print(f"\n{C['b']}NEXT{C['x']}")
     print(f"  {C['c']}./vc test{C['x']}     run the checks, as often as you like")
-    print(f"  {C['c']}./vc submit{C['x']}   bank it and open stage {idx + 1:02d}")
+    nxt = flat[idx] if idx < len(flat) else None
+    print(f"  {C['c']}./vc submit{C['x']}   bank it"
+          + (f" and open stage {stage_label(nxt)}" if nxt else ""))
     print(f"  {C['dim']}./vc peek     reveal the reference solution{C['x']}\n")
     return 0
 
@@ -277,8 +318,8 @@ def cmd_test(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    s = dict(s, _file=stage_file(s, p))
-    print(f"\n{C['b']}{C['c']}Stage {stage_index(flat, s):02d}  "
+    s = dict(s, _file=" and ".join(stage_files(s, p)))
+    print(f"\n{C['b']}{C['c']}Stage {stage_label(s)}  "
           f"{stage_name(s, p)}{C['x']}   {C['dim']}[{p['backend']}]{C['x']}")
     print(f"{C['dim']}running checks...{C['x']}\n")
     rc, passed, failed, out = run_checks(s, p)
@@ -296,8 +337,8 @@ def cmd_submit(flat, p):
         print(f"\n{C['b']}All stages complete. You built vLLM.{C['x']}\n")
         return 0
     idx = stage_index(flat, s)
-    s = dict(s, _file=stage_file(s, p))
-    print(f"\n{C['b']}{C['c']}Submitting stage {idx:02d}  "
+    s = dict(s, _file=" and ".join(stage_files(s, p)))
+    print(f"\n{C['b']}{C['c']}Submitting stage {stage_label(s)}  "
           f"{stage_name(s, p)}{C['x']}   {C['dim']}[{p['backend']}]{C['x']}")
     print(f"{C['dim']}running checks...{C['x']}\n")
     rc, passed, failed, out = run_checks(s, p)
@@ -315,7 +356,7 @@ def cmd_submit(flat, p):
     # throw them away along with the stage.
     subprocess.run(["git", "add", "app/"], cwd=ROOT, capture_output=True)
     track = "" if p["backend"] == "torch" else f" [{p['backend']}]"
-    msg = f"stage {idx:02d} complete: {stage_name(s, p)}{track}"
+    msg = f"stage {stage_label(s)} complete: {stage_name(s, p)}{track}"
     cm = subprocess.run(
         ["git", "-c", "user.email=you@localhost", "-c", "user.name=you",
          "commit", "-m", msg],
@@ -342,14 +383,15 @@ def cmd_status(flat, p):
     other = "jax" if p["backend"] == "torch" else "torch"
     print(f"\n  {bar(n, total)}  {n}/{total} stages complete"
           f"  {C['dim']}[{p['backend']}]{C['x']}")
-    print(f"  {C['dim']}{other}: {len(p['tracks'][other])}/{total}"
-          f"   (./vc backend {other}){C['x']}")
+    print(f"  {C['dim']}{other}: {len(p['tracks'][other])}"
+          f"/{len(load_stages(other)[1])}   (./vc backend {other}){C['x']}")
     if not s:
         print(f"\n  {C['b']}All done. You built vLLM.{C['x']}\n")
         return 0
-    print(f"\n  {C['b']}Current: stage {stage_index(flat, s):02d}  "
+    print(f"\n  {C['b']}Current: stage {stage_label(s)}  "
           f"{stage_name(s, p)}{C['x']}")
-    print(f"  {C['dim']}{stage_file(s, p)}{C['x']}")
+    for f in stage_files(s, p):
+        print(f"  {C['dim']}{f}{C['x']}")
     print(f"\n  {C['c']}./vc guide{C['x']}   what to build and why")
     print(f"  {C['c']}./vc test{C['x']}    run the checks")
     print(f"  {C['c']}./vc submit{C['x']}  bank it, open the next stage\n")
@@ -361,7 +403,8 @@ def cmd_backend(flat, p, name=None):
         print(f"\n  backend: {C['b']}{p['backend']}{C['x']}")
         for b in BACKENDS:
             mark = ">" if b == p["backend"] else " "
-            print(f"  {mark} {b:<6} {len(p['tracks'][b])}/{len(flat)} stages")
+            total = len(load_stages(b)[1])
+            print(f"  {mark} {b:<6} {len(p['tracks'][b])}/{total} stages")
         print(f"\n  {C['dim']}./vc backend jax   switch tracks"
               f"   |   ./vc test --jax   just this once{C['x']}\n")
         return 0
@@ -379,6 +422,7 @@ def cmd_backend(flat, p, name=None):
             return 1
     save_progress(set_backend(p, name, persist=True))
     print(f"{C['g']}Switched to the {name} track.{C['x']}")
+    _, flat = load_stages(name)
     return cmd_status(flat, p)
 
 
@@ -398,7 +442,7 @@ def cmd_list(flat, p):
         tag = ""
         if p["backend"] == "jax":
             tag = f"  {C['dim']}{'shared' if is_shared(s) else 'jax'}{C['x']}"
-        print(f"  {mark} {i:02d} {s['id']:<26} {name}  "
+        print(f"  {mark} {stage_label(s):>3} {s['id']:<26} {name}  "
               f"{C['dim']}{'*' * s['difficulty']}{C['x']}{tag}")
     print(f"\n{C['dim']}{len(p['completed'])}/{len(flat)} complete "
           f"on the {p['backend']} track{C['x']}\n")
@@ -456,16 +500,18 @@ def cmd_peek(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    name = Path(stage_file(s, p)).name
-    text = solution_text(name)
-    if text is None:
+    files = stage_files(s, p)
+    texts = [(f, solution_text(Path(f).name)) for f in files]
+    if any(t is None for _, t in texts):
         print(f"{C['y']}Could not reach the solutions branch.{C['x']}")
         print(f"{C['dim']}Try: git fetch origin solutions{C['x']}")
         return 1
     print(f"\n{C['y']}Reference solution for {s['id']}{C['x']}")
-    print(f"{C['dim']}To use it:  ./vc peek {stage_index(flat, s)} --apply"
-          f"   (or copy it by hand){C['x']}\n")
-    print(text)
+    print(f"{C['dim']}To use it:  ./vc peek {stage_label(s)} --apply"
+          f"   (or copy it by hand){C['x']}")
+    for f, text in texts:
+        print(f"\n{C['b']}{C['c']}--- {f} {'-' * max(0, 60 - len(f))}{C['x']}\n")
+        print(text)
     return 0
 
 
@@ -474,13 +520,15 @@ def cmd_peek_apply(flat, p, stage_id=None):
     if not s:
         print(err)
         return 1
-    target = stage_file(s, p)
-    text = solution_text(Path(target).name)
-    if text is None:
+    targets = stage_files(s, p)
+    texts = [(f, solution_text(Path(f).name)) for f in targets]
+    if any(t is None for _, t in texts):
         print(f"{C['y']}Could not reach the solutions branch.{C['x']}")
         return 1
-    (ROOT / target).write_text(text)
-    print(f"{C['y']}Wrote the reference solution into {target}.{C['x']}")
+    for f, text in texts:
+        (ROOT / f).parent.mkdir(parents=True, exist_ok=True)
+        (ROOT / f).write_text(text)
+        print(f"{C['y']}Wrote the reference solution into {f}.{C['x']}")
     print(f"{C['dim']}Read it before you submit -- the point was the reading.{C['x']}")
     return 0
 
@@ -497,7 +545,7 @@ def cmd_reset(flat, p, arg):
     keep = {x["id"] for x in flat[:idx - 1]}
     p["completed"] = [c for c in p["completed"] if c in keep]
     save_progress(p)
-    print(f"{C['y']}Rewound to stage {idx:02d}.{C['x']} "
+    print(f"{C['y']}Rewound to stage {stage_label(s)}.{C['x']} "
           f"{C['dim']}Your code in app/ is untouched.{C['x']}")
     return cmd_guide(flat, p)
 
@@ -510,13 +558,16 @@ def main():
         script = {"info": "envinfo.py", "cliff": "cliff.py"}[cmd]
         sys.exit(subprocess.run([str(PY), str(ROOT / "runner" / script)],
                                 cwd=ROOT).returncode)
+    if cmd == "ncu":
+        sys.exit(subprocess.run(
+            [str(PY), str(ROOT / "runner" / "ncu.py")] + args[1:],
+            cwd=ROOT).returncode)
     if cmd == "math":
         sys.exit(subprocess.run(
             [str(PY), str(ROOT / "runner" / "timings.py")] + args[1:],
             cwd=ROOT).returncode)
 
     arg = next((a for a in args[1:] if not a.startswith("-")), None)
-    _, flat = load_stages()
     p = progress()
 
     # `--jax` / `--torch` on any command: run it against the other track
@@ -524,6 +575,9 @@ def main():
     for b in BACKENDS:
         if f"--{b}" in args:
             set_backend(p, b)
+
+    # The ladder itself is per-track: the CUDA stages are not on the JAX one.
+    _, flat = load_stages(p["backend"])
 
     table = {
         "backend": lambda: cmd_backend(flat, p, arg),

@@ -25,10 +25,19 @@ if "xla_force_host_platform_device_count" not in _flags:
 
 # ---------------------------------------------------------------- backends
 #
-# Two tracks share this tree. A stage with a JAX twin has both a test_stage.py
-# (torch) and a test_jax.py; a stage that is pure logic -- the allocator, the
-# scheduler, the detokenizer -- has only test_stage.py and belongs to BOTH
-# tracks, because there is nothing framework-shaped in it to port.
+# Two tracks share this tree, and the file name says which one a check is on:
+#
+#   test_jax.py    the JAX twin of a stage that has one
+#   test_cuda.py   a stage that exists ONLY on the torch track, because it is
+#                  a CUDA kernel and there is no honest JAX equivalent of a
+#                  warp shuffle. stages.yaml marks these `tracks: [torch]`.
+#   test_stage.py  everything else. If the stage has no test_jax.py beside it
+#                  then it is framework-free -- the allocator, the scheduler,
+#                  the detokenizer -- and belongs to BOTH tracks, because
+#                  there is nothing framework-shaped in it to port.
+#
+# tests/test_harness.py checks this against stages.yaml, because the rule now
+# lives in two places and nothing else would notice them drifting apart.
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -55,9 +64,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         path = Path(str(item.fspath))
         is_jax = path.name == "test_jax.py"
+        is_cuda = path.name == "test_cuda.py"
         stage_has_jax_twin = (path.parent / "test_jax.py").exists()
         if want == "jax":
-            take = is_jax or not stage_has_jax_twin
+            take = is_jax or not (stage_has_jax_twin or is_cuda)
         else:
             take = not is_jax
         (keep if take else dropped).append(item)
@@ -71,6 +81,23 @@ def dev():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     return "cuda"
+
+
+# --------------------------------------------------------------- cuda side
+
+@pytest.fixture(scope="session")
+def nvcc(dev):
+    """Skip unless a CUDA toolkit can compile here.
+
+    The counterpart of `jpallas`. Stages 08, 08b and 08c compile a .cu with
+    torch.utils.cpp_extension, which needs nvcc and ninja. Without them the
+    checks skip rather than fail, the same way the Pallas checks do.
+    """
+    from cudalib import probe
+
+    if not probe.have_nvcc():
+        pytest.skip("no nvcc -- these stages need a CUDA toolkit")
+    return True
 
 
 # ---------------------------------------------------------------- jax side

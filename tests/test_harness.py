@@ -63,3 +63,58 @@ def test_jax_twins_line_up(stage):
 @pytest.mark.parametrize("stage", stages(), ids=lambda s: s["id"])
 def test_stage_files_exist(stage):
     assert (ROOT / stage["file"]).exists(), f"missing {stage['file']}"
+
+
+@pytest.mark.parametrize("stage", stages(), ids=lambda s: s["id"])
+def test_every_declared_file_exists(stage):
+    """A CUDA stage is two files: the .cu and the .py that builds it. They are
+    listed in `files`, and `./vc guide` and `./vc peek` both read that list,
+    so a typo there points the learner at a file that is not there."""
+    for f in stage.get("files", []):
+        assert (ROOT / f).exists(), f"{stage['id']} lists a missing file: {f}"
+    if "files" in stage:
+        assert stage["file"] in stage["files"], (
+            f"{stage['id']}: `file` must also appear in `files`, because the "
+            "two are read by different commands")
+
+
+@pytest.mark.parametrize("stage", stages(), ids=lambda s: s["id"])
+def test_torch_only_stages_name_their_checks_test_cuda(stage):
+    """conftest decides a stage is framework-free when it has no test_jax.py,
+    and runs it on BOTH tracks. That rule is wrong for a CUDA stage, which
+    has no JAX twin and no business on the JAX ladder either.
+
+    So a stage marked `tracks: [torch]` names its checks test_cuda.py, which
+    conftest deselects on the JAX track. Get this wrong and the failure is
+    silent in the worst direction: a JAX learner is quietly asked to write
+    __shfl_xor_sync.
+    """
+    d = _test_dir(stage)
+    torch_only = stage.get("tracks") == ["torch"]
+    cuda_checks = (d / "test_cuda.py").exists()
+
+    if torch_only:
+        assert cuda_checks, (
+            f"{stage['id']} is torch-only but its checks are not in "
+            f"{(d / 'test_cuda.py').relative_to(ROOT)}, so --backend jax "
+            "would run them")
+        assert not (d / "test_stage.py").exists(), (
+            f"{d.relative_to(ROOT)} has both test_stage.py and test_cuda.py; "
+            "the test_stage.py half would run on the JAX track")
+    else:
+        assert not cuda_checks, (
+            f"{(d / 'test_cuda.py').relative_to(ROOT)} exists but "
+            f"{stage['id']} is not marked `tracks: [torch]` in stages.yaml")
+
+
+@pytest.mark.parametrize("stage", stages(), ids=lambda s: s["id"])
+def test_track_restrictions_are_spelled_correctly(stage):
+    """`tracks` keeps a stage off the other ladders. A misspelt backend there
+    removes the stage from every ladder, silently."""
+    for name in stage.get("tracks", []):
+        assert name in ("torch", "jax"), (
+            f"{stage['id']} lists an unknown track {name!r}")
+    if "tracks" in stage:
+        assert "jax_file" not in stage, (
+            f"{stage['id']} is restricted to {stage['tracks']} but also "
+            "declares a jax_file")

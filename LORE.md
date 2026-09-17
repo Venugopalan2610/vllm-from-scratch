@@ -335,7 +335,7 @@ The insight is that this is **virtual memory**, a solved problem from 1961.
 The cost: attention can no longer stride a contiguous tensor. The kernel must
 **gather K/V through the block table**. That's why PagedAttention needed a custom
 kernel and couldn't just call FlashAttention. Stage 7 makes you feel the slowdown in
-PyTorch; stage 8 makes you win it back in Triton.
+PyTorch; stages 8, 8b and 8c make you win it back in CUDA.
 
 The payoff beyond memory: **sharing becomes a pointer operation**.
 
@@ -345,6 +345,96 @@ The payoff beyond memory: **sharing becomes a pointer operation**.
   prompt is prefilled once for *all* users, forever. Warm TTFT collapses.
 
 That last one is why APC feels like cheating in production. It's just a page cache.
+
+---
+
+## 3b. Three stages inside one kernel
+
+Stages 08, 08b and 08c write the same function three times. The arithmetic
+never changes. What changes is which part of the GPU is the constraint, and
+the three stages are ordered so that fixing one exposes the next.
+
+**08 is about the decomposition.** A kernel's first decision is what one block
+owns, because everything else follows from it. Here a block owns one (sequence,
+query head) pair and produces one `head_dim` output vector. Blocks never need
+each other's results, so there is no global synchronisation in the kernel at
+all — and that fact, not the arithmetic, is what makes the decomposition right.
+
+Inside the block, stage 08 does the obvious thing: one thread per context
+position, each walking `head_dim` on its own. Correct. About 5x faster than the
+PyTorch loop, because a Python loop over sequences was never the competition.
+
+**08b is about the memory system.** The obvious mapping has a specific flaw.
+At any instruction, the 32 threads of a warp are reading 32 addresses that are
+`head_dim` elements apart. The memory system serves a warp in 128-byte
+transactions, so it issues 32 of them where 2 would do. Every byte you asked
+for arrives; you spent an order of magnitude too many requests getting them.
+
+Turn the mapping sideways — threads cooperate *along* `head_dim`, 16 bytes
+each — and the requests merge. Same arithmetic, same answers, about **2x**, and
+the kernel goes from roughly half of the card's streaming bandwidth to
+essentially all of it.
+
+Sixteen bytes is not arbitrary. It is the widest load a single thread can
+issue, and 8 lanes at 16 bytes is exactly one 128-byte transaction. Coalescing
+is the highest-value habit in CUDA, and this is the cheapest place to learn it.
+
+**08c is about the execution resources.** Now the kernel is perfect on
+bandwidth and still terrible at batch 1:
+
+```
+grid = (num_seqs, num_heads) = (1, 16) = 16 blocks
+this laptop GPU has 58 SMs
+```
+
+Three quarters of the machine is idle, and no memory optimisation can help,
+because memory was never the problem. Two fixes:
+
+- **Warp shuffles.** The lanes that share a K row are in one warp, so
+  `__shfl_xor_sync` can reduce their partial dot products by exchanging
+  registers directly. No shared memory, no `__syncthreads`. Worth ~1.6x on
+  its own. It also replaces one deadlock trap with another: a `_sync`
+  primitive whose mask names a lane that never arrives does not return.
+
+- **Split-K**, or flash-decoding. If there are not enough (sequence, head)
+  pairs to fill the GPU, manufacture blocks by cutting the *context*. Each
+  block computes a partial `(m, l, acc)` and a second kernel merges them with
+  `exp(m_j - M)` — the same rescale the online softmax already does, one level
+  up, and exact. At one sequence this is worth **10x**.
+
+Split-K is a trade, and the other side of it shows up at 64 sequences, where
+the grid was already full and there was no idleness to sell. Giving every row
+group its own softmax means every lane works out its own maximum and rescale,
+where one thread used to do it for the whole block. Redundant arithmetic is
+free right up to the moment the kernel stops waiting on memory, and at a full
+grid it is not: you give back a few percent. Real engines dispatch on batch
+size for exactly this reason.
+
+The numbers are worth holding together: 2x from how you read memory, 1.6x from
+how you reduce, 10x from having enough blocks to fill the machine, and a few
+percent handed back where the last one buys nothing. They are not the same
+kind of win, and a profiler tells them apart while a stopwatch does not. That
+is what `./vc ncu` is for.
+
+And one bug worth the price of the stage. A block reduction that hands its
+answer back through shared memory needs a barrier after every thread has READ
+it, not only before. The next reduction reuses the scratch, a warp that runs
+ahead overwrites a result a slower warp has not collected, and a few percent
+of the output is wrong on some inputs and right on others.
+`compute-sanitizer --tool racecheck` finds it in one run and names both source
+lines. A stopwatch, a print statement and an afternoon do not.
+
+### And the same three questions about a GEMV
+
+Stage 18b is the shortest version of the whole argument. Weight-only int8
+halves the bytes decode must read, which should nearly halve decode time — but
+only if the dequantize happens on a value already in a register. Materialise
+the bf16 weight first and you have added a full-size write and a full-size
+read, and made it slower than not quantizing at all.
+
+Then measure against cuBLAS and watch the win evaporate somewhere between one
+row and four. A GEMV is not a small GEMM. That crossover is stage 3's ridge
+again, in milliseconds you measured yourself.
 
 ---
 
@@ -425,7 +515,7 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
    |
    └── ModelRunner  ── builds the flat input tensors + block tables,
         |              owns CUDA graphs, runs the sampler
-        └── Model ── attention backend (FlashAttention / FlashInfer / Triton)
+        └── Model ── attention backend (FlashAttention / FlashInfer / CUDA)
 ```
 
 **Key V0 → V1 changes** (2025), all of which you'll independently rediscover:
@@ -454,6 +544,21 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
 - Speculative decoding acceptance rates run ~60-80% with a good draft; expect
   1.5-2.5x, and near zero on high-entropy creative text.
 
+And for the kernels, four hardware constants and what they cost you:
+
+- A **warp is 32 threads** and they issue one instruction together. Every
+  reduction, divergence and shuffle question starts here.
+- The memory system serves a warp in **128-byte transactions**, and the widest
+  load one thread can issue is **16 bytes**. 8 lanes x 16 bytes is exactly one
+  transaction, which is why stage 08b targets that width and gets ~2x.
+- **Registers per SM** (65536 on most modern cards) divided by registers per
+  thread caps how many warps an SM can hold, which is how much memory latency
+  it can hide. `ptxas` prints the numerator; `./vc info` prints the
+  denominator.
+- **Blocks must outnumber SMs**, by a good margin, or the machine idles. At
+  batch 1 a (num_seqs, num_heads) grid is 16 blocks against ~58 SMs, and
+  that one fact is worth 10x in stage 08c.
+
 ---
 
 ## 9. Vocabulary
@@ -467,6 +572,31 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
 - **Preemption** — evicting a running sequence under memory pressure (swap or recompute).
 - **Online softmax** — the running max/sum trick letting you softmax in tiles, from
   FlashAttention. You'll implement it in stage 8.
+
+And the CUDA half, all of it earned in stages 08 through 08c:
+
+- **Warp** — the 32 threads that issue together. **Lane** — one thread's index
+  in it.
+- **Coalescing** — consecutive lanes reading consecutive addresses, so their
+  requests merge into whole transactions. The single highest-value habit.
+- **Sector** — the 32-byte unit the cache actually fetches. "Bytes per sector
+  used" is coalescing, measured, and `./vc ncu` reads it.
+- **Occupancy** — warps resident on an SM against the maximum it can hold.
+  Bounded by registers and shared memory per block, and it is how much latency
+  the SM can hide, not how busy it is.
+- **Spill** — ptxas ran out of registers and put the overflow in local memory,
+  which is DRAM. Always a loss, and always visible in the build log.
+- **Warp shuffle** — `__shfl_xor_sync` and friends, exchanging registers
+  between lanes with no shared memory and no barrier. Every lane in the mask
+  must reach the instruction or it never returns.
+- **Split-K / flash-decoding** — cutting the CONTEXT into chunks to
+  manufacture blocks when there are not enough sequences to fill the GPU. Each
+  block emits a partial `(m, l, acc)`; a merge pass rescales them by
+  `exp(m_j - M)`. Exact, not approximate.
+- **Fused epilogue** — applying the last operation (a dequantize scale, a
+  bias, an activation) to a value already sitting in a register, instead of
+  writing a whole tensor out for a second kernel to read back. Stage 18b is
+  15x, and that is the entire difference.
 
 ---
 
@@ -529,7 +659,7 @@ Which drags four stages sideways:
 
 ### Two places the JAX version is simply better
 
-- **Stage 08** is Pallas rather than Triton, and the online softmax is
+- **Stage 08** is Pallas rather than CUDA, and the online softmax is
   identical. What changes is that the block-table lookup has to happen inside
   the kernel, with a computed index, because no BlockSpec can express "which
   page do I need? ask the page table."

@@ -202,3 +202,14 @@ def json_prefix_state(s):
                 i += 1
             else:
                 return "invalid"
+
+
+def kv_bytes(context_lens, num_kv_heads, head_dim, itemsize):
+    """The K and V bytes a paged decode MUST read for these contexts.
+
+    The minimum the algorithm needs, not the traffic the hardware did. With
+    GQA, several query heads read the same KV head, so the hardware may read
+    fewer bytes than this (L2 caught it) or more (it did not).
+    """
+    total = int(context_lens.sum().item())
+    return 2 * total * num_kv_heads * head_dim * itemsize

@@ -143,16 +143,19 @@ arcs:
           materialises the whole gathered K/V, but it is the oracle.
         jax_deliver: "paged_attention() in jnp: gather by block table, mask, softmax."
 
-      - id: "08-paged-attention-triton"
-        file: "app/s08_paged_triton.py"
-        name: "The same thing, fast"
+      - id: "08-paged-attention-cuda"
+        file: "app/s08_paged_cuda.py"
+        files: ["app/cuda/s08_paged_attn.cu", "app/s08_paged_cuda.py"]
+        name: "The same thing, in CUDA"
         difficulty: 5
         insight: >
-          One program per (sequence, head, block); stream K/V tiles through SRAM;
-          online-softmax so you never materialize the full score row. Decode
-          attention is bandwidth-bound, so your kernel's job is coalesced reads.
-        deliver: "A Triton paged decode kernel that beats the PyTorch version."
-        measure: "us/token vs stage 7, and vs real vLLM's kernel on the same shapes."
+          One block per (sequence, query head); walk the block table; stream
+          K/V tiles and fold them into a running softmax so the score row
+          never reaches HBM. The decision that matters is not the arithmetic,
+          it is what one block owns, because that fixes everything else:
+          blocks that own one output vector never need to talk to each other.
+        deliver: "A CUDA paged decode kernel, plus the KV scatter kernel, that beats stage 07."
+        measure: "Correctness vs stage 07, then us/token, then the fraction of this card's bandwidth you got."
         jax_file: "app/j08_paged_pallas.py"
         jax_name: "The same thing, fast (Pallas)"
         jax_insight: >
@@ -163,6 +166,39 @@ arcs:
           INSIDE the kernel, so you read the cache with a computed index rather
           than letting a BlockSpec do it for you.
         jax_deliver: "A Pallas paged decode kernel that beats the jnp version."
+
+      - id: "08b-cuda-memory"
+        tracks: ["torch"]
+        file: "app/s08b_cuda_memory.py"
+        files: ["app/cuda/s08b_paged_attn_vec.cu", "app/s08b_cuda_memory.py"]
+        name: "Feeding the memory system"
+        difficulty: 4
+        insight: >
+          Your stage 08 kernel gave one thread one position and walked
+          head_dim serially, so the 32 threads of a warp asked for 32
+          scattered rows at once. Turn the mapping sideways: threads cooperate
+          ALONG head_dim, 16 bytes each, and the warp's requests merge into
+          whole 128-byte transactions. Same arithmetic, same answers, roughly
+          twice the bandwidth. This is the single highest-value habit in CUDA.
+        deliver: "The same kernel with coalesced, 128-bit vectorized loads and the accumulator in registers."
+        measure: "At least 1.5x over stage 08, and a real fraction of this card's measured streaming bandwidth."
+
+      - id: "08c-cuda-warps"
+        tracks: ["torch"]
+        file: "app/s08c_cuda_warps.py"
+        files: ["app/cuda/s08c_paged_attn_split.cu", "app/s08c_cuda_warps.py"]
+        name: "Warps, occupancy and split-K"
+        difficulty: 5
+        insight: >
+          At batch 1 the grid is (1, num_heads) and most of the SMs have
+          nothing to do, so a kernel that is perfect on bandwidth still runs
+          at a few percent of the card. Two fixes: __shfl_xor_sync to reduce
+          inside a warp with no shared memory and no barrier, then split-K,
+          which cuts the CONTEXT into chunks to manufacture blocks and merges
+          the partial softmax states exactly. Batch 1 is every interactive
+          request.
+        deliver: "Warp-shuffle reductions, then a split-K kernel and an exact merge pass."
+        measure: "At least 1.5x over stage 08b at 1, 2 and 4 sequences, and no more than a few percent given back at 64."
 
       - id: "09-prefix-sharing"
         file: "app/s09_prefix.py"
@@ -322,6 +358,24 @@ arcs:
           materialises the bf16 weight first you have added a full-size write
           and read, and made decode slower rather than faster.
         jax_deliver: "int8 per-channel and fp8 e4m3 over the params pytree, with a perplexity guard."
+
+      - id: "18b-int8-gemv-cuda"
+        tracks: ["torch"]
+        file: "app/s18b_gemv_cuda.py"
+        files: ["app/cuda/s18b_gemv_int8.cu", "app/s18b_gemv_cuda.py"]
+        name: "The dequantize belongs in the epilogue"
+        difficulty: 4
+        insight: >
+          Stage 18 halved the weight bytes and then handed the multiply to
+          PyTorch, which builds a bf16 copy of the weight before it can use
+          it. Time that honestly and the quantization is a LOSS. Weight-only
+          quantization only pays when the scale is applied to a value already
+          in a register, at the end of the dot product. Then measure against
+          cuBLAS and find the batch size where your kernel stops winning:
+          that number is the boundary between decode and prefill, in
+          milliseconds.
+        deliver: "An int8 GEMV with a fused dequantize epilogue, and a Linear that dispatches on batch size."
+        measure: "At least 3x over dequantize-then-matmul, at least 1.5x over bf16 cuBLAS at one row, and the crossover where that stops."
 
       - id: "19-guided-decoding"
         file: "app/s19_guided.py"
