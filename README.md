@@ -48,6 +48,21 @@ scheduler, prefix cache, metrics, speculative sampling, guided decoding and
 tensor-parallel stages are pure logic. A GPU but no `nvcc`? Everything runs
 except the four CUDA stages, which skip rather than fail.
 
+## Two ways in
+
+The notebooks in [`course/`](course/) build the intuition. The ladder in `app/`
+makes you build the engine. They are ordered: read the notebooks for a stage,
+then build the stage.
+
+```bash
+.venv/bin/jupyter lab course/     # the lecture half
+./vc guide                        # the project half
+```
+
+A notebook does the arithmetic by hand, measures the machine, plots the two
+against each other, and then explains the gap. Nothing in `course/` is gated;
+nothing in `app/` is optional.
+
 ## The loop
 
 ```bash

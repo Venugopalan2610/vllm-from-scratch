@@ -12,7 +12,8 @@ cd "$(dirname "$0")"
 # the CUDA stages, and without it stages 08, 08b and 08c cannot compile.
 DEPS=(torch "transformers>=4.51" accelerate safetensors numpy ninja
       pytest pytest-timeout pytest-asyncio pyyaml rich
-      fastapi uvicorn httpx sse-starlette huggingface_hub)
+      fastapi uvicorn httpx sse-starlette huggingface_hub
+      matplotlib matplotlib-inline jupyterlab nbformat nbclient ipykernel)
 
 # The JAX track is opt-in: `./setup.sh --jax`. It is another ~400MB, and half
 # the ladder (allocator, scheduler, detokenizer, ...) is framework-free and

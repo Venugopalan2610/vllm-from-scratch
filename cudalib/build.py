@@ -120,6 +120,22 @@ def _clear_stale_lock(build_dir):
         (Path(build_dir) / ".ninja_lock").unlink(missing_ok=True)
 
 
+def build_source(name, source):
+    """Compile a CUDA source STRING and return the module.
+
+    The stage files are real .cu files, because that is how you write a
+    kernel you intend to keep. In a notebook, where a kernel is three lines
+    and the point is to see one number move, a string is friendlier. The
+    source is written into the build cache and compiled exactly as a file
+    would be, so the two paths behave the same.
+    """
+    CACHE.mkdir(exist_ok=True)
+    src = CACHE / f"{name}.cu"
+    if not src.exists() or src.read_text() != source:
+        src.write_text(source)
+    return build(name, str(src))
+
+
 def module_path(name):
     """The .so that build() produced, for cuobjdump to read."""
     return CACHE / name / f"{name}.so"

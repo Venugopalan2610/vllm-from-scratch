@@ -7,7 +7,7 @@ You do not edit anything in here. The kernels are yours; the compiler
 invocation, the arch flags and the bandwidth arithmetic are not the lesson.
 """
 
-from cudalib.build import CACHE, ROOT, build, module_path
+from cudalib.build import CACHE, ROOT, build, build_source, module_path
 from cudalib.probe import (
     achieved_bandwidth,
     bench_ms,
@@ -20,7 +20,7 @@ from cudalib.probe import (
 )
 
 __all__ = [
-    "ROOT", "CACHE", "build", "module_path",
+    "ROOT", "CACHE", "build", "build_source", "module_path",
     "have_nvcc", "peak_bandwidth", "achieved_bandwidth", "bench_ms",
     "kernel_stats", "occupancy", "ncu_metrics", "racecheck",
 ]
