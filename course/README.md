@@ -79,7 +79,23 @@ The ladder has seven arcs and the notebooks follow them. Two arcs are written.
 | `sampling/` | Temperature, top-k, top-p and penalties on eight words. Then the sampler as the bottleneck, and a batched one you can prove is correct. |
 | `detokenize/` | Why you cannot decode tokens one at a time. Then write the streaming detokenizer. **No GPU.** |
 
-Parts 6 and 7 are not written yet.
+**Part 6, The Server** (stages 15-16)
+
+| | |
+|---|---|
+| `async/` | One loop, two clocks, and what happens when a client hangs up. Then build the engine loop. **No GPU.** |
+| `metrics/` | Six numbers, a Pareto frontier, and why throughput is not the answer. Then work out which of three projects your p99 is asking for. **No GPU.** |
+
+**Part 7, Modern vLLM** (stages 17-20, 18b)
+
+| | |
+|---|---|
+| `speculative/` | Thirty-two guesses for the price of one. Then verify, reject, and prove the distribution did not move. |
+| `quantization/` | Fewer bytes per weight, and the trap that undoes it. Then quantize it and find the speed you lost. |
+| `guided/` | Masking the logits that cannot legally come next. Then make invalid output unreachable, and find what the mask still does not promise. **No GPU.** |
+| `tensorParallel/` | Where to cut, and how few times the ranks have to talk. Then count the collectives. **No GPU.** |
+
+All seven parts are written.
 
 ## How to run them
 
