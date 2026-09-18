@@ -48,13 +48,23 @@ The ladder has seven arcs and the notebooks follow them. Two arcs are written.
 | `roofline/` | Measure your own card. Watch a matmul cross the ridge. Then put the real model on the plot and find prefill and decode on opposite sides of it. |
 | `kvCache/` | What the quadratic actually costs. What the cache costs in bytes, including a 2x error the config invites you to make. Then write both loops and make them agree. |
 
+**Part 2, Batching** (stages 04-05)
+
+| | |
+|---|---|
+| `padding/` | Extra users are nearly free, until they are not. What a static batch throws away. Then find the batch size that is actually fastest. **`padding` needs no GPU except the first demo.** |
+| `continuous/` | Schedule per iteration: twenty lines, the largest win in the course. What it does to the tail. Then write the scheduler. **No GPU.** |
+
 **Part 3, PagedAttention** (stages 06-09, 08b, 08c)
 
 | | |
 |---|---|
-| `kernels/` | Sectors, strides and a cliff you can predict. Why blocks must outnumber SMs. Then coalesce a block-table gather and measure it. |
+| `blocks/` | Where the KV memory goes and why most of it is empty. A page table for tokens. Then build the allocator. **No GPU.** |
+| `gather/` | Decode attention on numbers you can check by hand. The same arithmetic with the keys scattered. Then write the oracle every later kernel is checked against. |
+| `kernels/` | Sectors, strides and a cliff you can predict. Why blocks must outnumber SMs. Then coalesce a block-table gather. |
+| `sharing/` | Refcounts and copy-on-write. Automatic prefix caching, measured. Then build it, including the hashing bug that produces fluent wrong output. |
 
-Parts 2, 4, 5, 6 and 7 are not written yet.
+Parts 4, 5, 6 and 7 are not written yet.
 
 ## How to run them
 
