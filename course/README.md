@@ -64,7 +64,14 @@ The ladder has seven arcs and the notebooks follow them. Two arcs are written.
 | `kernels/` | Sectors, strides and a cliff you can predict. Why blocks must outnumber SMs. Then coalesce a block-table gather. |
 | `sharing/` | Refcounts and copy-on-write. Automatic prefix caching, measured. Then build it, including the hashing bug that produces fluent wrong output. |
 
-Parts 4, 5, 6 and 7 are not written yet.
+**Part 4, The Scheduler** (stages 10-11)
+
+| | |
+|---|---|
+| `admission/` | A sequence's cache grows while it runs, so admission is a promise about memory you do not have yet. Swap against recompute, as an inequality rather than a slogan. Then build the scheduler that does not fall over. |
+| `chunked/` | One long prompt stops the whole server. Then the token budget that fixes it, and a p99 that hides the damage. |
+
+Parts 5, 6 and 7 are not written yet.
 
 ## How to run them
 
