@@ -108,6 +108,38 @@ Every notebook finds the repo root on its own, so it does not matter which
 directory you launch from. Anything that compiles CUDA needs `nvcc`; the rest
 needs only a GPU, and some of it does not need that either.
 
+## The rule about numbers
+
+**No notebook concludes with a number that is only true on the machine it was
+written on.**
+
+Absolute measurements are fine and often necessary, but they are inputs, never
+conclusions. A notebook that ends in "1.5x" has taught you a fact about an
+RTX 4080 Laptop. A notebook that ends in a ratio has taught you the mechanism,
+and the ratio tells you which way it moves when the hardware changes.
+
+So every notebook here ends in one of three things:
+
+1. **A dimensionless quantity.** The ridge point is FLOP per byte. Coalescing
+   efficiency is bytes used per byte fetched. Occupancy is warps resident over
+   warps possible. Tensor-parallel cost is collective time over compute time.
+   None of them carry a unit, and none of them change meaning on another card.
+2. **A cost in units of something you measured yourself.** Step times are
+   expressed as multiples of one plain decode step; the scheduler simulations
+   run on a clock whose tick *is* a step. Multiply by your own step time when
+   you want seconds.
+3. **A rule relating a workload knob to a hardware parameter.** "The best
+   static batch is `B_ridge`." "The best token budget is `KNEE`." "Talking
+   overtakes computing at batch `6d / (C(R-1) x HBM/interconnect)`."
+
+Where a notebook does need a hardware constant, it is named in capitals at the
+top, it says how to measure your own, and the conclusion is stated as a
+function of it. The demos then sweep it, so you can see the answer move rather
+than take the author's row on trust.
+
+The one exception is a spec-sheet comparison across named cards, which exists
+precisely to show how the ratio responds to hardware.
+
 ## The method, and why every notebook follows it
 
 1. **Do the arithmetic first.** Sectors, bytes, SMs, blocks. On paper, or in
