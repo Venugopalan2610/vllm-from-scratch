@@ -71,7 +71,15 @@ The ladder has seven arcs and the notebooks follow them. Two arcs are written.
 | `admission/` | A sequence's cache grows while it runs, so admission is a promise about memory you do not have yet. Swap against recompute, as an inequality rather than a slogan. Then build the scheduler that does not fall over. |
 | `chunked/` | One long prompt stops the whole server. Then the token budget that fixes it, and a p99 that hides the damage. |
 
-Parts 5, 6 and 7 are not written yet.
+**Part 5, Making It Fast** (stages 12-14)
+
+| | |
+|---|---|
+| `cudaGraphs/` | The CPU as the bottleneck. A graph refuses to change shape and a server does nothing else. Then capture one and survive a changing batch. |
+| `sampling/` | Temperature, top-k, top-p and penalties on eight words. Then the sampler as the bottleneck, and a batched one you can prove is correct. |
+| `detokenize/` | Why you cannot decode tokens one at a time. Then write the streaming detokenizer. **No GPU.** |
+
+Parts 6 and 7 are not written yet.
 
 ## How to run them
 
