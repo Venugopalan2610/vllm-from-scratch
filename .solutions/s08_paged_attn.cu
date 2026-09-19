@@ -1,15 +1,15 @@
 // Reference solution, stage 08 - paged decode attention in CUDA.
 //
-// The mapping is the whole lesson here:
+// The mapping is the lesson:
 //
-//     grid  = (num_seqs, num_heads)     one block per (sequence, query head)
+//     grid  = (num_seqs, num_heads)     one block for each (sequence, query head)
 //     block = 128 threads               they share one output vector
 //
-// One thread for each context position, and each thread walks head_dim alone.
-// It is correct and it is slow. One line below shows the reason:
-// thread t reads kp[0..D), thread t+1 reads an address D elements further on.
-// The warp touches 32 different cache lines to get 32 dot products started.
-// Stage 08b fixes exactly that.
+// One thread for each context position, and each thread walks head_dim
+// alone. It is correct and it is slow. The reason: thread t reads
+// key_row[0..head_dim), and thread t+1 reads an address head_dim elements
+// further on. The warp touches 32 cache lines to start 32 dot products.
+// Stage 08b fixes that.
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
@@ -18,6 +18,50 @@
 namespace {
 
 constexpr int kThreads = 128;
+constexpr int kWriteThreads = 256;
+constexpr int kMaxWriteBlocks = 4096;
+
+// The first element of one cached token row, for one KV head.
+// cache: (num_blocks, num_kv_heads, block_size, head_dim).
+template <typename scalar_t>
+__device__ const scalar_t* cache_row(const scalar_t* cache,
+                                     const int32_t* block_table, int position,
+                                     int kv_head, int num_kv_heads,
+                                     int block_size, int head_dim) {
+  const int64_t block_id = block_table[position / block_size];
+  const int offset = position % block_size;
+  return cache + ((block_id * num_kv_heads + kv_head) * block_size + offset) *
+                     head_dim;
+}
+
+// Tree reductions through shared memory. Every thread must call them.
+// scratch holds kThreads floats. All threads get the result.
+__device__ float block_max(float value, float* scratch) {
+  scratch[threadIdx.x] = value;
+  __syncthreads();
+  for (int stride = kThreads / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride)
+      scratch[threadIdx.x] =
+          fmaxf(scratch[threadIdx.x], scratch[threadIdx.x + stride]);
+    __syncthreads();
+  }
+  const float result = scratch[0];
+  __syncthreads();
+  return result;
+}
+
+__device__ float block_sum(float value, float* scratch) {
+  scratch[threadIdx.x] = value;
+  __syncthreads();
+  for (int stride = kThreads / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride)
+      scratch[threadIdx.x] += scratch[threadIdx.x + stride];
+    __syncthreads();
+  }
+  const float result = scratch[0];
+  __syncthreads();
+  return result;
+}
 
 // ---------------------------------------------------------------- write_kv
 //
@@ -26,143 +70,123 @@ constexpr int kThreads = 128;
 
 template <typename scalar_t>
 __global__ void write_kv_kernel(
-    scalar_t* __restrict__ key_cache,          // (NB, KVH, BS, D)
+    scalar_t* __restrict__ key_cache,     // (num_blocks, kv_heads, block_size, D)
     scalar_t* __restrict__ value_cache,
-    const scalar_t* __restrict__ key,          // (T, KVH, D)
+    const scalar_t* __restrict__ key,     // (num_tokens, kv_heads, D)
     const scalar_t* __restrict__ value,
-    const int64_t* __restrict__ slots,         // (T,)
-    const int T, const int KVH, const int D, const int BS) {
-  const int64_t total = (int64_t)T * KVH * D;
-  for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < total;
-       i += (int64_t)gridDim.x * blockDim.x) {
-    const int d = i % D;
-    const int h = (i / D) % KVH;
-    const int t = i / (D * KVH);
+    const int64_t* __restrict__ slots,    // (num_tokens,)
+    const int num_tokens, const int num_kv_heads, const int head_dim,
+    const int block_size) {
+  const int64_t num_values = (int64_t)num_tokens * num_kv_heads * head_dim;
+  for (int64_t index = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+       index < num_values; index += (int64_t)gridDim.x * blockDim.x) {
+    const int dim = index % head_dim;
+    const int kv_head = (index / head_dim) % num_kv_heads;
+    const int token = index / (head_dim * num_kv_heads);
 
-    const int64_t slot = slots[t];
-    if (slot < 0) continue;                    // padding: not a real token
-    const int64_t block = slot / BS;
-    const int64_t off = slot % BS;
+    const int64_t slot = slots[token];
+    if (slot < 0) continue;               // padding: not a real token
+    const int64_t block_id = slot / block_size;
+    const int64_t offset = slot % block_size;
 
-    const int64_t dst = ((block * KVH + h) * BS + off) * D + d;
-    key_cache[dst] = key[i];
-    value_cache[dst] = value[i];
+    const int64_t target =
+        ((block_id * num_kv_heads + kv_head) * block_size + offset) * head_dim +
+        dim;
+    key_cache[target] = key[index];
+    value_cache[target] = value[index];
   }
 }
 
 // ------------------------------------------------------------- paged_attn
 //
-// Online softmax, the FlashAttention rescaling, over tiles of 128 positions:
+// The online softmax, as in FlashAttention, over tiles of 128 positions:
 //
-//     m_new = max(m_old, max(scores))      running maximum
-//     alpha = exp(m_old - m_new)           what the old accumulator is worth
-//     l     = l * alpha + sum(p)           running denominator
-//     acc   = acc * alpha + sum(p * V)     running numerator
+//     new_max     = max(running_max, max(scores))
+//     rescale     = exp(running_max - new_max)   what the old sums are worth
+//     running_sum = running_sum * rescale + sum(p)          the denominator
+//     accumulator = accumulator * rescale + sum(p * V)      the numerator
 //
-// The full score row is never written anywhere. That is the point: at 2048
-// context it would be 8KB per (seq, head) of pure HBM traffic.
+// The full score row is never stored. At a context of 2048 it is 8 KB for
+// each (seq, head) of HBM traffic that does nothing.
 
 template <typename scalar_t>
 __global__ void __launch_bounds__(kThreads) paged_attn_v1(
-    scalar_t* __restrict__ out,                // (S, H, D)
-    const scalar_t* __restrict__ q,            // (S, H, D)
-    const scalar_t* __restrict__ kc,           // (NB, KVH, BS, D)
-    const scalar_t* __restrict__ vc,
-    const int32_t* __restrict__ bt,            // (S, MBS)
-    const int32_t* __restrict__ ctx,           // (S,)
-    const float scale,
-    const int H, const int KVH, const int D, const int BS, const int MBS) {
-  const int s = blockIdx.x;
-  const int h = blockIdx.y;
-  const int kvh = h / (H / KVH);               // GQA: which KV head do I read?
-  const int tid = threadIdx.x;
-  const int n = ctx[s];
+    scalar_t* __restrict__ output,              // (num_seqs, num_heads, D)
+    const scalar_t* __restrict__ query,         // (num_seqs, num_heads, D)
+    const scalar_t* __restrict__ key_cache,     // (num_blocks, kv_heads, block_size, D)
+    const scalar_t* __restrict__ value_cache,
+    const int32_t* __restrict__ block_tables,   // (num_seqs, max_blocks_per_seq)
+    const int32_t* __restrict__ context_lens,   // (num_seqs,)
+    const float scale, const int num_heads, const int num_kv_heads,
+    const int head_dim, const int block_size, const int max_blocks_per_seq) {
+  const int seq = blockIdx.x;
+  const int head = blockIdx.y;
+  const int kv_head = head / (num_heads / num_kv_heads);  // GQA
+  const int thread = threadIdx.x;
+  const int context_len = context_lens[seq];
+  const int32_t* block_table = block_tables + seq * max_blocks_per_seq;
 
-  extern __shared__ float smem[];
-  float* q_sh = smem;                          // D
-  float* p_sh = q_sh + D;                      // kThreads
-  float* acc_sh = p_sh + kThreads;             // D
-  float* red = acc_sh + D;                     // kThreads
-  __shared__ float m_i, l_i, m_new_sh, alpha_sh;
+  extern __shared__ float shared[];
+  float* scaled_query = shared;                     // head_dim
+  float* tile_probs = scaled_query + head_dim;      // kThreads
+  float* accumulator = tile_probs + kThreads;       // head_dim
+  float* scratch = accumulator + head_dim;          // kThreads
 
-  // The block reads the query vector one time, and every position uses it.
-  // So fold the scale into it here, and not into every score.
-  for (int d = tid; d < D; d += kThreads) {
-    q_sh[d] = static_cast<float>(q[((int64_t)s * H + h) * D + d]) * scale;
-    acc_sh[d] = 0.f;
-  }
-  if (tid == 0) {
-    m_i = -INFINITY;
-    l_i = 0.f;
+  // The block reads the query one time, and every position uses it. So put
+  // the scale into it here, not into every score.
+  const int64_t query_offset = ((int64_t)seq * num_heads + head) * head_dim;
+  for (int dim = thread; dim < head_dim; dim += kThreads) {
+    scaled_query[dim] = static_cast<float>(query[query_offset + dim]) * scale;
+    accumulator[dim] = 0.f;
   }
   __syncthreads();
 
-  for (int base = 0; base < n; base += kThreads) {
-    const int pos = base + tid;
+  float running_max = -INFINITY;   // every thread holds the same copy
+  float running_sum = 0.f;
+  for (int tile_start = 0; tile_start < context_len; tile_start += kThreads) {
+    const int position = tile_start + thread;
+    const bool in_context = position < context_len;
 
-    // --- score: one thread, one position, a serial walk down head_dim ---
-    float sc = -INFINITY;
-    if (pos < n) {
-      const int phys = bt[s * MBS + (pos / BS)];
-      const scalar_t* kp =
-          kc + (((int64_t)phys * KVH + kvh) * BS + (pos % BS)) * D;
-      float dot = 0.f;
-      for (int d = 0; d < D; ++d) dot += q_sh[d] * static_cast<float>(kp[d]);
-      sc = dot;
-    }
-
-    // --- running maximum over the tile ---
-    red[tid] = sc;
-    __syncthreads();
-    for (int o = kThreads / 2; o > 0; o >>= 1) {
-      if (tid < o) red[tid] = fmaxf(red[tid], red[tid + o]);
-      __syncthreads();
-    }
-    if (tid == 0) {
-      const float mn = fmaxf(m_i, red[0]);
-      alpha_sh = __expf(m_i - mn);
-      m_new_sh = mn;
-    }
-    __syncthreads();
-    const float alpha = alpha_sh;
-
-    // --- probabilities, and the running denominator ---
-    const float p = (pos < n) ? __expf(sc - m_new_sh) : 0.f;
-    p_sh[tid] = p;
-    red[tid] = p;
-    __syncthreads();
-    for (int o = kThreads / 2; o > 0; o >>= 1) {
-      if (tid < o) red[tid] += red[tid + o];
-      __syncthreads();
-    }
-    if (tid == 0) {
-      l_i = l_i * alpha + red[0];
-      m_i = m_new_sh;
+    // The score: one thread, one position, a serial walk down head_dim.
+    float score = -INFINITY;
+    if (in_context) {
+      const scalar_t* key_row = cache_row(key_cache, block_table, position,
+                                          kv_head, num_kv_heads, block_size,
+                                          head_dim);
+      score = 0.f;
+      for (int dim = 0; dim < head_dim; ++dim)
+        score += scaled_query[dim] * static_cast<float>(key_row[dim]);
     }
 
-    // --- the numerator. Threads switch roles: now each owns a slice of
-    //     head_dim and walks every position in the tile. A read of V down a
-    //     column like this is as uncoalesced as the K read above. ---
-    const int tile = min(kThreads, n - base);
-    __syncthreads();
-    for (int d = tid; d < D; d += kThreads) {
-      float a = 0.f;
-      for (int j = 0; j < tile; ++j) {
-        const int pj = base + j;
-        const int physj = bt[s * MBS + (pj / BS)];
-        const scalar_t* vp =
-            vc + (((int64_t)physj * KVH + kvh) * BS + (pj % BS)) * D;
-        a += p_sh[j] * static_cast<float>(vp[d]);
+    const float new_max = fmaxf(running_max, block_max(score, scratch));
+    const float rescale = __expf(running_max - new_max);
+    const float prob = in_context ? __expf(score - new_max) : 0.f;
+    tile_probs[thread] = prob;
+    running_sum = running_sum * rescale + block_sum(prob, scratch);
+    running_max = new_max;
+
+    // The numerator. The threads change roles: each thread now owns a part
+    // of head_dim and walks every position of the tile. This read of V down
+    // a column is as uncoalesced as the read of K above.
+    const int tile_len = min(kThreads, context_len - tile_start);
+    for (int dim = thread; dim < head_dim; dim += kThreads) {
+      float weighted_sum = 0.f;
+      for (int j = 0; j < tile_len; ++j) {
+        const scalar_t* value_row = cache_row(value_cache, block_table,
+                                              tile_start + j, kv_head,
+                                              num_kv_heads, block_size,
+                                              head_dim);
+        weighted_sum += tile_probs[j] * static_cast<float>(value_row[dim]);
       }
-      acc_sh[d] = acc_sh[d] * alpha + a;
+      accumulator[dim] = accumulator[dim] * rescale + weighted_sum;
     }
     __syncthreads();
   }
 
-  const float denom = (n > 0) ? l_i : 1.f;
-  for (int d = tid; d < D; d += kThreads)
-    out[((int64_t)s * H + h) * D + d] =
-        static_cast<scalar_t>((n > 0) ? acc_sh[d] / denom : 0.f);
+  for (int dim = thread; dim < head_dim; dim += kThreads) {
+    const float result = context_len > 0 ? accumulator[dim] / running_sum : 0.f;
+    output[query_offset + dim] = static_cast<scalar_t>(result);
+  }
 }
 
 }  // namespace
@@ -175,22 +199,23 @@ void write_kv(torch::Tensor key_cache, torch::Tensor value_cache,
   TORCH_CHECK(key_cache.is_cuda(), "key_cache must be on the GPU");
   TORCH_CHECK(key_cache.is_contiguous() && key.is_contiguous(),
               "write_kv needs contiguous tensors");
-  const int T = key.size(0), KVH = key.size(1), D = key.size(2);
-  const int BS = key_cache.size(2);
+  const int num_tokens = key.size(0), num_kv_heads = key.size(1);
+  const int head_dim = key.size(2), block_size = key_cache.size(2);
   auto slots = slot_indices.to(torch::kLong).contiguous();
 
-  const int64_t total = (int64_t)T * KVH * D;
-  const int threads = 256;
-  const int blocks = (int)std::min<int64_t>((total + threads - 1) / threads, 4096);
-  if (total == 0) return;
+  const int64_t num_values = (int64_t)num_tokens * num_kv_heads * head_dim;
+  if (num_values == 0) return;
+  const int num_blocks = (int)std::min<int64_t>(
+      (num_values + kWriteThreads - 1) / kWriteThreads, kMaxWriteBlocks);
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::kHalf, at::kBFloat16, key.scalar_type(), "write_kv", [&] {
-        write_kv_kernel<scalar_t><<<blocks, threads,
-                                    0, at::cuda::getCurrentCUDAStream()>>>(
+        write_kv_kernel<scalar_t><<<num_blocks, kWriteThreads, 0,
+                                    at::cuda::getCurrentCUDAStream()>>>(
             key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
             key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-            slots.data_ptr<int64_t>(), T, KVH, D, BS);
+            slots.data_ptr<int64_t>(), num_tokens, num_kv_heads, head_dim,
+            block_size);
       });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -203,32 +228,35 @@ torch::Tensor paged_attn(torch::Tensor query, torch::Tensor key_cache,
   TORCH_CHECK(key_cache.is_contiguous() && value_cache.is_contiguous(),
               "the KV cache must be contiguous");
 
-  const int S = query.size(0), H = query.size(1), D = query.size(2);
-  const int KVH = key_cache.size(1), BS = key_cache.size(2);
-  const int MBS = block_tables.size(1);
-  TORCH_CHECK(H % KVH == 0, "num_heads must be a multiple of num_kv_heads");
+  const int num_seqs = query.size(0), num_heads = query.size(1);
+  const int head_dim = query.size(2);
+  const int num_kv_heads = key_cache.size(1), block_size = key_cache.size(2);
+  const int max_blocks_per_seq = block_tables.size(1);
+  TORCH_CHECK(num_heads % num_kv_heads == 0,
+              "num_heads must be a multiple of num_kv_heads");
 
-  auto out = torch::empty_like(query);
-  auto bt = block_tables.to(torch::kInt).contiguous();
-  auto ctx = context_lens.to(torch::kInt).contiguous();
+  auto output = torch::empty_like(query);
+  auto tables = block_tables.to(torch::kInt).contiguous();
+  auto lens = context_lens.to(torch::kInt).contiguous();
 
-  const size_t shared = (2 * D + 2 * kThreads) * sizeof(float);
-  const dim3 grid(S, H);
+  const size_t shared_bytes = (2 * head_dim + 2 * kThreads) * sizeof(float);
+  const dim3 grid(num_seqs, num_heads);
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::kHalf, at::kBFloat16, query.scalar_type(), "paged_attn", [&] {
-        paged_attn_v1<scalar_t><<<grid, kThreads, shared,
+        paged_attn_v1<scalar_t><<<grid, kThreads, shared_bytes,
                                   at::cuda::getCurrentCUDAStream()>>>(
-            out.data_ptr<scalar_t>(), query.data_ptr<scalar_t>(),
+            output.data_ptr<scalar_t>(), query.data_ptr<scalar_t>(),
             key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
-            bt.data_ptr<int32_t>(), ctx.data_ptr<int32_t>(), (float)scale,
-            H, KVH, D, BS, MBS);
+            tables.data_ptr<int32_t>(), lens.data_ptr<int32_t>(),
+            (float)scale, num_heads, num_kv_heads, head_dim, block_size,
+            max_blocks_per_seq);
       });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return out;
+  return output;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("paged_attn", &paged_attn, "paged decode attention (CUDA)");
-  m.def("write_kv", &write_kv, "scatter K/V into the paged cache (CUDA)");
+  m.def("write_kv", &write_kv, "scatter K and V into the paged cache (CUDA)");
 }

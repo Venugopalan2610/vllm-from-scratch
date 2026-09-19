@@ -10,72 +10,67 @@ from jax.experimental import pallas as pl
 from jvllm import compat
 
 
-def _paged_attn_kernel(q_ref, kc_ref, vc_ref, bt_ref, ctx_ref, o_ref, *,
-                       scale, group, block_size, head_dim):
-    h = pl.program_id(1)
-    kvh = h // group
+def _paged_attention_kernel(query_ref, key_cache_ref, value_cache_ref,
+                            block_table_ref, context_len_ref, output_ref, *,
+                            scale, heads_per_kv_head, block_size, head_dim):
+    kv_head = pl.program_id(1) // heads_per_kv_head
+    # Make the constant INSIDE the kernel. pallas_call refuses a jnp scalar
+    # that it captures from module level: "captures constants [f32[]]. You
+    # should pass them as inputs."
+    masked_score = jnp.float32(-1e30)
+    context_len = context_len_ref[0]
+    query = query_ref[0, 0].astype(jnp.float32) * scale
+    offsets = jnp.arange(block_size)
 
-    # Build it INSIDE the kernel. pallas_call captures a jnp scalar from module
-    # level as a constant, and it refuses those outright:
-    # "captures constants [f32[]]. You should pass them as inputs."
-    neg = jnp.float32(-1e30)
-    ctx = ctx_ref[0]
-    q = q_ref[0, 0].astype(jnp.float32) * scale
-    offs = jnp.arange(block_size)
+    def attend_block(block_index, carry):
+        running_max, running_sum, accumulator = carry
+        block_id = block_table_ref[0, block_index]      # the page table read,
+        keys = key_cache_ref[block_id, kv_head].astype(jnp.float32)  # inside
+        values = value_cache_ref[block_id, kv_head].astype(jnp.float32)
 
-    def body(b, carry):
-        m_i, l_i, acc = carry
-        phys = bt_ref[0, b]                       # the page-table lookup,
-        k = kc_ref[phys, kvh].astype(jnp.float32)  # inside the kernel
-        v = vc_ref[phys, kvh].astype(jnp.float32)
+        valid = block_index * block_size + offsets < context_len
+        scores = jnp.where(valid, jnp.sum(query[None, :] * keys, axis=1),
+                           masked_score)
+        # Online softmax: rescale what you have. Never make the full score row.
+        new_max = jnp.maximum(running_max, jnp.max(scores))
+        rescale = jnp.exp(running_max - new_max)
+        probs = jnp.exp(scores - new_max)
+        return (new_max,
+                running_sum * rescale + jnp.sum(probs),
+                accumulator * rescale + jnp.sum(probs[:, None] * values,
+                                                axis=0))
 
-        pos = b * block_size + offs
-        valid = pos < ctx
-        scores = jnp.sum(q[None, :] * k, axis=1)
-        scores = jnp.where(valid, scores, neg)
-
-        # online softmax: rescale what you already have, never materialise the
-        # full score row
-        m_new = jnp.maximum(m_i, jnp.max(scores))
-        alpha = jnp.exp(m_i - m_new)
-        p = jnp.exp(scores - m_new)
-        return (m_new,
-                l_i * alpha + jnp.sum(p),
-                acc * alpha + jnp.sum(p[:, None] * v, axis=0))
-
-    m_i, l_i, acc = jax.lax.fori_loop(
-        0, pl.cdiv(ctx, block_size), body,
-        (neg, jnp.float32(0.0), jnp.zeros(head_dim, jnp.float32)),
-    )
-    o_ref[0, 0] = (acc / l_i).astype(o_ref.dtype)
+    _, total, accumulator = jax.lax.fori_loop(
+        0, pl.cdiv(context_len, block_size), attend_block,
+        (masked_score, jnp.float32(0.0), jnp.zeros(head_dim, jnp.float32)))
+    output_ref[0, 0] = (accumulator / total).astype(output_ref.dtype)
 
 
 @functools.partial(jax.jit, static_argnames=("scale",))
 def paged_attention_pallas(query, key_cache, value_cache, block_tables,
                            context_lens, scale=None):
-    S, H, D = query.shape
-    NB, KVH, BS, _ = key_cache.shape
-    MAXB = block_tables.shape[1]
-    if scale is None:
-        scale = float(1.0 / np.sqrt(D))
+    num_seqs, num_heads, head_dim = query.shape
+    num_blocks, num_kv_heads, block_size, _ = key_cache.shape
+    blocks_per_seq = block_tables.shape[1]
+    scale = scale or float(1.0 / np.sqrt(head_dim))
 
-    kernel = functools.partial(_paged_attn_kernel, scale=scale,
-                               group=H // KVH, block_size=BS, head_dim=D)
-
-    # K and V get a BlockSpec that covers the WHOLE cache. The program does not
-    # know which blocks it needs until it reads the block table. Every other
-    # operand has a (seq, head) tile.
+    kernel = functools.partial(_paged_attention_kernel, scale=scale,
+                               heads_per_kv_head=num_heads // num_kv_heads,
+                               block_size=block_size, head_dim=head_dim)
+    one_head = pl.BlockSpec((1, 1, head_dim), lambda seq, head: (seq, head, 0))
+    # K and V get a BlockSpec over the WHOLE cache. A program knows its
+    # blocks only after it reads the block table. The other operands get a
+    # (seq, head) tile.
+    whole_cache = pl.BlockSpec((num_blocks, num_kv_heads, block_size,
+                                head_dim), lambda seq, head: (0, 0, 0, 0))
     return pl.pallas_call(
         kernel,
-        grid=(S, H),
-        in_specs=[
-            pl.BlockSpec((1, 1, D), lambda s, h: (s, h, 0)),
-            pl.BlockSpec((NB, KVH, BS, D), lambda s, h: (0, 0, 0, 0)),
-            pl.BlockSpec((NB, KVH, BS, D), lambda s, h: (0, 0, 0, 0)),
-            pl.BlockSpec((1, MAXB), lambda s, h: (s, 0)),
-            pl.BlockSpec((1,), lambda s, h: (s,)),
-        ],
-        out_specs=pl.BlockSpec((1, 1, D), lambda s, h: (s, h, 0)),
+        grid=(num_seqs, num_heads),
+        in_specs=[one_head, whole_cache, whole_cache,
+                  pl.BlockSpec((1, blocks_per_seq),
+                               lambda seq, head: (seq, 0)),
+                  pl.BlockSpec((1,), lambda seq, head: (seq,))],
+        out_specs=one_head,
         out_shape=jax.ShapeDtypeStruct(query.shape, query.dtype),
         compiler_params=compat.compiler_params(num_warps=4),
     )(query, key_cache, value_cache, block_tables,

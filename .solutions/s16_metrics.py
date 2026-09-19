@@ -5,18 +5,18 @@ import random
 
 
 def percentile(values, q):
-    """Linear-interpolated percentile, matching numpy's default."""
+    """The percentile with linear interpolation, as numpy does by default."""
     if not values:
         return float("nan")
-    xs = sorted(values)
-    if len(xs) == 1:
-        return float(xs[0])
-    pos = (len(xs) - 1) * q
-    lo = math.floor(pos)
-    hi = math.ceil(pos)
-    if lo == hi:
-        return float(xs[int(pos)])
-    return float(xs[lo] + (xs[hi] - xs[lo]) * (pos - lo))
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * q
+    below, above = math.floor(position), math.ceil(position)
+    fraction = position - below
+    return float(ordered[below] + (ordered[above] - ordered[below]) * fraction)
+
+
+def mean(values):
+    return sum(values) / len(values) if values else 0.0
 
 
 class RequestRecord:
@@ -41,7 +41,8 @@ class RequestRecord:
 
     @property
     def itls(self):
-        return [b - a for a, b in zip(self.token_times, self.token_times[1:])]
+        return [later - earlier for earlier, later
+                in zip(self.token_times, self.token_times[1:])]
 
     @property
     def num_tokens(self):
@@ -57,70 +58,77 @@ class MetricsCollector:
         self.start = None
         self.end = None
 
-    def on_arrival(self, rid, t):
-        self.records[rid] = RequestRecord(rid, t)
-        self.start = t if self.start is None else min(self.start, t)
+    def on_arrival(self, rid, timestamp):
+        self.records[rid] = RequestRecord(rid, timestamp)
+        self.start = timestamp if self.start is None else min(self.start,
+                                                              timestamp)
 
-    def on_schedule(self, rid, t):
-        self.records[rid].scheduled = t
+    def on_schedule(self, rid, timestamp):
+        self.records[rid].scheduled = timestamp
 
-    def on_token(self, rid, t):
-        self.records[rid].token_times.append(t)
+    def on_token(self, rid, timestamp):
+        self.records[rid].token_times.append(timestamp)
 
-    def on_finish(self, rid, t):
-        r = self.records[rid]
-        r.finish = t
-        self.finished.append(r)
-        self.end = t if self.end is None else max(self.end, t)
+    def on_finish(self, rid, timestamp):
+        record = self.records[rid]
+        record.finish = timestamp
+        self.finished.append(record)
+        self.end = timestamp if self.end is None else max(self.end, timestamp)
 
-    def on_preemption(self, n=1):
-        self.preemptions += n
+    def on_preemption(self, count=1):
+        self.preemptions += count
 
     def on_kv_utilization(self, used_blocks, total_blocks):
-        self.kv_samples.append(used_blocks / total_blocks if total_blocks else 0.0)
+        self.kv_samples.append(used_blocks / total_blocks if total_blocks
+                               else 0.0)
+
+    @property
+    def elapsed(self):
+        if self.start is None or self.end is None:
+            return 0.0
+        return self.end - self.start
+
+    def _present(self, field):
+        values = [getattr(record, field) for record in self.records.values()]
+        return [value for value in values if value is not None]
 
     def snapshot(self):
-        ttfts = [r.ttft for r in self.records.values() if r.ttft is not None]
-        itls = [x for r in self.records.values() for x in r.itls]
-        queues = [r.queue_time for r in self.records.values()
-                  if r.queue_time is not None]
-        total_tokens = sum(r.num_tokens for r in self.records.values())
-        elapsed = (self.end - self.start) if (self.start is not None
-                                             and self.end is not None) else 0.0
+        ttfts = self._present("ttft")
+        itls = [itl for record in self.records.values() for itl in record.itls]
+        queue_times = self._present("queue_time")
+        total_tokens = sum(record.num_tokens
+                           for record in self.records.values())
         return {
             "num_requests": len(self.records),
             "num_finished": len(self.finished),
             "total_tokens": total_tokens,
-            "elapsed_s": elapsed,
-            "throughput_tok_s": (total_tokens / elapsed) if elapsed > 0 else 0.0,
+            "elapsed_s": self.elapsed,
+            "throughput_tok_s": (total_tokens / self.elapsed
+                                 if self.elapsed > 0 else 0.0),
             "ttft_p50": percentile(ttfts, 0.50),
             "ttft_p99": percentile(ttfts, 0.99),
             "itl_p50": percentile(itls, 0.50),
             "itl_p99": percentile(itls, 0.99),
-            "queue_p50": percentile(queues, 0.50),
+            "queue_p50": percentile(queue_times, 0.50),
             "preemptions": self.preemptions,
-            "kv_utilization_mean": (sum(self.kv_samples) / len(self.kv_samples)
-                                    if self.kv_samples else 0.0),
-            "kv_utilization_max": max(self.kv_samples) if self.kv_samples else 0.0,
+            "kv_utilization_mean": mean(self.kv_samples),
+            "kv_utilization_max": max(self.kv_samples, default=0.0),
         }
 
     def goodput(self, ttft_slo, itl_slo):
-        """Requests that met BOTH latency targets. The number that matters."""
-        ok = 0
-        for r in self.records.values():
-            if r.ttft is None or r.finish is None:
-                continue
-            if r.ttft <= ttft_slo and percentile(r.itls, 0.99) <= itl_slo:
-                ok += 1
-        return ok
+        """The requests that met BOTH latency targets. This number counts."""
+        return sum(1 for record in self.records.values()
+                   if record.ttft is not None and record.finish is not None
+                   and record.ttft <= ttft_slo
+                   and percentile(record.itls, 0.99) <= itl_slo)
 
 
-def poisson_arrivals(rate_per_s, n, seed=0, start=0.0):
-    """Arrival timestamps for a Poisson process: exponential gaps."""
+def poisson_arrivals(rate_per_s, num_arrivals, seed=0, start=0.0):
+    """The arrival times of a Poisson process: exponential gaps."""
     rng = random.Random(seed)
-    t = start
-    out = []
-    for _ in range(n):
-        t += rng.expovariate(rate_per_s)
-        out.append(t)
-    return out
+    arrivals = []
+    timestamp = start
+    for _ in range(num_arrivals):
+        timestamp += rng.expovariate(rate_per_s)
+        arrivals.append(timestamp)
+    return arrivals

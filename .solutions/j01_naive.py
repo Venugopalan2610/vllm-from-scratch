@@ -1,19 +1,18 @@
-"""Reference solution, stage 01 (jax). Peek only after you've tried."""
+"""Reference solution, stage 01 (jax). Look only after you try it yourself."""
 
 import jax.numpy as jnp
 
 
 def naive_generate(model, prompt: str, max_tokens: int) -> list[int]:
-    ids = [int(t) for t in model.encode(prompt)]
-    out = []
+    token_ids = [int(token) for token in model.encode(prompt)]
+    generated = []
     for _ in range(max_tokens):
-        # No cache argument at all: the model allocates a scratch cache exactly
-        # as long as this prefix, fills it, and drops it. That is the quadratic
-        # recompute, made visible.
-        logits, _ = model.forward(jnp.asarray([ids], dtype=jnp.int32))
-        nxt = int(logits[0].argmax())
-        if nxt in model.eos_ids:
+        # No cache argument: the model makes a scratch cache as long as this
+        # prefix, fills it, and drops it. That is the quadratic recompute.
+        logits, _ = model.forward(jnp.asarray([token_ids], dtype=jnp.int32))
+        next_token = int(logits[0].argmax())
+        if next_token in model.eos_ids:
             break
-        out.append(nxt)
-        ids.append(nxt)
-    return out
+        generated.append(next_token)
+        token_ids.append(next_token)
+    return generated

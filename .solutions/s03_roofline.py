@@ -4,47 +4,51 @@ import time
 
 import torch
 
+WARMUP_CALLS = 5
+
 
 def model_bytes(model) -> int:
     return sum(p.numel() * p.element_size() for p in model.parameters())
 
 
-def _sync_time(fn, iters, warmup=5):
-    for _ in range(warmup):
-        fn()
+def _milliseconds_per_call(call, num_calls):
+    for _ in range(WARMUP_CALLS):
+        call()
     torch.cuda.synchronize()
-    t = time.perf_counter()
-    for _ in range(iters):
-        fn()
+    start = time.perf_counter()
+    for _ in range(num_calls):
+        call()
     torch.cuda.synchronize()
-    return (time.perf_counter() - t) / iters * 1000
+    return (time.perf_counter() - start) / num_calls * 1000
+
+
+def _random_ids(model, num_tokens):
+    device = next(model.parameters()).device
+    return torch.randint(0, 1000, (1, num_tokens), device=device)
 
 
 @torch.inference_mode()
-def time_prefill(model, n_tokens: int, iters: int = 10) -> float:
-    dev = next(model.parameters()).device
-    ids = torch.randint(0, 1000, (1, n_tokens), device=dev)
-    return _sync_time(lambda: model(ids, use_cache=True), iters)
+def time_prefill(model, num_tokens: int, iters: int = 10) -> float:
+    """Milliseconds for one forward pass over num_tokens."""
+    prompt_ids = _random_ids(model, num_tokens)
+    return _milliseconds_per_call(lambda: model(prompt_ids, use_cache=True),
+                                  iters)
 
 
 @torch.inference_mode()
-def time_decode(model, ctx_len: int, steps: int = 40) -> float:
-    dev = next(model.parameters()).device
-    ids = torch.randint(0, 1000, (1, ctx_len), device=dev)
-    past = model(ids, use_cache=True).past_key_values
-    one = torch.randint(0, 1000, (1, 1), device=dev)
+def time_decode(model, context_len: int, steps: int = 40) -> float:
+    """Milliseconds for each token of decode, at a context of context_len."""
+    cache = model(_random_ids(model, context_len),
+                  use_cache=True).past_key_values
+    one_token = _random_ids(model, 1)
 
-    # Warm up, and let the cache grow naturally. The loop copies nothing.
-    for _ in range(5):
-        past = model(one, past_key_values=past, use_cache=True).past_key_values
+    def decode_step():
+        nonlocal cache
+        cache = model(one_token, past_key_values=cache,
+                      use_cache=True).past_key_values
 
-    torch.cuda.synchronize()
-    t = time.perf_counter()
-    for _ in range(steps):
-        past = model(one, past_key_values=past, use_cache=True).past_key_values
-    torch.cuda.synchronize()
-    return (time.perf_counter() - t) / steps * 1000
+    return _milliseconds_per_call(decode_step, steps)
 
 
-def achieved_gbs(nbytes: int, ms_per_token: float) -> float:
-    return nbytes / (ms_per_token / 1000) / 1e9
+def achieved_gbs(num_bytes: int, ms_per_token: float) -> float:
+    return num_bytes / (ms_per_token / 1000) / 1e9

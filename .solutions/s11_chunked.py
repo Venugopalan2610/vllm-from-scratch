@@ -3,15 +3,13 @@
 import math
 from collections import deque
 
-from app.s06_blocks import OutOfBlocks
-
 
 class ChunkSeq:
     def __init__(self, rid, prompt_len, max_tokens):
         self.id = rid
         self.prompt_len = prompt_len
         self.max_tokens = max_tokens
-        self.num_computed = 0        # prompt tokens prefilled so far
+        self.num_computed = 0        # the prompt tokens prefilled so far
         self.num_generated = 0
         self.blocks = []
 
@@ -28,14 +26,14 @@ class ChunkSeq:
         return self.num_generated >= self.max_tokens
 
     def __repr__(self):
-        return f"ChunkSeq({self.id}, {self.num_computed}/{self.prompt_len}p, " \
-               f"{self.num_generated}/{self.max_tokens}d)"
+        return (f"ChunkSeq({self.id}, {self.num_computed}/{self.prompt_len}p, "
+                f"{self.num_generated}/{self.max_tokens}d)")
 
 
 class ChunkedScheduler:
     def __init__(self, allocator, max_num_seqs=8, token_budget=512,
                  prefill_first=False):
-        self.alloc = allocator
+        self.allocator = allocator
         self.block_size = allocator.block_size
         self.max_num_seqs = max_num_seqs
         self.token_budget = token_budget
@@ -45,22 +43,22 @@ class ChunkedScheduler:
         self.finished = []
         self.steps = 0
 
-    def _grow(self, seq, n_tokens):
-        need = math.ceil(n_tokens / self.block_size) - len(seq.blocks)
-        if need <= 0:
-            return True
-        if self.alloc.num_free < need:
-            return False
-        seq.blocks.extend(self.alloc.allocate(need))
-        return True
-
     def add_request(self, rid, prompt_len, max_tokens):
         self.waiting.append(ChunkSeq(rid, prompt_len, max_tokens))
 
     def has_work(self):
         return bool(self.waiting or self.running)
 
-    def step(self):
+    def _grow(self, seq, num_tokens):
+        missing = math.ceil(num_tokens / self.block_size) - len(seq.blocks)
+        if missing <= 0:
+            return True
+        if self.allocator.num_free < missing:
+            return False
+        seq.blocks.extend(self.allocator.allocate(missing))
+        return True
+
+    def _admit(self):
         while self.waiting and len(self.running) < self.max_num_seqs:
             seq = self.waiting[0]
             if not self._grow(seq, seq.prompt_len):
@@ -68,63 +66,72 @@ class ChunkedScheduler:
             self.waiting.popleft()
             self.running.append(seq)
 
-        budget = self.token_budget
-        prefill, decoded, finished = [], [], []
+    def _decode_one(self, seq):
+        """-> True if seq got one more token."""
+        if not self._grow(seq, seq.num_tokens + 1):
+            return False
+        seq.num_generated += 1
+        return True
 
-        decoders = [s for s in self.running if not s.is_prefilling]
-        prefillers = [s for s in self.running if s.is_prefilling]
-
-        def do_decodes():
-            nonlocal budget
-            for seq in decoders:
-                if budget < 1:
-                    break
-                if not self._grow(seq, seq.num_tokens + 1):
-                    continue
-                seq.num_generated += 1
-                budget -= 1
+    def _decodes(self, decoders, budget):
+        decoded = []
+        for seq in decoders:
+            if len(decoded) >= budget:
+                break
+            if self._decode_one(seq):
                 decoded.append(seq)
+        return decoded
 
-        def do_prefills():
-            nonlocal budget
-            for seq in prefillers:
-                if budget <= 0:
-                    break
-                want = min(budget, seq.prompt_len - seq.num_computed)
-                if not self._grow(seq, seq.num_computed + want):
-                    continue
-                seq.num_computed += want
-                budget -= want
-                prefill.append((seq.id, want))
-                if seq.num_computed >= seq.prompt_len:
-                    # the last prefill chunk also emits the first token
-                    if self._grow(seq, seq.num_tokens + 1):
-                        seq.num_generated += 1
+    def _prefill_chunk(self, seq, num_tokens):
+        seq.num_computed += num_tokens
+        if not seq.is_prefilling:
+            # The last prefill chunk also makes the first token.
+            self._decode_one(seq)
 
+    def _prefills(self, prefillers, budget):
+        """-> [(rid, chunk length)]."""
+        chunks = []
+        for seq in prefillers:
+            if budget <= 0:
+                break
+            chunk_len = min(budget, seq.prompt_len - seq.num_computed)
+            if not self._grow(seq, seq.num_computed + chunk_len):
+                continue
+            self._prefill_chunk(seq, chunk_len)
+            budget -= chunk_len
+            chunks.append((seq.id, chunk_len))
+        return chunks
+
+    def _plan(self):
+        """-> (prefill chunks, decoded seqs), inside the token budget."""
+        decoders = [seq for seq in self.running if not seq.is_prefilling]
+        prefillers = [seq for seq in self.running if seq.is_prefilling]
         if self.prefill_first:
-            do_prefills()
-            do_decodes()
-        else:
-            do_decodes()
-            do_prefills()
+            prefill = self._prefills(prefillers, self.token_budget)
+            used = sum(length for _, length in prefill)
+            return prefill, self._decodes(decoders, self.token_budget - used)
+        decoded = self._decodes(decoders, self.token_budget)
+        return self._prefills(prefillers, self.token_budget - len(decoded)), \
+            decoded
 
-        used = self.token_budget - budget
-        for seq in list(self.running):
-            if seq.done:
-                self.alloc.free(seq.blocks)
-                seq.blocks = []
-                self.running.remove(seq)
-                self.finished.append(seq)
-                finished.append(seq)
+    def _retire_done(self):
+        finished = [seq for seq in self.running if seq.done]
+        for seq in finished:
+            self.allocator.free(seq.blocks)
+            seq.blocks = []
+            self.running.remove(seq)
+        self.finished.extend(finished)
+        return finished
 
-        if used:
+    def step(self):
+        self._admit()
+        prefill, decoded = self._plan()
+        tokens_used = sum(length for _, length in prefill) + len(decoded)
+        finished = self._retire_done()
+        if tokens_used:
             self.steps += 1
-        return {
-            "prefill": prefill,
-            "decoded": decoded,
-            "finished": finished,
-            "tokens_used": used,
-        }
+        return {"prefill": prefill, "decoded": decoded, "finished": finished,
+                "tokens_used": tokens_used}
 
     def run_to_completion(self, max_steps=100000):
         for _ in range(max_steps):
@@ -135,55 +142,22 @@ class ChunkedScheduler:
 
 
 class UnchunkedScheduler(ChunkedScheduler):
-    """A prefill must complete in a single step, however long it is.
+    """A prefill completes in one step, at every length.
 
-    This is the stage-10 behaviour, kept around so the tests can measure what
-    chunking actually bought.
+    This is the stage 10 behavior. The tests use it to measure what the
+    chunks give.
     """
 
     def __init__(self, allocator, max_num_seqs=8, token_budget=512):
         super().__init__(allocator, max_num_seqs, token_budget)
 
-    def step(self):
-        while self.waiting and len(self.running) < self.max_num_seqs:
-            seq = self.waiting[0]
-            if not self._grow(seq, seq.prompt_len):
-                break
-            self.waiting.popleft()
-            self.running.append(seq)
-
-        prefill, decoded, finished = [], [], []
-        used = 0
-        decoders_before = [s for s in self.running if not s.is_prefilling]
-
-        for seq in [s for s in self.running if s.is_prefilling]:
-            n = seq.prompt_len - seq.num_computed
-            seq.num_computed = seq.prompt_len
-            used += n                       # the WHOLE prompt, in one step
-            prefill.append((seq.id, n))
-            if self._grow(seq, seq.num_tokens + 1):
-                seq.num_generated += 1
-
-        for seq in decoders_before:
-            if not self._grow(seq, seq.num_tokens + 1):
-                continue
-            seq.num_generated += 1
-            used += 1
-            decoded.append(seq)
-
-        for seq in list(self.running):
-            if seq.done:
-                self.alloc.free(seq.blocks)
-                seq.blocks = []
-                self.running.remove(seq)
-                self.finished.append(seq)
-                finished.append(seq)
-
-        if used:
-            self.steps += 1
-        return {
-            "prefill": prefill,
-            "decoded": decoded,
-            "finished": finished,
-            "tokens_used": used,
-        }
+    def _plan(self):
+        decoders = [seq for seq in self.running if not seq.is_prefilling]
+        prefill = []
+        for seq in self.running:
+            if seq.is_prefilling:
+                prompt_left = seq.prompt_len - seq.num_computed
+                self._prefill_chunk(seq, prompt_left)   # the WHOLE prompt
+                prefill.append((seq.id, prompt_left))
+        decoded = [seq for seq in decoders if self._decode_one(seq)]
+        return prefill, decoded

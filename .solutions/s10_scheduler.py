@@ -30,7 +30,7 @@ class SeqState:
 
 class Scheduler:
     def __init__(self, allocator, max_num_seqs=8):
-        self.alloc = allocator
+        self.allocator = allocator
         self.block_size = allocator.block_size
         self.max_num_seqs = max_num_seqs
         self.waiting = deque()
@@ -39,46 +39,42 @@ class Scheduler:
         self.preemptions = 0
         self.steps = 0
 
-    # ---- helpers ----
-    def _blocks_for(self, n_tokens):
-        return math.ceil(n_tokens / self.block_size)
-
-    def _grow(self, seq, n_tokens):
-        need = self._blocks_for(n_tokens) - len(seq.blocks)
-        if need <= 0:
-            return True
-        if self.alloc.num_free < need:
-            return False
-        seq.blocks.extend(self.alloc.allocate(need))
-        return True
-
-    def _release(self, seq):
-        if seq.blocks:
-            self.alloc.free(seq.blocks)
-            seq.blocks = []
-
-    # ---- public ----
     def add_request(self, rid, prompt_len, max_tokens):
         self.waiting.append(SeqState(rid, prompt_len, max_tokens))
 
     def has_work(self):
         return bool(self.waiting or self.running)
 
+    def _grow(self, seq, num_tokens):
+        """Give seq the blocks for num_tokens. -> False if they are not free."""
+        missing = math.ceil(num_tokens / self.block_size) - len(seq.blocks)
+        if missing <= 0:
+            return True
+        if self.allocator.num_free < missing:
+            return False
+        seq.blocks.extend(self.allocator.allocate(missing))
+        return True
+
+    def _release(self, seq):
+        if seq.blocks:
+            self.allocator.free(seq.blocks)
+            seq.blocks = []
+
     def _admit(self):
         admitted = []
         while self.waiting and len(self.running) < self.max_num_seqs:
             seq = self.waiting[0]
             if not self._grow(seq, seq.prompt_len):
-                break                      # not enough KV; leave it queued
+                break                      # no KV for it: it stays queued
             self.waiting.popleft()
             seq.prefilled = True
             self.running.append(seq)
             admitted.append(seq)
         return admitted
 
-    def _preempt_one(self):
-        """Preempt by RECOMPUTE: drop the newest running sequence's blocks and
-        send it back to the front of the queue. Prefill is cheap; PCIe is not."""
+    def _preempt_newest(self):
+        """Preempt by RECOMPUTE: free the blocks of the newest sequence, and
+        put it at the front of the queue. A prefill is cheap. PCIe is not."""
         victim = self.running.pop()
         self._release(victim)
         victim.num_generated = 0
@@ -88,48 +84,44 @@ class Scheduler:
         self.preemptions += 1
         return victim
 
+    def _decode_running(self, just_prefilled):
+        """Give each running sequence one token. Preempt the newest sequence
+        until the blocks fit."""
+        decoded, preempted = [], []
+        index = 0
+        while index < len(self.running):
+            seq = self.running[index]
+            if seq in just_prefilled:
+                index += 1
+            elif self._grow(seq, seq.num_tokens + 1):
+                seq.num_generated += 1
+                decoded.append(seq)
+                index += 1
+            elif len(self.running) == 1:
+                raise OutOfBlocks(f"cannot fit even one sequence (seq "
+                                  f"{seq.id}, {seq.num_tokens} tokens)")
+            else:
+                # Try the same index again, with the freed blocks.
+                preempted.append(self._preempt_newest())
+        return decoded, preempted
+
+    def _retire_done(self):
+        finished = [seq for seq in self.running if seq.done]
+        for seq in finished:
+            self._release(seq)
+            self.running.remove(seq)
+        self.finished.extend(finished)
+        return finished
+
     def step(self):
-        """One engine iteration. Returns a record of what happened."""
+        """One engine iteration. -> a record of what happened."""
         prefilled = self._admit()
-        decoded, finished, preempted = [], [], []
-
-        i = 0
-        while i < len(self.running):
-            seq = self.running[i]
-            if seq in prefilled:
-                i += 1
-                continue
-            if not self._grow(seq, seq.num_tokens + 1):
-                # Out of KV. Preempt the newest sequence to free memory.
-                if self.running[-1] is seq and len(self.running) == 1:
-                    raise OutOfBlocks(
-                        f"cannot fit even one sequence (seq {seq.id}, "
-                        f"{seq.num_tokens} tokens)"
-                    )
-                v = self._preempt_one()
-                preempted.append(v)
-                if v is seq:
-                    continue           # this row is gone; re-check index i
-                continue               # retry the same seq with freed memory
-            seq.num_generated += 1
-            decoded.append(seq)
-            i += 1
-
-        for seq in list(self.running):
-            if seq.done:
-                self._release(seq)
-                self.running.remove(seq)
-                self.finished.append(seq)
-                finished.append(seq)
-
+        decoded, preempted = self._decode_running(prefilled)
+        finished = self._retire_done()
         if prefilled or decoded:
             self.steps += 1
-        return {
-            "prefilled": prefilled,
-            "decoded": decoded,
-            "preempted": preempted,
-            "finished": finished,
-        }
+        return {"prefilled": prefilled, "decoded": decoded,
+                "preempted": preempted, "finished": finished}
 
     def run_to_completion(self, max_steps=100000):
         for _ in range(max_steps):

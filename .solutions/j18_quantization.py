@@ -3,93 +3,104 @@
 import jax
 import jax.numpy as jnp
 
+INT8_MAX = 127.0
+FP8_E4M3_MAX = 448.0
+TINY = 1e-8
 
-def quantize_int8_per_channel(W):
-    """Symmetric int8, one scale per output channel.
 
-    The reduction axis is the LAST one, so this works unchanged on a single
-    (out, in) matrix and on the (layers, out, in) stacks jvllm actually holds.
+def quantize_int8_per_channel(weight):
+    """Symmetric int8, one scale for each output channel.
+
+    The reduction axis is the LAST one. So this works on one (out, in)
+    matrix and on the (layers, out, in) stacks that jvllm holds.
     """
-    scales = jnp.maximum(jnp.max(jnp.abs(W), axis=-1), 1e-8) / 127.0
-    q = jnp.clip(jnp.round(W / scales[..., None]), -127, 127).astype(jnp.int8)
-    return q, scales.astype(jnp.float32)
+    scales = jnp.maximum(jnp.max(jnp.abs(weight), axis=-1), TINY) / INT8_MAX
+    int8_weight = jnp.clip(jnp.round(weight / scales[..., None]),
+                           -INT8_MAX, INT8_MAX).astype(jnp.int8)
+    return int8_weight, scales.astype(jnp.float32)
 
 
-def dequantize_int8(q, scales):
-    return q.astype(jnp.float32) * scales[..., None]
+def dequantize_int8(int8_weight, scales):
+    return int8_weight.astype(jnp.float32) * scales[..., None]
 
 
-def quantized_matmul(x, q, scales):
-    """x @ dequantize(q, scales).T, WITHOUT ever building the dequantized W.
+def quantized_matmul(inputs, int8_weight, scales):
+    """inputs @ dequantize(int8_weight, scales).T, and the dequantized weight
+    is NEVER made.
 
-    A per-output-channel scale commutes with the matmul: scaling every element
-    of output row j by s_j is the same as scaling column j of the result. So
-    the scale moves into the epilogue and the big weight is only ever read in
-    its small dtype. Materialise the bf16 weight first and you have added a
-    full-size write and a full-size read -- and made decode slower, not faster.
+    A scale for each output channel commutes with the matmul. A scale on
+    output row j of the weight is a scale on column j of the result. So the
+    scale moves after the matmul, and decode reads the large weight only in
+    its small dtype. If you make the bf16 weight first, you add a full-size write
+    and a full-size read, and decode becomes slower, not faster.
     """
-    return (x @ q.astype(x.dtype).T) * scales.astype(x.dtype)
+    return (inputs @ int8_weight.astype(inputs.dtype).T) \
+        * scales.astype(inputs.dtype)
 
 
-def quantize_fp8(t):
-    """Per-tensor FP8 (e4m3). Ada (sm_89) supports the dtype natively."""
-    amax = jnp.maximum(jnp.max(jnp.abs(t)).astype(jnp.float32), 1e-8)
-    scale = amax / 448.0                        # e4m3 max representable
-    q = jnp.clip(t.astype(jnp.float32) / scale, -448, 448).astype(jnp.float8_e4m3fn)
-    return q, scale
+def quantize_fp8(tensor):
+    """FP8 (e4m3) with one scale for the tensor. Ada (sm_89) has the dtype in
+    hardware."""
+    amax = jnp.maximum(jnp.max(jnp.abs(tensor)).astype(jnp.float32), TINY)
+    scale = amax / FP8_E4M3_MAX
+    fp8_tensor = jnp.clip(tensor.astype(jnp.float32) / scale,
+                          -FP8_E4M3_MAX, FP8_E4M3_MAX)
+    return fp8_tensor.astype(jnp.float8_e4m3fn), scale
 
 
-def dequantize_fp8(q, scale, dtype=jnp.bfloat16):
-    return (q.astype(jnp.float32) * scale).astype(dtype)
+def dequantize_fp8(fp8_tensor, scale, dtype=jnp.bfloat16):
+    return (fp8_tensor.astype(jnp.float32) * scale).astype(dtype)
 
 
-def _is_quantized(x):
-    return isinstance(x, dict) and "q" in x and "scales" in x
+def is_quantized(leaf):
+    return isinstance(leaf, dict) and "int8_weight" in leaf and "scales" in leaf
+
+
+def path_name(path):
+    return "/".join(str(getattr(part, "key", getattr(part, "idx", part)))
+                    for part in path)
 
 
 def quantize_tree(params, skip=("embed", "lm_head", "norm")):
-    """int8 every 2-D-or-bigger weight in the pytree. A tree_map, not a walk
-    over named_modules -- the model is data here, not a graph of objects.
+    """int8 for each weight of 2 or more dimensions in the pytree. It is a
+    tree_map, not a walk over named_modules: here the model is data.
 
-    Norms are skipped BY NAME, not by rank. jvllm stacks layers, so a norm
-    arrives as (num_layers, hidden) -- two-dimensional, and an `ndim >= 2` rule
-    quantizes it. They are one vector per layer: nothing to save, and it is
-    where the model is most sensitive.
+    Skip a norm BY NAME, not by rank. jvllm stacks the layers, so a norm is
+    (num_layers, hidden). That is 2-D, and a rule `ndim >= 2` quantizes it.
+    A norm is one vector for each layer: it saves nothing, and the model is
+    most sensitive there.
     """
-    def visit(path, x):
-        name = "/".join(str(getattr(k, "key", getattr(k, "idx", k)))
-                        for k in path)
-        if any(s in name for s in skip) or jnp.ndim(x) < 2:
-            return x
-        q, s = quantize_int8_per_channel(x)
-        return {"q": q, "scales": s}
+    def quantize_leaf(path, leaf):
+        if jnp.ndim(leaf) < 2 or any(part in path_name(path) for part in skip):
+            return leaf
+        int8_weight, scales = quantize_int8_per_channel(leaf)
+        return {"int8_weight": int8_weight, "scales": scales}
 
-    return jax.tree_util.tree_map_with_path(visit, params)
+    return jax.tree_util.tree_map_with_path(quantize_leaf, params)
 
 
-def dequantize_tree(qtree, dtype=jnp.bfloat16):
-    return jax.tree.map(
-        lambda x: dequantize_int8(x["q"], x["scales"]).astype(dtype)
-        if _is_quantized(x) else x,
-        qtree, is_leaf=_is_quantized,
-    )
+def dequantize_tree(quantized_tree, dtype=jnp.bfloat16):
+    def dequantize_leaf(leaf):
+        if not is_quantized(leaf):
+            return leaf
+        return dequantize_int8(leaf["int8_weight"],
+                               leaf["scales"]).astype(dtype)
+
+    return jax.tree.map(dequantize_leaf, quantized_tree, is_leaf=is_quantized)
+
+
+def array_bytes(array):
+    return array.size * array.dtype.itemsize
 
 
 def tree_bytes(tree):
-    total = 0
-    for leaf in jax.tree.leaves(tree, is_leaf=_is_quantized):
-        if _is_quantized(leaf):
-            total += leaf["q"].size * leaf["q"].dtype.itemsize
-            total += leaf["scales"].size * leaf["scales"].dtype.itemsize
-        else:
-            total += leaf.size * leaf.dtype.itemsize
-    return int(total)
+    return int(sum(array_bytes(array) for array in jax.tree.leaves(tree)))
 
 
 def perplexity(model, text, max_len=512):
-    ids = model.encode(text)[:max_len]
-    logits, _ = model.forward(ids[None], logits_index=None)     # (1, T, V)
-    logprobs = jax.nn.log_softmax(logits[0, :-1].astype(jnp.float32), axis=-1)
-    targets = ids[1:]
-    nll = -jnp.take_along_axis(logprobs, targets[:, None], axis=1).mean()
-    return float(jnp.exp(nll))
+    token_ids = model.encode(text)[:max_len]
+    logits, _ = model.forward(token_ids[None], logits_index=None)  # (1, T, V)
+    log_probs = jax.nn.log_softmax(logits[0, :-1].astype(jnp.float32), axis=-1)
+    targets = token_ids[1:]
+    mean_nll = -jnp.take_along_axis(log_probs, targets[:, None], axis=1).mean()
+    return float(jnp.exp(mean_nll))

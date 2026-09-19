@@ -17,161 +17,166 @@ class Request:
     def __repr__(self):
         return f"Request({self.id}, {len(self.output_ids)}/{self.max_tokens})"
 
+    def record(self, token, stop_ids):
+        """Keep the token, or finish at a stop token or at max_tokens."""
+        if token in stop_ids or len(self.output_ids) >= self.max_tokens:
+            self.finished = True
+            return
+        self.output_ids.append(token)
+        if len(self.output_ids) >= self.max_tokens:
+            self.finished = True
 
-def _lpad(t, to):
-    """Left-pad a (B, H, L, D) cache tensor to length `to`."""
-    if t.shape[2] >= to:
-        return t
-    z = torch.zeros(t.shape[0], t.shape[1], to - t.shape[2], t.shape[3],
-                    dtype=t.dtype, device=t.device)
-    return torch.cat([z, t], dim=2)
+
+def left_pad(tensor, length, dim):
+    """Put zeros in front of `tensor` along `dim`, up to `length`."""
+    missing = length - tensor.shape[dim]
+    if missing <= 0:
+        return tensor
+    shape = list(tensor.shape)
+    shape[dim] = missing
+    zeros = torch.zeros(shape, dtype=tensor.dtype, device=tensor.device)
+    return torch.cat([zeros, tensor], dim=dim)
+
+
+def merge_caches(running_cache, new_cache, length):
+    """Left-pad both caches to one length, and stack the batch rows."""
+    layers = []
+    for running_layer, new_layer in zip(running_cache.layers, new_cache.layers):
+        keys = torch.cat([left_pad(running_layer.keys, length, dim=2),
+                          left_pad(new_layer.keys, length, dim=2)], dim=0)
+        values = torch.cat([left_pad(running_layer.values, length, dim=2),
+                            left_pad(new_layer.values, length, dim=2)], dim=0)
+        layers.append((keys, values))
+    return DynamicCache(layers)
 
 
 class ContinuousEngine:
     def __init__(self, model, tokenizer, max_batch_size=8):
         self.model = model
-        self.tok = tokenizer
+        self.tokenizer = tokenizer
         self.max_batch_size = max_batch_size
-        self.dev = next(model.parameters()).device
-        e = model.generation_config.eos_token_id
-        self.eos = set(e) if isinstance(e, list) else {e}
+        self.device = next(model.parameters()).device
+        stop = model.generation_config.eos_token_id
+        self.stop_ids = set(stop) if isinstance(stop, list) else {stop}
 
         self.waiting = deque()
         self.running = []
         self.cache = None
-        self.mask = None      # (B, L)
-        self.pos = None       # (B,) next absolute position
-        self.next_tok = None  # (B,)
-        self.steps = 0
+        self.attention_mask = None     # (rows, cache length)
+        self.next_positions = None     # (rows,)
+        self.pending_tokens = None     # (rows,) not yet recorded
+        self.steps = 0                 # forward passes, not loop iterations
 
-    # ---- public API -------------------------------------------------
     def add_request(self, rid, prompt, max_tokens):
-        ids = self.tok(prompt, return_tensors="pt").input_ids[0].tolist()
-        self.waiting.append(Request(rid, ids, max_tokens))
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0]
+        self.waiting.append(Request(rid, prompt_ids.tolist(), max_tokens))
 
     def has_work(self):
         return bool(self.waiting or self.running)
 
     @torch.inference_mode()
     def step(self):
-        """One iteration: admit -> harvest -> evict -> forward.
+        """Admit, record, evict, then run one forward pass.
 
-        Invariant: at the top of step(), every running row's next_tok holds a
-        token that has NOT yet been recorded. Both prefill and the forward pass
-        produce exactly one such pending token per row.
+        At the start of a step, each running row has one pending token that
+        is not yet recorded. A prefill and a forward pass each make one.
         """
         self._admit()
         if not self.running:
             return []
-
-        # harvest the pending token from each row
-        finished = []
-        for i, req in enumerate(self.running):
-            t = int(self.next_tok[i])
-            if t in self.eos or len(req.output_ids) >= req.max_tokens:
-                req.finished = True
-                finished.append(req)
-            else:
-                req.output_ids.append(t)
-                if len(req.output_ids) >= req.max_tokens:
-                    req.finished = True
-                    finished.append(req)
-
-        # Evict BEFORE the forward. A finished row must not cost compute.
-        # That is the entire difference from stage 04.
+        finished = self._record_pending()
+        # Evict BEFORE the forward pass. A finished row must not cost
+        # compute. That is the difference from stage 04.
         if finished:
             self._evict()
-        if not self.running:
-            return finished
-
-        # extend the mask BEFORE the forward: the model is about to write one
-        # new KV entry, so the mask must already cover cache_len + 1
-        self.mask = torch.cat(
-            [self.mask, torch.ones(len(self.running), 1,
-                                   dtype=self.mask.dtype, device=self.dev)],
-            dim=1,
-        )
-        self.steps += 1   # counts FORWARD PASSES, not loop iterations
-        out = self.model(
-            self.next_tok.unsqueeze(1),
-            attention_mask=self.mask,
-            position_ids=self.pos.unsqueeze(1),
-            past_key_values=self.cache,
-            use_cache=True,
-        )
-        self.cache = out.past_key_values
-        self.next_tok = out.logits[:, -1].argmax(-1)
-        self.pos = self.pos + 1
+        if self.running:
+            self._decode()
         return finished
 
     def run_to_completion(self):
-        done = {}
+        outputs = {}
         while self.has_work():
-            for r in self.step():
-                done[r.id] = r.output_ids
-        return done
+            for request in self.step():
+                outputs[request.id] = request.output_ids
+        return outputs
 
-    # ---- internals --------------------------------------------------
+    def _record_pending(self):
+        finished = []
+        for row, request in enumerate(self.running):
+            request.record(int(self.pending_tokens[row]), self.stop_ids)
+            if request.finished:
+                finished.append(request)
+        return finished
+
+    def _decode(self):
+        # The model writes one new KV entry. The mask must cover it first.
+        one_column = torch.ones(len(self.running), 1,
+                                dtype=self.attention_mask.dtype,
+                                device=self.device)
+        self.attention_mask = torch.cat([self.attention_mask, one_column], dim=1)
+        self.steps += 1
+        result = self.model(self.pending_tokens.unsqueeze(1),
+                            attention_mask=self.attention_mask,
+                            position_ids=self.next_positions.unsqueeze(1),
+                            past_key_values=self.cache, use_cache=True)
+        self.cache = result.past_key_values
+        self.pending_tokens = result.logits[:, -1].argmax(-1)
+        self.next_positions = self.next_positions + 1
+
     def _admit(self):
         while self.waiting and len(self.running) < self.max_batch_size:
-            self._prefill_and_splice(self.waiting.popleft())
+            self._prefill_and_join(self.waiting.popleft())
+
+    def _prefill(self, request):
+        prompt_len = len(request.prompt_ids)
+        token_ids = torch.tensor([request.prompt_ids], device=self.device)
+        attention_mask = torch.ones(1, prompt_len, dtype=torch.long,
+                                    device=self.device)
+        positions = torch.arange(prompt_len, device=self.device).unsqueeze(0)
+        result = self.model(token_ids, attention_mask=attention_mask,
+                            position_ids=positions, use_cache=True)
+        first_token = result.logits[0, -1].argmax().view(1)
+        return result.past_key_values, attention_mask, first_token
 
     @torch.inference_mode()
-    def _prefill_and_splice(self, req):
-        ids = torch.tensor([req.prompt_ids], device=self.dev)
-        L = ids.shape[1]
-        m = torch.ones(1, L, dtype=torch.long, device=self.dev)
-        p = torch.arange(L, device=self.dev).unsqueeze(0)
-        out = self.model(ids, attention_mask=m, position_ids=p, use_cache=True)
-        new_cache = out.past_key_values
-        first = out.logits[0, -1].argmax().view(1)
-
+    def _prefill_and_join(self, request):
+        cache, attention_mask, first_token = self._prefill(request)
+        next_position = torch.tensor([len(request.prompt_ids)],
+                                     device=self.device)
         if not self.running:
-            self.cache = new_cache
-            self.mask = m
-            self.pos = torch.tensor([L], device=self.dev)
-            self.next_tok = first
+            self.cache = cache
+            self.attention_mask = attention_mask
+            self.next_positions = next_position
+            self.pending_tokens = first_token
         else:
-            cur_L = self.mask.shape[1]
-            tgt = max(cur_L, L)
-            layers = []
-            for i in range(len(self.cache.layers)):
-                ok = _lpad(self.cache.layers[i].keys, tgt)
-                ov = _lpad(self.cache.layers[i].values, tgt)
-                nk = _lpad(new_cache.layers[i].keys, tgt)
-                nv = _lpad(new_cache.layers[i].values, tgt)
-                layers.append((torch.cat([ok, nk], 0), torch.cat([ov, nv], 0)))
-            self.cache = DynamicCache(layers)
-
-            def pad_mask(mm, to):
-                if mm.shape[1] >= to:
-                    return mm
-                z = torch.zeros(mm.shape[0], to - mm.shape[1],
-                                dtype=mm.dtype, device=self.dev)
-                return torch.cat([z, mm], 1)
-
-            self.mask = torch.cat([pad_mask(self.mask, tgt), pad_mask(m, tgt)], 0)
-            self.pos = torch.cat([self.pos, torch.tensor([L], device=self.dev)])
-            self.next_tok = torch.cat([self.next_tok, first])
-
-        self.running.append(req)
+            length = max(self.attention_mask.shape[1], attention_mask.shape[1])
+            self.cache = merge_caches(self.cache, cache, length)
+            self.attention_mask = torch.cat(
+                [left_pad(self.attention_mask, length, dim=1),
+                 left_pad(attention_mask, length, dim=1)], dim=0)
+            self.next_positions = torch.cat([self.next_positions,
+                                             next_position])
+            self.pending_tokens = torch.cat([self.pending_tokens, first_token])
+        self.running.append(request)
 
     def _evict(self):
-        keep = [i for i, r in enumerate(self.running) if not r.finished]
-        self.running = [self.running[i] for i in keep]
+        kept_rows = [row for row, request in enumerate(self.running)
+                     if not request.finished]
+        self.running = [self.running[row] for row in kept_rows]
         if not self.running:
-            self.cache = self.mask = self.pos = self.next_tok = None
+            self.cache = self.attention_mask = None
+            self.next_positions = self.pending_tokens = None
             return
-        idx = torch.tensor(keep, device=self.dev)
-        self.cache.batch_select_indices(idx)
-        self.mask = self.mask[idx]
-        self.pos = self.pos[idx]
-        self.next_tok = self.next_tok[idx]
+        rows = torch.tensor(kept_rows, device=self.device)
+        self.cache.batch_select_indices(rows)
+        self.attention_mask = self.attention_mask[rows]
+        self.next_positions = self.next_positions[rows]
+        self.pending_tokens = self.pending_tokens[rows]
 
 
 def run_all(model, tokenizer, jobs, max_batch_size=8):
-    """jobs: list of (rid, prompt, max_tokens). Returns {rid: [token ids]}."""
-    eng = ContinuousEngine(model, tokenizer, max_batch_size)
-    for rid, prompt, mt in jobs:
-        eng.add_request(rid, prompt, mt)
-    return eng.run_to_completion()
+    """jobs: a list of (rid, prompt, max_tokens). -> {rid: [token ids]}."""
+    engine = ContinuousEngine(model, tokenizer, max_batch_size)
+    for rid, prompt, max_tokens in jobs:
+        engine.add_request(rid, prompt, max_tokens)
+    return engine.run_to_completion()

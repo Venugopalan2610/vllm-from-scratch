@@ -4,12 +4,14 @@ from dataclasses import dataclass
 
 import torch
 
+TINY = 1e-20
+
 
 @dataclass
 class SamplingParams:
     temperature: float = 1.0
-    top_k: int = 0            # 0 = disabled
-    top_p: float = 1.0        # 1.0 = disabled
+    top_k: int = 0            # 0 = off
+    top_p: float = 1.0        # 1.0 = off
     repetition_penalty: float = 1.0
     seed: int | None = None
 
@@ -19,78 +21,83 @@ class SamplingParams:
 
 
 def apply_repetition_penalty(logits, prev_tokens, penalties):
-    """logits (B,V); prev_tokens list[list[int]]; penalties (B,)"""
-    for i, toks in enumerate(prev_tokens):
-        if not toks or penalties[i] == 1.0:
+    """logits (rows, vocab), prev_tokens list[list[int]], penalties (rows,)."""
+    for row, tokens in enumerate(prev_tokens):
+        if not tokens or penalties[row] == 1.0:
             continue
-        idx = torch.tensor(sorted(set(toks)), device=logits.device, dtype=torch.long)
-        vals = logits[i, idx]
-        logits[i, idx] = torch.where(vals > 0, vals / penalties[i], vals * penalties[i])
+        seen = torch.tensor(sorted(set(tokens)), device=logits.device,
+                            dtype=torch.long)
+        seen_logits = logits[row, seen]
+        logits[row, seen] = torch.where(seen_logits > 0,
+                                        seen_logits / penalties[row],
+                                        seen_logits * penalties[row])
     return logits
 
 
 def apply_top_k(logits, k):
-    """k is (B,). A 0 turns top-k off for that row."""
-    B, V = logits.shape
-    out = logits
-    kmax = int(k.max())
-    if kmax <= 0:
-        return out
-    vals, _ = torch.sort(logits, dim=-1, descending=True)
-    kk = k.clamp(min=1, max=V)
-    # threshold = the k-th largest value in each row
-    thresh = vals.gather(1, (kk - 1).unsqueeze(1))
-    disabled = (k <= 0).unsqueeze(1)
-    return torch.where(disabled | (logits >= thresh), out, float("-inf"))
+    """k (rows,). A 0 turns top-k off for that row."""
+    if int(k.max()) <= 0:
+        return logits
+    sorted_logits, _ = torch.sort(logits, dim=-1, descending=True)
+    kept_rank = k.clamp(min=1, max=logits.shape[1]) - 1
+    threshold = sorted_logits.gather(1, kept_rank.unsqueeze(1))  # k-th largest
+    keep = (k <= 0).unsqueeze(1) | (logits >= threshold)
+    return torch.where(keep, logits, float("-inf"))
 
 
 def apply_top_p(logits, p):
-    """p is (B,). A 1.0 turns top-p off. Keep the smallest set of tokens whose
-    cumulative probability reaches p. Always keep at least one token."""
+    """p (rows,). A 1.0 turns top-p off. Keep the smallest set of tokens whose
+    cumulative probability reaches p. Always keep the top token."""
     probs = torch.softmax(logits, dim=-1)
-    sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
-    cum = sorted_probs.cumsum(dim=-1)
-    # a token is unnecessary if the mass BEFORE it already reached p
-    remove = (cum - sorted_probs) >= p.unsqueeze(1) - 1e-9
-    remove[:, 0] = False                       # always keep the top token
-    mask = torch.zeros_like(remove).scatter(1, sorted_idx, remove)
-    return logits.masked_fill(mask, float("-inf"))
+    sorted_probs, sorted_ids = torch.sort(probs, dim=-1, descending=True)
+    mass_before = sorted_probs.cumsum(dim=-1) - sorted_probs
+    # A token is not necessary if the mass before it already reaches p.
+    remove_sorted = mass_before >= p.unsqueeze(1) - 1e-9
+    remove_sorted[:, 0] = False
+    remove = torch.zeros_like(remove_sorted).scatter(1, sorted_ids,
+                                                     remove_sorted)
+    return logits.masked_fill(remove, float("-inf"))
+
+
+def row_values(params, field, device, dtype=torch.float32):
+    return torch.tensor([getattr(p, field) for p in params], device=device,
+                        dtype=dtype)
+
+
+def uniform_noise(params, shape, device):
+    """One draw for the batch. Only a row with a seed gets its own
+    generator: a loop over every row costs one launch for each row."""
+    noise = torch.rand(shape, device=device)
+    for row, row_params in enumerate(params):
+        if row_params.seed is not None:
+            generator = torch.Generator(device=device)
+            noise[row].uniform_(generator=generator.manual_seed(row_params.seed))
+    return noise
+
+
+def gumbel_noise(uniform):
+    # Look at the parentheses. `-torch.log(x).clamp_min(e)` is
+    # `-(torch.log(x).clamp_min(e))`. That clamps a NEGATIVE number to +e.
+    # The outer log then gives NaN, and argmax returns 0 for ever.
+    return -torch.log((-torch.log(uniform.clamp_min(TINY))).clamp_min(TINY))
 
 
 def sample(logits, params, prev_tokens=None):
-    """logits (B, V) -> (B,) token ids. One vectorized pass over the batch."""
-    B, V = logits.shape
-    dev = logits.device
-    out = logits.float().clone()
-
+    """logits (rows, vocab) -> (rows,) token ids, in one vectorized pass."""
+    device = logits.device
+    scores = logits.float().clone()
     if prev_tokens is not None:
-        pen = torch.tensor([p.repetition_penalty for p in params], device=dev)
-        out = apply_repetition_penalty(out, prev_tokens, pen)
+        scores = apply_repetition_penalty(
+            scores, prev_tokens, row_values(params, "repetition_penalty", device))
 
-    temp = torch.tensor([p.temperature for p in params], device=dev)
-    greedy = temp == 0
-    safe_temp = torch.where(greedy, torch.ones_like(temp), temp)
-    out = out / safe_temp.unsqueeze(1)
+    temperature = row_values(params, "temperature", device)
+    greedy = temperature == 0
+    scores = scores / torch.where(greedy, 1.0, temperature).unsqueeze(1)
+    scores = apply_top_k(scores, row_values(params, "top_k", device, torch.long))
+    scores = apply_top_p(scores, row_values(params, "top_p", device))
 
-    k = torch.tensor([p.top_k for p in params], device=dev, dtype=torch.long)
-    out = apply_top_k(out, k)
-    pp = torch.tensor([p.top_p for p in params], device=dev)
-    out = apply_top_p(out, pp)
-
-    # Gumbel-max: argmax(logits + Gumbel noise) is an exact categorical draw,
-    # and it vectorises where torch.multinomial with per-row generators does not.
-    u = torch.empty(B, V, device=dev)
-    for i, p in enumerate(params):
-        if p.seed is not None:
-            g = torch.Generator(device=dev).manual_seed(p.seed)
-            u[i].uniform_(generator=g)
-        else:
-            u[i].uniform_()
-    # NOTE the parentheses. `-torch.log(x).clamp_min(e)` parses as
-    # `-(torch.log(x).clamp_min(e))`. That clamps a NEGATIVE number to +e.
-    # The outer log then sees a negative, gives NaN, and argmax returns 0
-    # forever.
-    gumbel = -torch.log((-torch.log(u.clamp_min(1e-20))).clamp_min(1e-20))
-    sampled = (out + gumbel).argmax(dim=-1)
-
-    return torch.where(greedy, out.argmax(dim=-1), sampled)
+    # Gumbel-max: argmax(logits + Gumbel noise) is an exact categorical draw.
+    # It vectorizes. torch.multinomial with a generator for each row does not.
+    noise = gumbel_noise(uniform_noise(params, scores.shape, device))
+    sampled = (scores + noise).argmax(dim=-1)
+    return torch.where(greedy, scores.argmax(dim=-1), sampled)

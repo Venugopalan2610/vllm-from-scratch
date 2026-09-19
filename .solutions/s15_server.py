@@ -14,9 +14,9 @@ class RequestHandle:
 
 
 class AsyncLLMEngine:
-    """Drives a synchronous step-based engine from a background task.
+    """Runs a synchronous step engine from a background task.
 
-    The injected `step_engine` must provide:
+    The step engine must provide:
         add_request(rid, prompt, max_tokens)
         step() -> list[(rid, delta_text, finished)]
         has_work() -> bool
@@ -41,50 +41,86 @@ class AsyncLLMEngine:
 
     async def stop(self):
         self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def _deliver(self, outputs):
+        for rid, delta, finished in outputs:
+            handle = self._handles.get(rid)
+            if handle is None:
+                continue
+            await handle.queue.put((delta, finished))
+            if finished:
+                self._handles.pop(rid, None)
 
     async def _loop(self):
-        """One loop for the whole server. Never blocks on HTTP."""
+        """One loop for the whole server. It never waits on HTTP."""
         while self._running:
             if not self.engine.has_work():
                 await asyncio.sleep(self.idle_sleep)
                 continue
-            for rid, delta, finished in self.engine.step():
-                h = self._handles.get(rid)
-                if h is None:
-                    continue
-                await h.queue.put((delta, finished))
-                if finished:
-                    self._handles.pop(rid, None)
-            await asyncio.sleep(0)      # yield to the event loop
+            await self._deliver(self.engine.step())
+            await asyncio.sleep(0)      # let the event loop run
 
     async def generate(self, prompt, max_tokens, rid=None):
         rid = rid or str(uuid.uuid4())
-        h = RequestHandle(rid)
-        self._handles[rid] = h
+        handle = RequestHandle(rid)
+        self._handles[rid] = handle
         self.engine.add_request(rid, prompt, max_tokens)
         try:
             while True:
-                delta, finished = await h.queue.get()
+                delta, finished = await handle.queue.get()
                 if delta:
                     yield delta
                 if finished:
                     return
         finally:
             if rid in self._handles:
-                # client went away mid-stream: tell the engine to release KV
-                self._handles.pop(rid, None)
-                self.engine.abort(rid)
+                # The client left during the stream: free its KV.
+                await self.abort(rid)
 
     async def abort(self, rid):
         self._handles.pop(rid, None)
         self.engine.abort(rid)
+
+
+class CompletionIds:
+    """The fields that every part of one completion shares."""
+
+    def __init__(self, model_name):
+        self.id = f"cmpl-{uuid.uuid4().hex[:12]}"
+        self.created = int(time.time())
+        self.model_name = model_name
+
+    def body(self, object_type, text, finish_reason):
+        return {"id": self.id, "object": object_type, "created": self.created,
+                "model": self.model_name,
+                "choices": [{"index": 0, "text": text,
+                             "finish_reason": finish_reason}]}
+
+    def event(self, text, finish_reason):
+        chunk = self.body("text_completion.chunk", text, finish_reason)
+        return f"data: {json.dumps(chunk)}\n\n"
+
+
+async def whole_completion(engine, ids, prompt, max_tokens):
+    text = ""
+    async for delta in engine.generate(prompt, max_tokens):
+        text += delta
+    return ids.body("text_completion", text, "stop")
+
+
+async def completion_events(engine, ids, prompt, max_tokens):
+    async for delta in engine.generate(prompt, max_tokens):
+        yield ids.event(delta, None)
+    yield ids.event("", "stop")
+    yield "data: [DONE]\n\n"
 
 
 def create_app(engine, model_name="vllm-from-scratch"):
@@ -115,42 +151,12 @@ def create_app(engine, model_name="vllm-from-scratch"):
         body = await request.json()
         prompt = body.get("prompt", "")
         max_tokens = int(body.get("max_tokens", 16))
-        stream = bool(body.get("stream", False))
-        cid = f"cmpl-{uuid.uuid4().hex[:12]}"
-        created = int(time.time())
-
-        if not stream:
-            text = ""
-            async for delta in engine.generate(prompt, max_tokens):
-                text += delta
-            return JSONResponse({
-                "id": cid, "object": "text_completion", "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "text": text,
-                             "finish_reason": "stop"}],
-            })
-
-        async def sse():
-            try:
-                async for delta in engine.generate(prompt, max_tokens):
-                    chunk = {
-                        "id": cid, "object": "text_completion.chunk",
-                        "created": created, "model": model_name,
-                        "choices": [{"index": 0, "text": delta,
-                                     "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                final = {
-                    "id": cid, "object": "text_completion.chunk",
-                    "created": created, "model": model_name,
-                    "choices": [{"index": 0, "text": "",
-                                 "finish_reason": "stop"}],
-                }
-                yield f"data: {json.dumps(final)}\n\n"
-                yield "data: [DONE]\n\n"
-            except asyncio.CancelledError:
-                raise
-
-        return StreamingResponse(sse(), media_type="text/event-stream")
+        ids = CompletionIds(model_name)
+        if body.get("stream", False):
+            return StreamingResponse(
+                completion_events(engine, ids, prompt, max_tokens),
+                media_type="text/event-stream")
+        return JSONResponse(await whole_completion(engine, ids, prompt,
+                                                   max_tokens))
 
     return app

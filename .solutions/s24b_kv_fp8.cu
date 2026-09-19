@@ -1,39 +1,20 @@
-// Reference solution, stage 08c - warp primitives and split-K.
+// Reference solution, stage 24b - the KV cache in FP8.
 //
-// Stage 08b reads memory as well as this kernel can. At num_seqs = 64 it runs
-// near the measured streaming bandwidth of the card. At num_seqs = 1 it runs
-// at seven percent of that bandwidth.
-//
-// Coalescing cannot fix that. The memory system is not the problem now:
-//
-//     grid = (num_seqs, num_heads) = (1, 16) = 16 blocks
-//     this GPU has about 60 SMs
-//
-// Three quarters of the machine has no work. That is the content of this
-// stage. Two changes:
-//
-//   1. The reductions move from shared memory into the warp. __shfl_xor_sync
-//      moves a register between lanes directly, with no trip through shared
-//      memory and no __syncthreads. A butterfly over lanes_per_row lanes
-//      leaves the answer in every lane of the group.
-//
-//   2. Split-K, also called flash-decoding. Cut the context into num_splits
-//      chunks, and give each chunk its own block. Each block makes a PARTIAL
-//      softmax state (max, sum, accumulator). A second kernel merges them
-//      with the rescale rule of the online softmax. The grid becomes
-//      (num_seqs, num_heads, num_splits), and the machine fills.
-//
-// The merge is exact, not an approximation. exp(max_j - M) is the same
-// rescale as in stage 08, across blocks, not across tiles.
+// Your stage 08c kernel, with the cache read as FP8. The query and the output
+// stay in bf16. Only the loads of K and V change. Two scales move to where
+// they cost one multiply: key_scale into the query, value_scale into the
+// output.
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
 
 namespace {
 
 constexpr int kThreads = 128;
-constexpr int kMaxVec = 8;
+constexpr int kMaxVec = 16;
 constexpr int kWarp = 32;
 constexpr int kWarpsPerBlock = kThreads / kWarp;
 constexpr unsigned kFullMask = 0xffffffffu;
@@ -42,6 +23,15 @@ constexpr unsigned kFullMask = 0xffffffffu;
 // merge cost more than the tokens save.
 constexpr int kMinChunk = 128;
 constexpr int kMaxSplits = 32;
+
+// 16 FP8 values are one 16-byte load. 8 lanes cover a row of head_dim 128,
+// and a block keeps 16 rows in flight.
+constexpr int kFp8Vec = 16;
+constexpr float kFp8Max = 448.f;          // the largest e4m3 value
+constexpr int kWriteThreads = 256;
+constexpr int kMaxWriteBlocks = 4096;
+
+using fp8 = __nv_fp8_e4m3;
 
 struct PagedShape {
   int num_heads, num_kv_heads, head_dim, block_size, max_blocks_per_seq;
@@ -55,10 +45,28 @@ struct SplitStates {
   float* sums;
 };
 
+// Two FP8 values to two floats with one conversion instruction, through
+// half2. A conversion of each value alone costs twice the instructions, and
+// at long context the kernel then waits on arithmetic, not on memory.
+__device__ __forceinline__ float2 fp8x2_to_float2(__nv_fp8x2_storage_t pair) {
+  const __half2_raw raw = __nv_cvt_fp8x2_to_halfraw2(pair, __NV_E4M3);
+  return __half22float2(*reinterpret_cast<const __half2*>(&raw));
+}
+
 template <typename scalar_t, int VEC>
 __device__ __forceinline__ void load_vec(float* target,
                                          const scalar_t* source) {
-  if constexpr (VEC * sizeof(scalar_t) == 16) {
+  if constexpr (std::is_same_v<scalar_t, fp8> && VEC == kFp8Vec) {
+    const uint4 raw = *reinterpret_cast<const uint4*>(source);
+    const __nv_fp8x2_storage_t* pairs =
+        reinterpret_cast<const __nv_fp8x2_storage_t*>(&raw);
+#pragma unroll
+    for (int i = 0; i < VEC / 2; ++i) {
+      const float2 two = fp8x2_to_float2(pairs[i]);
+      target[2 * i] = two.x;
+      target[2 * i + 1] = two.y;
+    }
+  } else if constexpr (VEC * sizeof(scalar_t) == 16) {
     const float4 raw = *reinterpret_cast<const float4*>(source);
     const scalar_t* values = reinterpret_cast<const scalar_t*>(&raw);
 #pragma unroll
@@ -151,16 +159,17 @@ __device__ void report_empty_split(scalar_t* output, SplitStates states,
 // states of the row groups, with the same exp(max_r - M) rescale that merges
 // the splits. The same method works at three levels: tile, group and block.
 
-template <typename scalar_t, int VEC, bool SINGLE>
+template <typename scalar_t, typename cache_t, int VEC, bool SINGLE>
 __global__ void __launch_bounds__(kThreads) paged_attn_split(
     scalar_t* __restrict__ output,              // (num_seqs, num_heads, D), SINGLE only
     SplitStates states,                         // not SINGLE only
     const scalar_t* __restrict__ query,         // (num_seqs, num_heads, D)
-    const scalar_t* __restrict__ key_cache,     // (num_blocks, kv_heads, block_size, D)
-    const scalar_t* __restrict__ value_cache,
+    const cache_t* __restrict__ key_cache,      // (num_blocks, kv_heads, block_size, D)
+    const cache_t* __restrict__ value_cache,
     const int32_t* __restrict__ block_tables,   // (num_seqs, max_blocks_per_seq)
     const int32_t* __restrict__ context_lens,   // (num_seqs,)
-    const float scale, const PagedShape shape) {
+    const float scale,                          // softmax scale * key_scale
+    const float value_scale, const PagedShape shape) {
   const int seq = blockIdx.x;
   const int head = blockIdx.y;
   const int split = blockIdx.z;
@@ -222,7 +231,7 @@ __global__ void __launch_bounds__(kThreads) paged_attn_split(
       row_offset = ((block_id * shape.num_kv_heads + kv_head) * shape.block_size +
                     position % shape.block_size) * head_dim + lane * VEC;
       float key_slice[kMaxVec];
-      load_vec<scalar_t, VEC>(key_slice, key_cache + row_offset);
+      load_vec<cache_t, VEC>(key_slice, key_cache + row_offset);
 #pragma unroll
       for (int i = 0; i < VEC; ++i) partial_score += query_slice[i] * key_slice[i];
     }
@@ -243,7 +252,7 @@ __global__ void __launch_bounds__(kThreads) paged_attn_split(
     running_max = new_max;
 
     float value_slice[kMaxVec];
-    if (in_chunk) load_vec<scalar_t, VEC>(value_slice, value_cache + row_offset);
+    if (in_chunk) load_vec<cache_t, VEC>(value_slice, value_cache + row_offset);
 #pragma unroll
     for (int i = 0; i < VEC; ++i)
       accumulator[i] = accumulator[i] * rescale + (in_chunk ? prob * value_slice[i] : 0.f);
@@ -282,7 +291,9 @@ __global__ void __launch_bounds__(kThreads) paged_attn_split(
   // That round trip is small next to the K and V reads. The launch and its
   // allocations are not small. At a full grid they cost and give nothing.
   if constexpr (SINGLE) {
-    const float inverse_sum = block_sum_value > 0.f ? 1.f / block_sum_value : 0.f;
+    // value_scale comes out of the sum: the output is linear in V.
+    const float inverse_sum =
+        block_sum_value > 0.f ? value_scale / block_sum_value : 0.f;
     scalar_t* output_slice = output + output_offset + lane * VEC;
 #pragma unroll
     for (int i = 0; i < VEC; ++i)
@@ -290,7 +301,8 @@ __global__ void __launch_bounds__(kThreads) paged_attn_split(
   } else {
 #pragma unroll
     for (int i = 0; i < VEC; ++i)
-      states.accumulators[state_index * head_dim + lane * VEC + i] = merged[i];
+      states.accumulators[state_index * head_dim + lane * VEC + i] =
+          merged[i] * value_scale;
     if (lane == 0) {
       states.maxima[state_index] = block_max_value;
       states.sums[state_index] = block_sum_value;
@@ -347,30 +359,79 @@ int choose_splits(int num_seqs, int num_heads, int max_context) {
   return std::max(1, std::min({to_fill_sms, by_context, kMaxSplits}));
 }
 
+
+// --- the FP8 write ---------------------------------------------------------
+//
+// Stage 08 wrote K and V as they came. Here the kernel divides each value by
+// the scale of its layer and rounds it to e4m3, which holds values up to 448.
+// The kernel clamps a larger value. The scale comes from a calibration run,
+// so a clamp is rare, and it is a small error, not a NaN.
+__device__ __forceinline__ fp8 to_fp8(float value, float inverse_scale) {
+  return fp8(fminf(fmaxf(value * inverse_scale, -kFp8Max), kFp8Max));
+}
+
+template <typename scalar_t>
+__global__ void write_kv_fp8_kernel(
+    fp8* __restrict__ key_cache, fp8* __restrict__ value_cache,
+    const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
+    const int64_t* __restrict__ slots, const float inverse_key_scale,
+    const float inverse_value_scale, const int num_tokens,
+    const int num_kv_heads, const int head_dim, const int block_size) {
+  const int64_t num_values = (int64_t)num_tokens * num_kv_heads * head_dim;
+  for (int64_t index = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+       index < num_values; index += (int64_t)gridDim.x * blockDim.x) {
+    const int dim = index % head_dim;
+    const int kv_head = (index / head_dim) % num_kv_heads;
+    const int token = index / (head_dim * num_kv_heads);
+    const int64_t slot = slots[token];
+    if (slot < 0) continue;               // padding: not a real token
+    const int64_t target =
+        (((slot / block_size) * num_kv_heads + kv_head) * block_size +
+         slot % block_size) * head_dim + dim;
+    key_cache[target] = to_fp8(static_cast<float>(key[index]), inverse_key_scale);
+    value_cache[target] = to_fp8(static_cast<float>(value[index]), inverse_value_scale);
+  }
+}
+
+template <typename scalar_t>
+void launch_write(torch::Tensor& key_cache, torch::Tensor& value_cache,
+                  const torch::Tensor& key, const torch::Tensor& value,
+                  const torch::Tensor& slot_indices, double key_scale,
+                  double value_scale, int num_blocks) {
+  write_kv_fp8_kernel<scalar_t><<<num_blocks, kWriteThreads, 0,
+                                  at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<fp8*>(key_cache.data_ptr()),
+      reinterpret_cast<fp8*>(value_cache.data_ptr()),
+      key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+      slot_indices.data_ptr<int64_t>(), (float)(1.0 / key_scale),
+      (float)(1.0 / value_scale), key.size(0), key.size(1), key.size(2),
+      key_cache.size(2));
+}
+
 struct AttentionTensors {
   torch::Tensor output, query, key_cache, value_cache, block_tables, context_lens;
 };
 
-template <typename scalar_t, int VEC>
-void launch_with_width(AttentionTensors& tensors, float scale,
-                       PagedShape shape) {
+template <typename scalar_t>
+void launch(AttentionTensors& tensors, float scale, float value_scale,
+            PagedShape shape) {
   auto stream = at::cuda::getCurrentCUDAStream();
   const int num_seqs = tensors.query.size(0);
   const int head_dim = shape.head_dim;
   const size_t split_shared_bytes =
       (std::max<size_t>(head_dim, kThreads * kMaxVec) + 2 * kThreads) * sizeof(float);
   const scalar_t* query = tensors.query.data_ptr<scalar_t>();
-  const scalar_t* key_cache = tensors.key_cache.data_ptr<scalar_t>();
-  const scalar_t* value_cache = tensors.value_cache.data_ptr<scalar_t>();
+  const fp8* key_cache = reinterpret_cast<const fp8*>(tensors.key_cache.data_ptr());
+  const fp8* value_cache = reinterpret_cast<const fp8*>(tensors.value_cache.data_ptr());
   const int32_t* block_tables = tensors.block_tables.data_ptr<int32_t>();
   const int32_t* context_lens = tensors.context_lens.data_ptr<int32_t>();
   scalar_t* output = tensors.output.data_ptr<scalar_t>();
 
   if (shape.num_splits == 1) {
-    paged_attn_split<scalar_t, VEC, true>
+    paged_attn_split<scalar_t, fp8, kFp8Vec, true>
         <<<dim3(num_seqs, shape.num_heads, 1), kThreads, split_shared_bytes, stream>>>(
             output, SplitStates{nullptr, nullptr, nullptr}, query, key_cache,
-            value_cache, block_tables, context_lens, scale, shape);
+            value_cache, block_tables, context_lens, scale, value_scale, shape);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;
   }
@@ -383,11 +444,11 @@ void launch_with_width(AttentionTensors& tensors, float scale,
   const SplitStates states{accumulators.data_ptr<float>(), maxima.data_ptr<float>(),
                            sums.data_ptr<float>()};
 
-  paged_attn_split<scalar_t, VEC, false>
+  paged_attn_split<scalar_t, fp8, kFp8Vec, false>
       <<<dim3(num_seqs, shape.num_heads, shape.num_splits), kThreads,
          split_shared_bytes, stream>>>(nullptr, states, query, key_cache,
                                        value_cache, block_tables, context_lens,
-                                       scale, shape);
+                                       scale, value_scale, shape);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   const size_t combine_shared_bytes = (kWarpsPerBlock + shape.num_splits) * sizeof(float);
@@ -397,65 +458,77 @@ void launch_with_width(AttentionTensors& tensors, float scale,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <typename scalar_t, int WIDE>
-void launch(AttentionTensors& tensors, float scale, PagedShape shape) {
-  const int head_dim = shape.head_dim;
-  if (head_dim % WIDE == 0 && head_dim / WIDE <= kThreads) {
-    launch_with_width<scalar_t, WIDE>(tensors, scale, shape);
-    return;
-  }
-  TORCH_CHECK(head_dim <= kThreads, "head_dim ", head_dim,
-              " is too large for ", kThreads, " threads");
-  launch_with_width<scalar_t, 1>(tensors, scale, shape);
-}
-
 }  // namespace
 
-torch::Tensor paged_attn(torch::Tensor query, torch::Tensor key_cache,
-                         torch::Tensor value_cache, torch::Tensor block_tables,
-                         torch::Tensor context_lens, double scale,
-                         int64_t splits) {
+void write_kv_fp8(torch::Tensor key_cache, torch::Tensor value_cache,
+                  torch::Tensor key, torch::Tensor value, torch::Tensor slots,
+                  double key_scale, double value_scale) {
+  TORCH_CHECK(key_cache.scalar_type() == at::kFloat8_e4m3fn,
+              "the cache must be float8_e4m3fn");
+  TORCH_CHECK(key.is_contiguous() && value.is_contiguous(),
+              "key and value must be contiguous");
+  if (key.size(0) == 0) return;
+  auto slot_indices = slots.to(torch::kLong).contiguous();
+  const int64_t num_values = key.numel();
+  const int num_blocks = (int)std::min<int64_t>(
+      (num_values + kWriteThreads - 1) / kWriteThreads, kMaxWriteBlocks);
+
+  AT_DISPATCH_SWITCH(
+      key.scalar_type(), "write_kv_fp8",
+      AT_DISPATCH_CASE(at::kBFloat16, [&] {
+        launch_write<scalar_t>(key_cache, value_cache, key, value, slot_indices,
+                               key_scale, value_scale, num_blocks);
+      })
+      AT_DISPATCH_CASE(at::kHalf, [&] {
+        launch_write<scalar_t>(key_cache, value_cache, key, value, slot_indices,
+                               key_scale, value_scale, num_blocks);
+      }));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+torch::Tensor paged_attn_fp8(torch::Tensor query, torch::Tensor key_cache,
+                             torch::Tensor value_cache,
+                             torch::Tensor block_tables,
+                             torch::Tensor context_lens, double scale,
+                             double key_scale, double value_scale,
+                             int64_t splits) {
   TORCH_CHECK(query.is_cuda() && query.is_contiguous(),
               "query must be contiguous and on the GPU");
-  TORCH_CHECK(key_cache.is_contiguous() && value_cache.is_contiguous(),
-              "the KV cache must be contiguous");
-
+  TORCH_CHECK(key_cache.scalar_type() == at::kFloat8_e4m3fn,
+              "the cache must be float8_e4m3fn");
   const int num_seqs = query.size(0), num_heads = query.size(1);
+  const int head_dim = query.size(2);
   const int num_kv_heads = key_cache.size(1), block_size = key_cache.size(2);
   const int max_blocks_per_seq = block_tables.size(1);
   TORCH_CHECK(num_heads % num_kv_heads == 0,
               "num_heads must be a multiple of num_kv_heads");
+  TORCH_CHECK(head_dim % kFp8Vec == 0 && head_dim / kFp8Vec <= kThreads,
+              "head_dim must divide by 16");
 
-  // The upper limit of the context comes from the width of the block table,
-  // a size on the host. context_lens.max() needs a value from the device,
-  // and that stops the pipeline on every call.
   const int num_splits = splits > 0 ? (int)splits
                                     : choose_splits(num_seqs, num_heads,
                                                     max_blocks_per_seq * block_size);
-  const PagedShape shape{num_heads, num_kv_heads, (int)query.size(2), block_size,
+  const PagedShape shape{num_heads, num_kv_heads, head_dim, block_size,
                          max_blocks_per_seq, num_splits};
   AttentionTensors tensors{torch::empty_like(query), query, key_cache, value_cache,
                            block_tables.to(torch::kInt).contiguous(),
                            context_lens.to(torch::kInt).contiguous()};
+  // key_scale goes into the query scale: q . (k8 * ks) = (q * ks) . k8.
+  const float query_scale = (float)(scale * key_scale);
 
   AT_DISPATCH_SWITCH(
-      query.scalar_type(), "paged_attn",
-      AT_DISPATCH_CASE(at::kFloat, [&] { launch<scalar_t, 4>(tensors, (float)scale, shape); })
-      AT_DISPATCH_CASE(at::kHalf, [&] { launch<scalar_t, 8>(tensors, (float)scale, shape); })
-      AT_DISPATCH_CASE(at::kBFloat16,
-                       [&] { launch<scalar_t, 8>(tensors, (float)scale, shape); }));
+      query.scalar_type(), "paged_attn_fp8",
+      AT_DISPATCH_CASE(at::kBFloat16, [&] {
+        launch<scalar_t>(tensors, query_scale, (float)value_scale, shape);
+      })
+      AT_DISPATCH_CASE(at::kHalf, [&] {
+        launch<scalar_t>(tensors, query_scale, (float)value_scale, shape);
+      }));
   return tensors.output;
 }
 
-int64_t splits_for(int64_t num_seqs, int64_t num_heads, int64_t max_context) {
-  return choose_splits((int)num_seqs, (int)num_heads, (int)max_context);
-}
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("paged_attn", &paged_attn, "split-K paged decode attention (CUDA)",
-        pybind11::arg("query"), pybind11::arg("key_cache"),
-        pybind11::arg("value_cache"), pybind11::arg("block_tables"),
-        pybind11::arg("context_lens"), pybind11::arg("scale"),
-        pybind11::arg("splits") = 0);
-  m.def("splits_for", &splits_for, "the number of splits for this shape");
+  m.def("write_kv_fp8", &write_kv_fp8, "scatter K and V into an FP8 cache");
+  m.def("paged_attn_fp8", &paged_attn_fp8,
+        "split-K paged decode attention over an FP8 cache");
 }

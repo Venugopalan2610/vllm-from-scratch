@@ -1,61 +1,64 @@
 """Reference solution, stage 17 - speculative decoding."""
 
-import torch
 
-
-def ngram_propose(tokens, k, n=3):
-    """Propose k tokens by finding the most recent earlier occurrence of the
-    last n tokens and copying what followed it. Returns [] if no match."""
-    if len(tokens) < n + 1:
+def ngram_propose(tokens, max_draft, ngram=3):
+    """Find the last earlier match of the final `ngram` tokens, and propose
+    the max_draft tokens after it. -> [] if there is no match."""
+    if len(tokens) < ngram + 1:
         return []
-    pattern = list(tokens[-n:])
-    # search backwards, skipping the suffix itself
-    for start in range(len(tokens) - n - 1, -1, -1):
-        if list(tokens[start:start + n]) == pattern:
-            nxt = tokens[start + n: start + n + k]
-            if nxt:
-                return list(nxt)
+    suffix = list(tokens[-ngram:])
+    # Search backwards. Skip the suffix itself.
+    for start in range(len(tokens) - ngram - 1, -1, -1):
+        if list(tokens[start:start + ngram]) == suffix:
+            follow_on = tokens[start + ngram:start + ngram + max_draft]
+            if follow_on:
+                return list(follow_on)
     return []
 
 
-def _sample_from(probs, rng):
-    r = rng.random()
-    c = 0.0
-    for i, p in enumerate(probs.tolist()):
-        c += p
-        if r < c:
-            return i
+def sample_from(probs, rng):
+    """Inverse-CDF sampling with a Python random.Random."""
+    threshold = rng.random()
+    cumulative = 0.0
+    for token, prob in enumerate(probs.tolist()):
+        cumulative += prob
+        if threshold < cumulative:
+            return token
     return len(probs) - 1
 
 
+def sample_residual(target_row, draft_row, rng):
+    """After a rejection: sample from max(0, p - q), normalized."""
+    residual = (target_row - draft_row).clamp(min=0)
+    residual_mass = float(residual.sum())
+    if residual_mass <= 0:
+        return sample_from(target_row, rng)
+    return sample_from(residual / residual_mass, rng)
+
+
 def rejection_sample(target_probs, draft_probs, draft_tokens, rng):
-    """Modified rejection sampling. Lossless: the emitted distribution is
-    exactly the target's.
+    """Modified rejection sampling. It is lossless: the tokens have exactly
+    the distribution of the target.
 
-        target_probs (K+1, V)   target model's distribution at each position
-        draft_probs  (K,   V)   draft model's distribution at each position
-        draft_tokens (K,)       what the draft proposed
+        target_probs (K+1, V)   the target distribution at each position
+        draft_probs  (K,   V)   the draft distribution at each position
+        draft_tokens (K,)       the draft tokens
 
-    Returns (emitted_tokens, num_accepted).
+    -> (emitted tokens, number accepted).
     """
-    K = len(draft_tokens)
-    out = []
-    for i in range(K):
-        t = int(draft_tokens[i])
-        p = float(target_probs[i, t])
-        q = float(draft_probs[i, t])
-        if q > 0 and rng.random() < min(1.0, p / q):
-            out.append(t)
+    emitted = []
+    for position, token in enumerate(int(t) for t in draft_tokens):
+        target_prob = float(target_probs[position, token])
+        draft_prob = float(draft_probs[position, token])
+        if draft_prob > 0 and rng.random() < min(1.0, target_prob / draft_prob):
+            emitted.append(token)
             continue
-        residual = (target_probs[i] - draft_probs[i]).clamp(min=0)
-        s = float(residual.sum())
-        if s <= 0:
-            out.append(_sample_from(target_probs[i], rng))
-        else:
-            out.append(_sample_from(residual / s, rng))
-        return out, i
-    out.append(_sample_from(target_probs[K], rng))   # bonus token
-    return out, K
+        emitted.append(sample_residual(target_probs[position],
+                                       draft_probs[position], rng))
+        return emitted, position
+    num_drafts = len(draft_tokens)
+    emitted.append(sample_from(target_probs[num_drafts], rng))  # bonus token
+    return emitted, num_drafts
 
 
 class SpeculativeStats:
@@ -65,9 +68,9 @@ class SpeculativeStats:
         self.rounds = 0
         self.target_calls = 0
 
-    def record(self, n_proposed, n_accepted):
-        self.proposed += n_proposed
-        self.accepted += n_accepted
+    def record(self, num_proposed, num_accepted):
+        self.proposed += num_proposed
+        self.accepted += num_accepted
         self.rounds += 1
         self.target_calls += 1
 
@@ -77,19 +80,19 @@ class SpeculativeStats:
 
     @property
     def tokens_per_target_call(self):
-        """The actual speedup: tokens emitted per expensive forward pass."""
+        """The real speedup: tokens for each expensive forward pass."""
         if not self.target_calls:
             return 0.0
         return (self.accepted + self.rounds) / self.target_calls
 
 
-def expected_speedup(acceptance_rate, k, draft_cost_ratio=0.0):
-    """Tokens per target call, given an acceptance rate.
+def expected_speedup(acceptance_rate, num_draft, draft_cost_ratio=0.0):
+    """Tokens for each target call, at one acceptance rate.
 
-    With per-token acceptance probability a, the expected number of accepted
-    draft tokens before the first rejection is sum_{i=1..k} a^i, plus one
-    guaranteed token (the correction or the bonus).
+    With an acceptance probability a for each token, the expected number of
+    draft tokens before the first rejection is sum_{i=1..k} a^i. Add one
+    token that always comes (the correction or the bonus).
     """
-    a = acceptance_rate
-    expected = sum(a ** i for i in range(1, k + 1)) + 1
-    return expected / (1 + draft_cost_ratio * k)
+    expected_tokens = 1 + sum(acceptance_rate ** i
+                              for i in range(1, num_draft + 1))
+    return expected_tokens / (1 + draft_cost_ratio * num_draft)
