@@ -81,9 +81,32 @@ Each notebook finds the repo root by itself. The directory you start from does
 not matter. A notebook that compiles CUDA needs `nvcc`. The other notebooks
 need a GPU. Some of them need no GPU at all.
 
+## The words
+
+This course uses the words of two fields that are not software engineering:
+machine learning and GPU programming. Three things help you with them:
+
+- **Part 0** teaches the basic words, for a software engineer with no ML
+  background. Start there if a word in Part 1 is new to you.
+- **[GLOSSARY.md](GLOSSARY.md)** defines each term, gives an analogy from
+  software, and names the notebook and the stage that teach it.
+- **The first use of a term** in a notebook is in bold with a definition, or
+  it is a link to the glossary. `dev/jargon.py` checks this, in the order of
+  [READING_ORDER.md](READING_ORDER.md).
+
 ## What exists
 
-The ladder has eight arcs. The notebooks follow them.
+Part 0 comes before the ladder. Then the ladder has eight arcs, and the
+notebooks follow them. [READING_ORDER.md](READING_ORDER.md) gives the order of
+the notebooks in each section.
+
+**Part 0, From a Program to a Model** (before stage 01)
+
+| | |
+|---|---|
+| `model/` | A model is a function: tokens in, logits out, and a large read-only table of weights. Then the generation loop, and what it costs. Then write the loop. |
+| `attention/` | Attention as a lookup that returns a mix. Heads, and the fact that makes a KV cache possible. Then memoize the lookup. **This section needs no GPU.** |
+| `gpu/` | A machine built for one kind of work: bandwidth, FLOPs and the ridge point. A kernel is the body of a loop. Then predict the time of four workloads, and measure them. |
 
 **Part 1, The Naive Loop** (stages 01-03)
 

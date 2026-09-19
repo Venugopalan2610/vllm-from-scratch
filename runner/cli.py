@@ -34,6 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from runner.glossary import terms_for_stage  # noqa: E402
 from runner.style import paint  # noqa: E402  (needs ROOT on the path)
 
 PROGRESS_FILE = ROOT / ".progress.json"
@@ -311,6 +312,21 @@ def print_stage_banner(stage, progress, total):
     print(rule)
 
 
+def print_terms(ladder, stage):
+    """The words that this stage teaches, each with its definition and its
+    analogy from software. course/GLOSSARY.md is the source."""
+    terms = terms_for_stage(stage_label(stage), [stage_label(item) for item in ladder])
+    if not terms:
+        return
+    heading("NEW WORDS IN THIS STAGE")
+    for term in terms:
+        print("  " + paint(term.name, "bold"))
+        print(wrap(term.definition, indent="    "))
+        if "Like" in term.fields:
+            print(paint(wrap("Like: " + term.fields["Like"], indent="    "), "dim"))
+    print("\n  " + paint("course/GLOSSARY.md has all the terms of the course.", "dim"))
+
+
 def print_files(stage, progress):
     files = stage_files(stage, progress)
     print("\n  " + paint(files[0], "underline") + "   "
@@ -355,6 +371,7 @@ def cmd_guide(ladder, progress, stage_id=None):
     if not stage:
         return 1
     print_stage_banner(stage, progress, len(ladder))
+    print_terms(ladder, stage)
     heading("WHY THIS STAGE EXISTS")
     print(wrap(" ".join(stage["insight"].split())))
     if progress["backend"] == "jax" and stage.get("jax_insight"):

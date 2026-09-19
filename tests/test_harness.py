@@ -121,3 +121,61 @@ def test_track_restrictions_are_spelled_correctly(stage):
         assert "jax_file" not in stage, (
             f"{stage['id']} is restricted to {stage['tracks']} but also "
             "declares a jax_file")
+
+
+# ---------------------------------------------------------------- the words
+# course/GLOSSARY.md is the one source for the words of the course.
+# ./vc guide and dev/jargon.py both read it, so these checks keep it complete.
+
+def _glossary():
+    from runner.glossary import load_glossary
+
+    return load_glossary()
+
+
+def _ladder_labels():
+    return [stage["id"].split("-")[0] for stage in stages()]
+
+
+@pytest.mark.parametrize("term", _glossary().values(), ids=lambda term: term.name)
+def test_glossary_entry_is_complete(term):
+    assert term.definition, f"{term.name} has no definition"
+    assert "Taught in" in term.fields, f"{term.name} has no **Taught in:** field"
+
+
+def test_glossary_names_only_real_stages():
+    labels = _ladder_labels()
+    for term in _glossary().values():
+        for label in term.stages(labels):
+            assert label in labels, f"{term.name} names stage {label}, which does not exist"
+
+
+@pytest.mark.parametrize("stage", stages(), ids=lambda stage: stage["id"])
+def test_every_stage_teaches_a_glossary_term(stage):
+    """./vc guide prints these terms. A stage with none gets no word list."""
+    from runner.glossary import terms_for_stage
+
+    label = stage["id"].split("-")[0]
+    assert terms_for_stage(label, _ladder_labels()), (
+        f"no glossary entry names stage {label} in its **Taught in:** field")
+
+
+def test_reading_order_lists_each_notebook_once():
+    from dev.jargon import COURSE, reading_order
+
+    listed = reading_order()
+    on_disk = {path for path in COURSE.rglob("*.ipynb")
+               if "solutions" not in path.parts and ".ipynb_checkpoints" not in path.parts}
+    assert len(listed) == len(set(listed)), "READING_ORDER.md lists a notebook twice"
+    assert set(listed) == on_disk, (
+        f"missing from READING_ORDER.md: {sorted(on_disk - set(listed))}; "
+        f"listed but absent: {sorted(set(listed) - on_disk)}")
+
+
+def test_course_defines_each_term_before_it_uses_it():
+    """Run `dev/jargon.py` to see each early use, and `--fix` to link it."""
+    from dev.jargon import early_uses, reading_order
+
+    terms = [term for term in _glossary().values() if term.checked]
+    early = early_uses(terms, reading_order())
+    assert not early, "\n".join(f"{use.notebook.name}: {use.term.name}" for use in early)

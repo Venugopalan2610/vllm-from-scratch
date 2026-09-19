@@ -36,6 +36,12 @@ The course runs on one consumer GPU. You can use **PyTorch or JAX**. It is the
 same ladder on two backends. Approximately half of the stages serve both
 tracks, because they are pure logic and no framework appears in them.
 
+**New to machine learning or to GPUs?** Start with Part 0 of the notebooks,
+`course/Part0_FromAProgramToAModel/`. It explains a model, attention and the
+GPU to a software engineer, and it needs no ML background. Each term of the
+course is in [`course/GLOSSARY.md`](course/GLOSSARY.md), with an analogy from
+software, and `./vc guide` prints the new terms of each stage.
+
 The derivations behind these stages are at
 [derivingsystems.com](https://derivingsystems.com).
 [The Course](https://derivingsystems.com/course.html) puts the whole ladder on

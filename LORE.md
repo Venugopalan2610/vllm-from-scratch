@@ -614,47 +614,9 @@ And for the kernels, four hardware constants and what they cost you:
 
 ## 9. Vocabulary
 
-- **TTFT.** Time to first token. The queue wait and the prefill control it.
-- **TPOT / ITL.** Time for each output token, or inter-token latency. It is how
-  smooth the stream looks.
-- **Goodput.** The throughput that met its latency SLO. This is the metric that
-  matters.
-- **Ragged batch**, or flat batch. The tokens of all sequences, concatenated.
-  `cu_seqlens` describes it.
-- **Slot mapping.** For each token in the flat batch, the physical KV slot to
-  write it to.
-- **Block table.** One array for each sequence. It maps a logical block index to
-  a physical block id.
-- **Preemption.** The scheduler removes a running sequence under memory
-  pressure. It swaps the blocks out, or it computes them again later.
-- **Online softmax.** The running maximum and sum that let you softmax in tiles.
-  It comes from FlashAttention. You write it in stage 8.
-
-And the CUDA half, all of it earned in stages 08 through 08c:
-
-- **Warp.** The 32 threads that issue together. A **lane** is the index of one
-  thread in the warp.
-- **Coalescing.** Consecutive lanes read consecutive addresses, so their
-  requests merge into whole transactions. This is the most valuable habit.
-- **Sector.** The 32-byte unit that the cache fetches. "Bytes per sector used"
-  is a measurement of coalescing, and `./vc ncu` reads it.
-- **Occupancy.** The warps resident on an SM against the maximum that it holds.
-  The registers and the shared memory for each block limit it. It tells you how
-  much latency the SM hides. It does not tell you how busy the SM is.
-- **Spill.** ptxas ran out of registers and put the excess in local memory,
-  which is DRAM. It is always a loss, and the build log always shows it.
-- **Warp shuffle.** `__shfl_xor_sync` and the related primitives. They exchange
-  registers between lanes with no shared memory and no barrier. Every lane in
-  the mask must reach the instruction. If one does not, the primitive never
-  returns.
-- **Split-K**, or flash-decoding. Cut the CONTEXT into chunks to make more
-  blocks, when the sequences cannot fill the GPU. Each block emits a partial
-  `(m, l, acc)`. A merge pass then rescales them by `exp(m_j - M)`. The result
-  is exact, and not an approximation.
-- **Fused epilogue.** Apply the last operation to a value that already sits in a
-  register. The last operation can be a dequantize scale, a bias or an
-  activation. The alternative writes a whole tensor out for a second kernel to
-  read back. Stage 18b is 15x, and this is the whole difference.
+`course/GLOSSARY.md` defines each term of the course. Each entry has an
+analogy from software engineering, and the notebook and the stage that teach
+the term. `./vc guide` prints the terms of each stage.
 
 ---
 
