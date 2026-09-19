@@ -1,6 +1,6 @@
 """Stage 12 - CUDA graphs for the decode step.
 
-Spec in app/s12_cudagraph.py.
+The spec is in app/s12_cudagraph.py.
 """
 
 import pytest
@@ -9,31 +9,38 @@ import torch
 from app.s12_cudagraph import CUDAGraphRunner
 from tests.helpers import bench_ms
 
+WIDTH = 512
+
+
+def _random_batch(batch_size, device):
+    return torch.randn(batch_size, WIDTH, device=device, dtype=torch.float16)
+
 
 @pytest.fixture(scope="module")
-def stack(dev):
-    """A launch-bound workload: many tiny kernels, little arithmetic.
+def stack(device):
+    """A launch-bound load: many small kernels, little arithmetic.
 
-    This is deliberately shaped like decode -- if the work per kernel were
-    large, launch overhead would not matter and graphs would buy nothing.
+    It has the shape of decode on purpose. If each kernel did much work, the
+    launch overhead would not be important, and graphs would give nothing.
     """
     torch.manual_seed(0)
-    layers = [torch.nn.Linear(512, 512, device=dev, dtype=torch.float16)
+    layers = [torch.nn.Linear(WIDTH, WIDTH, device=device, dtype=torch.float16)
               for _ in range(32)]
 
-    def fn(x):
-        for l in layers:
-            x = torch.relu(l(x))
-        return x
+    def forward(inputs):
+        for layer in layers:
+            inputs = torch.relu(layer(inputs))
+        return inputs
 
-    return fn
+    return forward
 
 
 @pytest.fixture(scope="module")
-def runner(stack, dev):
-    r = CUDAGraphRunner(stack, buckets=(1, 2, 4, 8))
-    r.capture(lambda bs: (torch.zeros(bs, 512, device=dev, dtype=torch.float16),))
-    return r
+def runner(stack, device):
+    graph_runner = CUDAGraphRunner(stack, buckets=(1, 2, 4, 8))
+    graph_runner.capture(lambda batch_size: (
+        torch.zeros(batch_size, WIDTH, device=device, dtype=torch.float16),))
+    return graph_runner
 
 
 def test_captures_one_graph_per_bucket(runner):
@@ -41,81 +48,80 @@ def test_captures_one_graph_per_bucket(runner):
 
 
 def test_bucket_selection():
-    r = CUDAGraphRunner(lambda x: x, buckets=(1, 2, 4, 8))
-    assert r.bucket_for(1) == 1
-    assert r.bucket_for(3) == 4
-    assert r.bucket_for(5) == 8
-    assert r.bucket_for(8) == 8
+    graph_runner = CUDAGraphRunner(lambda inputs: inputs, buckets=(1, 2, 4, 8))
+    assert graph_runner.bucket_for(1) == 1
+    assert graph_runner.bucket_for(3) == 4
+    assert graph_runner.bucket_for(5) == 8
+    assert graph_runner.bucket_for(8) == 8
     with pytest.raises(ValueError):
-        r.bucket_for(9)
+        graph_runner.bucket_for(9)
 
 
-@pytest.mark.parametrize("bs", [1, 2, 4, 8])
-def test_replay_matches_eager_exactly(runner, stack, dev, bs):
-    """The same kernels run in the same order. The result must be identical,
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
+def test_replay_matches_eager_exactly(runner, stack, device, batch_size):
+    """The same kernels run in the same order. The result must be the same,
     bit for bit."""
-    x = torch.randn(bs, 512, device=dev, dtype=torch.float16)
-    want = stack(x)
-    got = runner.run(x)
-    torch.testing.assert_close(got, want, rtol=0, atol=0)
+    inputs = _random_batch(batch_size, device)
+    torch.testing.assert_close(runner.run(inputs), stack(inputs), rtol=0,
+                               atol=0)
 
 
-@pytest.mark.parametrize("bs", [1, 3, 5, 7])
-def test_padded_batches_are_correct(runner, stack, dev, bs):
-    """Batch 3 runs on the bucket-4 graph and must still be exact."""
-    x = torch.randn(bs, 512, device=dev, dtype=torch.float16)
-    got = runner.run(x)
-    assert got.shape[0] == bs, "output must be sliced back to the real batch size"
-    torch.testing.assert_close(got, stack(x), rtol=0, atol=0)
+@pytest.mark.parametrize("batch_size", [1, 3, 5, 7])
+def test_padded_batches_are_correct(runner, stack, device, batch_size):
+    """Batch 3 runs on the bucket-4 graph, and it must still be exact."""
+    inputs = _random_batch(batch_size, device)
+    output = runner.run(inputs)
+    assert output.shape[0] == batch_size, (
+        "cut the output back to the real batch size")
+    torch.testing.assert_close(output, stack(inputs), rtol=0, atol=0)
 
 
-def test_output_is_not_a_view_of_the_static_buffer(runner, dev):
-    """The classic graph bug: hand back a view, and the next replay mutates it.
+def test_output_is_not_a_view_of_the_static_buffer(runner, device):
+    """The usual graph bug: return a view, and the next replay changes it.
 
-    In a server this shows up as one request's tokens appearing in another's
-    response, which is about as bad as bugs get.
+    In a server, the tokens of one request then show in the response of
+    another. Few bugs are worse.
     """
-    a = torch.randn(2, 512, device=dev, dtype=torch.float16)
-    b = torch.randn(2, 512, device=dev, dtype=torch.float16)
-    out_a = runner.run(a)
-    snapshot = out_a.clone()
-    runner.run(b)                      # second replay overwrites static output
-    torch.testing.assert_close(out_a, snapshot, rtol=0, atol=0)
+    first_output = runner.run(_random_batch(2, device))
+    snapshot = first_output.clone()
+    runner.run(_random_batch(2, device))     # overwrites the static output
+    torch.testing.assert_close(first_output, snapshot, rtol=0, atol=0)
 
 
-def test_stale_padding_cannot_leak_nans(runner, stack, dev):
-    """Poison the padding rows, then run a smaller batch through the bucket."""
-    big = torch.full((8, 512), float("nan"), device=dev, dtype=torch.float16)
-    runner.run(big)                    # fills static buffers with NaN
-    x = torch.randn(3, 512, device=dev, dtype=torch.float16)
-    got = runner.run(x)
-    assert torch.isfinite(got).all(), (
-        "NaNs from the previous replay's padding rows leaked into a real "
-        "result -- zero the padding in run()"
-    )
-    torch.testing.assert_close(got, stack(x), rtol=0, atol=0)
+def test_stale_padding_cannot_leak_nans(runner, stack, device):
+    """Poison the padding rows, then run a smaller batch through the
+    bucket."""
+    runner.run(torch.full((8, WIDTH), float("nan"), device=device,
+                          dtype=torch.float16))       # NaN in the static buffers
+    inputs = _random_batch(3, device)
+    output = runner.run(inputs)
+    assert torch.isfinite(output).all(), (
+        "NaNs from the padding rows of the replay before got into a real "
+        "result. Put zeros in the padding in run().")
+    torch.testing.assert_close(output, stack(inputs), rtol=0, atol=0)
 
 
-def test_graphs_are_faster_than_eager(runner, stack, dev):
+def test_graphs_are_faster_than_eager(runner, stack, device):
     """This is the point. You removed the Python and the launches, and the
     clock must show it."""
     rows = []
-    for bs in (1, 2, 4, 8):
-        x = torch.randn(bs, 512, device=dev, dtype=torch.float16)
-        eager = bench_ms(lambda: stack(x), iters=200, warmup=20)
-        graph = bench_ms(lambda: runner.run(x), iters=200, warmup=20)
-        rows.append((bs, eager, graph))
+    for batch_size in (1, 2, 4, 8):
+        inputs = _random_batch(batch_size, device)
+        eager_ms = bench_ms(lambda: stack(inputs), iters=200, warmup=20)
+        graph_ms = bench_ms(lambda: runner.run(inputs), iters=200, warmup=20)
+        rows.append((batch_size, eager_ms, graph_ms))
 
     print(f"\n  {'batch':>6} {'eager':>10} {'graph':>10} {'speedup':>9}")
-    for bs, e, g in rows:
-        print(f"  {bs:>6} {e:>8.3f}ms {g:>8.3f}ms {e / g:>8.2f}x")
+    for batch_size, eager_ms, graph_ms in rows:
+        print(f"  {batch_size:>6} {eager_ms:>8.3f}ms {graph_ms:>8.3f}ms "
+              f"{eager_ms / graph_ms:>8.2f}x")
 
-    worst = min(e / g for _, e, g in rows)
+    worst = min(eager_ms / graph_ms for _, eager_ms, graph_ms in rows)
     assert worst > 1.5, (
-        f"only {worst:.2f}x at best. 32 tiny layers should be dominated by "
-        "launch overhead; check that capture() actually captured."
-    )
+        f"only {worst:.2f}x in the worst case. The launch overhead must be "
+        "most of the time of 32 small layers. Make sure that capture() "
+        "captured.")
     print(f"\n  \033[1mWorst case {worst:.2f}x faster.\033[0m")
-    print("  \033[2mNo arithmetic changed. You deleted CPU work that the GPU")
-    print("  was waiting on -- which is exactly the gap stage 03 measured")
-    print("  between decode's 7.8 ms/token and its 3.14 ms roofline floor.\033[0m")
+    print("  \033[2mNo arithmetic changed. You removed CPU work that the GPU")
+    print("  waited on. That is the gap that stage 03 measured between the")
+    print("  decode time and its roofline floor.\033[0m")

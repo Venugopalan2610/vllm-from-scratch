@@ -1,137 +1,131 @@
-"""Stage 08 (JAX) - Paged attention in Pallas.
+"""Stage 08 (JAX) - paged attention in Pallas.
 
-Spec in app/j08_paged_pallas.py.
+The spec is in app/j08_paged_pallas.py.
 
-Every correctness check compares against stage 07, which is your oracle. The
-last one is the one that matters: it has to actually be faster.
+Every correctness check compares with stage 07, which is your oracle. The
+last check is the important one: it must really be faster.
 
-These checks need a working Pallas GPU backend. On a pre-Hopper card that is
-the Triton backend, which `jvllm.compat` registers for you; if neither backend
-can compile here, the whole file skips rather than failing.
+These checks need a Pallas GPU backend that works. On a card older than
+Hopper, that is the Triton backend, and `jvllm.compat` registers it for you.
+If no backend can compile here, the whole file skips. It does not fail.
 """
 
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 from app.j07_paged_attn import paged_attention, reference_attention
 from app.j08_paged_pallas import paged_attention_pallas
-from tests.jhelpers import build_paged, jbench_ms, rand_kv
-
-
-def close(got, want, tol=2e-3):
-    np.testing.assert_allclose(np.asarray(got, np.float32),
-                               np.asarray(want, np.float32),
-                               rtol=tol, atol=tol)
+from tests.jhelpers import (
+    assert_close,
+    build_paged,
+    jbench_ms,
+    poisoned_past_context,
+    random_kv,
+    random_query,
+)
 
 
 @pytest.mark.parametrize("block_size", [1, 4, 16])
-@pytest.mark.parametrize("L", [1, 7, 16, 33, 129])
-def test_agrees_with_stage_07(jpallas, block_size, L):
-    """Same numbers as the jnp version, every layout, every length."""
-    S, H, KVH, D = 3, 4, 4, 16
-    k, v = rand_kv(S, KVH, L, D)
-    q = jnp.asarray(np.random.RandomState(0).randn(S, H, D), jnp.float32)
-    kc, vc, bt, ctx = build_paged(k, v, block_size)
-    close(paged_attention_pallas(q, kc, vc, bt, ctx),
-          paged_attention(q, kc, vc, bt, ctx))
+@pytest.mark.parametrize("context_len", [1, 7, 16, 33, 129])
+def test_agrees_with_stage_07(jpallas, block_size, context_len):
+    """The same numbers as the jnp version, every layout, every length."""
+    keys, values = random_kv(3, 4, context_len, 16)
+    query = random_query(3, 4, 16, seed=0)
+    paged_cache = build_paged(keys, values, block_size)
+    assert_close(paged_attention_pallas(query, *paged_cache),
+                 paged_attention(query, *paged_cache))
 
 
 def test_agrees_with_the_dense_reference_too(jpallas):
-    """Belt and braces: not just consistent with stage 07, but correct."""
-    S, H, KVH, D, L = 4, 8, 8, 64, 100
-    k, v = rand_kv(S, KVH, L, D)
-    q = jnp.asarray(np.random.RandomState(1).randn(S, H, D), jnp.float32)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    close(paged_attention_pallas(q, kc, vc, bt, ctx),
-          reference_attention(q, k, v))
+    """A second check: not only the same as stage 07, but correct."""
+    keys, values = random_kv(4, 8, 100, 64)
+    query = random_query(4, 8, 64, seed=1)
+    assert_close(paged_attention_pallas(query, *build_paged(keys, values, 16)),
+                 reference_attention(query, keys, values))
 
 
-@pytest.mark.parametrize("H,KVH", [(8, 2), (16, 8), (4, 4)])
-def test_gqa_ratios(jpallas, H, KVH):
-    """Query head h must read KV head h // (H // KVH)."""
-    S, D, L = 2, 64, 40
-    k, v = rand_kv(S, KVH, L, D)
-    q = jnp.asarray(np.random.RandomState(2).randn(S, H, D), jnp.float32)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    close(paged_attention_pallas(q, kc, vc, bt, ctx),
-          paged_attention(q, kc, vc, bt, ctx))
+@pytest.mark.parametrize("num_heads,num_kv_heads", [(8, 2), (16, 8), (4, 4)])
+def test_gqa_ratios(jpallas, num_heads, num_kv_heads):
+    """Query head h must read KV head h // (num_heads // num_kv_heads)."""
+    keys, values = random_kv(2, num_kv_heads, 40, 64)
+    query = random_query(2, num_heads, 64, seed=2)
+    paged_cache = build_paged(keys, values, 16)
+    assert_close(paged_attention_pallas(query, *paged_cache),
+                 paged_attention(query, *paged_cache))
 
 
 def test_ragged_context_lengths(jpallas):
-    """The fori_loop trip count is per program, and it is a device value."""
-    S, H, KVH, D, Lmax = 8, 8, 4, 64, 200
-    k, v = rand_kv(S, KVH, Lmax, D)
-    kc, vc, bt, _ = build_paged(k, v, 16)
-    lens = jnp.asarray([200, 1, 17, 16, 199, 33, 64, 128], jnp.int32)
-    q = jnp.asarray(np.random.RandomState(3).randn(S, H, D), jnp.float32)
-    close(paged_attention_pallas(q, kc, vc, bt, lens),
-          paged_attention(q, kc, vc, bt, lens))
+    """The trip count of the fori_loop is different for each program, and
+    it is a device value."""
+    keys, values = random_kv(8, 4, 200, 64)
+    key_cache, value_cache, block_tables, _ = build_paged(keys, values, 16)
+    context_lens = jnp.asarray([200, 1, 17, 16, 199, 33, 64, 128], jnp.int32)
+    query = random_query(8, 8, 64, seed=3)
+    arguments = (query, key_cache, value_cache, block_tables, context_lens)
+    assert_close(paged_attention_pallas(*arguments),
+                 paged_attention(*arguments))
 
 
 def test_ignores_junk_beyond_context_len(jpallas):
-    """The masking check again, because a kernel is much easier to get wrong."""
-    S, H, KVH, D, L = 2, 4, 2, 32, 12
-    bs = 8
-    k, v = rand_kv(S, KVH, L, D)
-    kc, vc, bt, _ = build_paged(k, v, bs)
-    lens = jnp.asarray([L, L], jnp.int32)
-    q = jnp.asarray(np.random.RandomState(4).randn(S, H, D), jnp.float32)
-    before = paged_attention_pallas(q, kc, vc, bt, lens)
+    """The masking check again, because a kernel is much easier to get
+    wrong."""
+    context_len, block_size = 12, 8
+    keys, values = random_kv(2, 2, context_len, 32)
+    key_cache, value_cache, block_tables, _ = build_paged(keys, values,
+                                                          block_size)
+    context_lens = jnp.asarray([context_len, context_len], jnp.int32)
+    query = random_query(2, 4, 32, seed=4)
 
-    kc_np, vc_np = np.asarray(kc).copy(), np.asarray(vc).copy()
-    for s in range(S):
-        for b in range(bt.shape[1]):
-            phys = int(bt[s, b])
-            for off in range(bs):
-                if b * bs + off >= L:
-                    kc_np[phys, :, off] = 999.0
-                    vc_np[phys, :, off] = 999.0
-
-    after = paged_attention_pallas(q, jnp.asarray(kc_np), jnp.asarray(vc_np),
-                                   bt, lens)
-    close(after, before)
+    before = paged_attention_pallas(query, key_cache, value_cache,
+                                    block_tables, context_lens)
+    after = paged_attention_pallas(query, *poisoned_past_context(
+        key_cache, value_cache, block_tables, context_len, block_size),
+        block_tables, context_lens)
+    assert_close(after, before)
 
 
 def test_bf16_accumulates_in_fp32(jpallas):
-    """Long contexts in bf16 are where sloppy accumulation shows up.
+    """A long context in bf16 shows careless accumulation.
 
-    Sum 2048 bf16 products in bf16 and you lose several digits. Accumulate in
-    float32 inside the kernel and this passes comfortably.
+    A bf16 sum of 2048 bf16 products loses several digits. Accumulate in
+    float32 inside the kernel, and this passes easily.
     """
-    S, H, KVH, D, L = 2, 8, 8, 128, 2048
-    k, v = rand_kv(S, KVH, L, D, dtype=jnp.bfloat16)
-    q = jnp.asarray(np.random.RandomState(5).randn(S, H, D), jnp.bfloat16)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    want = reference_attention(q.astype(jnp.float32), k.astype(jnp.float32),
-                               v.astype(jnp.float32))
-    close(paged_attention_pallas(q, kc, vc, bt, ctx), want, tol=6e-2)
+    keys, values = random_kv(2, 8, 2048, 128, dtype=jnp.bfloat16)
+    query = random_query(2, 8, 128, seed=5, dtype=jnp.bfloat16)
+    expected = reference_attention(query.astype(jnp.float32),
+                                   keys.astype(jnp.float32),
+                                   values.astype(jnp.float32))
+    assert_close(paged_attention_pallas(query, *build_paged(keys, values, 16)),
+                 expected, tolerance=6e-2)
 
 
 def test_it_is_actually_faster(jpallas):
-    """The whole point of the stage."""
+    """The point of the stage."""
     rows = []
-    for S, L in ((8, 256), (32, 512), (64, 1024)):
-        H, KVH, D = 16, 8, 128
-        k, v = rand_kv(S, KVH, L, D, dtype=jnp.bfloat16)
-        q = jnp.asarray(np.random.RandomState(6).randn(S, H, D), jnp.bfloat16)
-        kc, vc, bt, ctx = build_paged(k, v, 16)
+    for num_seqs, context_len in ((8, 256), (32, 512), (64, 1024)):
+        keys, values = random_kv(num_seqs, 8, context_len, 128,
+                                 dtype=jnp.bfloat16)
+        query = random_query(num_seqs, 16, 128, seed=6, dtype=jnp.bfloat16)
+        paged_cache = build_paged(keys, values, 16)
+        jnp_ms = jbench_ms(lambda: paged_attention(query, *paged_cache),
+                           iters=10)
+        pallas_ms = jbench_ms(lambda: paged_attention_pallas(query,
+                                                             *paged_cache))
+        rows.append((num_seqs, context_len, jnp_ms, pallas_ms))
 
-        jnp_ms = jbench_ms(lambda: paged_attention(q, kc, vc, bt, ctx), iters=10)
-        pallas_ms = jbench_ms(lambda: paged_attention_pallas(q, kc, vc, bt, ctx))
-        rows.append((S, L, jnp_ms, pallas_ms))
+    print(f"\n  {'seqs':>5} {'ctx':>6} {'stage 07':>11} {'stage 08':>11} "
+          f"{'speedup':>9}")
+    for num_seqs, context_len, jnp_ms, pallas_ms in rows:
+        print(f"  {num_seqs:>5} {context_len:>6} {jnp_ms:>9.2f}ms "
+              f"{pallas_ms:>9.3f}ms {jnp_ms / pallas_ms:>8.1f}x")
 
-    print(f"\n  {'seqs':>5} {'ctx':>6} {'stage 07':>11} {'stage 08':>11} {'speedup':>9}")
-    for S, L, a, b in rows:
-        print(f"  {S:>5} {L:>6} {a:>9.2f}ms {b:>9.3f}ms {a / b:>8.1f}x")
-
-    worst = min(a / b for _, _, a, b in rows)
+    worst = min(jnp_ms / pallas_ms for _, _, jnp_ms, pallas_ms in rows)
     assert worst > 3.0, (
-        f"only {worst:.1f}x faster at best. Stage 07 copies every sequence's "
-        "whole K and V to HBM before it computes anything; one kernel that "
-        "streams tiles should crush it."
-    )
-    print(f"\n  \033[1mWorst case: {worst:.0f}x faster than the jnp version.\033[0m")
-    print("  \033[2mYou deleted the gather. The K/V tiles now stream through")
-    print("  SRAM instead of round-tripping to HBM as a materialised copy,")
-    print("  and the score row never exists at all.\033[0m")
+        f"only {worst:.1f}x faster in the worst case. Stage 07 copies the "
+        "whole K and V of every sequence to HBM before it computes anything. "
+        "One kernel that streams tiles must be much faster.")
+    print(f"\n  \033[1mWorst case: {worst:.0f}x faster than the jnp "
+          "version.\033[0m")
+    print("  \033[2mYou removed the gather. The K and V tiles now go through")
+    print("  SRAM, not through a copy in HBM, and the score row never")
+    print("  exists.\033[0m")

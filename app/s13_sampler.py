@@ -2,10 +2,10 @@
 
 `./vc lore 13` for the insight. `./vc test 13` to check yourself.
 
-Each request in the batch carries its OWN temperature, top_k, top_p, penalties
-and seed. ONE vectorized pass must apply all of them. After the kernels become
-fast, in stages 08 and 12, a Python loop over 256 requests here quietly becomes
-your bottleneck.
+Each request of the batch has its OWN temperature, top_k, top_p, penalties
+and seed. ONE vectorized pass must apply all of them. When the kernels are
+fast, after stages 08 and 12, a Python loop over 256 requests here becomes
+your bottleneck, with no warning.
 """
 
 from dataclasses import dataclass
@@ -16,8 +16,8 @@ import torch
 @dataclass
 class SamplingParams:
     temperature: float = 1.0
-    top_k: int = 0            # 0 = disabled
-    top_p: float = 1.0        # 1.0 = disabled
+    top_k: int = 0            # 0 = off
+    top_p: float = 1.0        # 1.0 = off
     repetition_penalty: float = 1.0
     seed: int | None = None
 
@@ -27,67 +27,68 @@ class SamplingParams:
 
 
 def apply_repetition_penalty(logits, prev_tokens, penalties):
-    """logits (B, V), prev_tokens list[list[int]], penalties (B,).
+    """logits (rows, vocab), prev_tokens list[list[int]], penalties (rows,).
 
-    The convention (from CTRL, and what everyone copied):
+    The convention (from CTRL, and all others copied it):
 
         logit > 0  ->  logit / penalty
         logit <= 0 ->  logit * penalty
 
-    The sign split is deliberate: dividing a negative logit would make it
-    LARGER, which would boost the token you are trying to suppress.
+    The two cases are on purpose: a division makes a negative logit LARGER,
+    and that makes the token more probable, not less.
     """
     raise NotImplementedError("stage 13: implement apply_repetition_penalty")
 
 
 def apply_top_k(logits, k):
-    """Keep only each row's k highest logits; k is (B,), 0 = disabled.
+    """Keep only the k highest logits of each row. k is (rows,). A 0 turns
+    top-k off for that row.
 
-    Vectorize it: sort once, take the k-th largest as a per-row threshold,
-    then mask everything below. Do not loop over the batch.
+    Vectorize it: sort one time, take the k-th largest value as a threshold
+    for each row, then mask everything below it. Do not loop over the batch.
     """
     raise NotImplementedError("stage 13: implement apply_top_k")
 
 
 def apply_top_p(logits, p):
-    """Nucleus sampling. p is (B,), 1.0 = disabled.
+    """Nucleus sampling. p is (rows,), and 1.0 = off.
 
-    Keep the SMALLEST set of tokens whose cumulative probability reaches p.
+    Keep the SMALLEST set of tokens whose cumulative probability gets to p.
 
-    Sort descending, cumsum, and drop tokens whose cumulative mass BEFORE them
-    has already reached p:
+    Sort in descending order, cumsum, and remove the tokens whose mass
+    BEFORE them already got to p:
 
         remove = (cumsum - probs) >= p
 
-    Two details worth getting right:
-      - always keep the top-1 token, or a peaked distribution with a small p
-        leaves you with nothing to sample from
-      - compare with a small epsilon; exact boundaries like 0.5+0.25+0.15 do
-        not land on 0.9 in float32
+    Two important details:
+      - always keep the top token. If not, a peaked distribution with a small
+        p leaves no token to sample.
+      - compare with a small epsilon. Exact limits such as 0.5+0.25+0.15 are
+        not exactly 0.9 in float32.
     """
     raise NotImplementedError("stage 13: implement apply_top_p")
 
 
 def sample(logits, params, prev_tokens=None):
-    """logits (B, V) -> (B,) token ids.
+    """logits (rows, vocab) -> (rows,) token ids.
 
-    Order matters: repetition penalty, then temperature, then top_k, then
-    top_p, then draw. Applying temperature after the truncations changes which
-    tokens survive.
+    The order is important: repetition penalty, then temperature, then
+    top_k, then top_p, then the draw. A temperature after the truncations
+    changes the tokens that remain.
 
     temperature == 0 means greedy (argmax) for that row.
 
-    For the draw itself, the Gumbel-max trick vectorizes where
-    torch.multinomial does not:
+    For the draw, the Gumbel-max method vectorizes, and torch.multinomial
+    does not:
 
         gumbel = -log(-log(uniform))
         token  = argmax(logits + gumbel)
 
-    That is an exact categorical sample, and it lets each row use its own
-    seeded noise. Mind the parentheses -- `-torch.log(x).clamp_min(e)` parses
-    as `-(torch.log(x).clamp_min(e))`, which will hand you NaNs and a sampler
-    that returns token 0 forever.
+    That is an exact categorical sample, and each row can use its own seeded
+    noise. Look at the parentheses. `-torch.log(x).clamp_min(e)` is
+    `-(torch.log(x).clamp_min(e))`. That gives NaNs, and a sampler that
+    returns token 0 for ever.
 
-    Same seed + same logits must give the same token, every time.
+    The same seed and the same logits must give the same token, every time.
     """
     raise NotImplementedError("stage 13: implement sample")

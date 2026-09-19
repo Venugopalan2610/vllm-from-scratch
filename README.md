@@ -1,19 +1,33 @@
 # Build Your Own vLLM
 
-More than twenty stages. You start with a naive greedy loop. You finish with a
-paged, continuously-batched, CUDA-graphed inference server that decodes
-speculatively.
+32 stages on the torch track. You start with a naive greedy loop. You finish
+with one inference server that you built from your own parts:
+
+- a paged KV cache, with your block allocator and your CUDA kernels,
+- continuous batching with a token budget, chunked prefill and preemption,
+- prefix caching,
+- CUDA graphs on the real decode step,
+- int8 weights on your own GEMV kernel, and an FP8 KV cache on your own
+  attention kernel,
+- speculative decoding, lossless, inside the engine,
+- a JSON mode that cannot produce invalid JSON,
+- an OpenAI-compatible HTTP API: chat, sampling fields, stop strings,
+  streaming, usage, and Prometheus metrics.
+
+Tensor parallelism is the one part that stays a separate stage. It needs two
+GPUs to be real, and the course runs on one.
 
 Checks gate every stage. A **measurement** gates most of them. You do not
 advance because your code runs. You advance because it became faster in the way
 that the stage predicted.
 
-Four of those stages are **CUDA that you write yourself**:
+Five of those stages are **CUDA that you write yourself**:
 
 - a paged attention kernel,
 - the same kernel, made to coalesce,
 - warp shuffles and split-K,
-- a quantized GEMV with a fused epilogue.
+- a quantized GEMV with a fused epilogue,
+- the attention kernel again, on an FP8 cache.
 
 This is not Triton. These are real `.cu` files, real `nvcc`, and real register
 counts.
@@ -27,12 +41,56 @@ The derivations behind these stages are at
 [The Course](https://derivingsystems.com/course.html) puts the whole ladder on
 one page. Read it before you build, if you want to.
 
+## What you have at the end, measured
+
+The last arc, the capstone (stages 21 to 28), connects your parts into one
+engine. The checks then measure it against physics, on your card, in the same
+minute. All of these are ratios, so they hold on any card:
+
+| Measurement | Reference solution | The gate |
+|---|---|---|
+| tokens against HuggingFace in fp32 | identical | identical |
+| batch-1 decode step, against the weight-read floor | 57% to 71% | 50% |
+| CUDA graphs against eager, at batch 1 | 1.3x to 1.5x | 1.2x |
+| int8 weights against bf16, batch-1 step | 1.47x to 1.55x | 1.3x |
+| FP8 KV against bf16 KV, 16 x 2048 tokens | 1.33x to 1.46x | 1.2x |
+| perplexity with int8 weights, with an FP8 KV cache | within 1% | within 3% |
+| speculative decoding: greedy tokens against no speculation | identical | identical |
+| speculative decoding on a copy task, batch 1 | 1.5x to 3.1x | 1.5x |
+| JSON mode: answers that parse | all | all |
+| the whole engine, against the roofline floor of its own steps | 39% to 59% | 30% |
+| the whole engine, against your stage 05 engine, same requests | 3.2x to 4.6x | 2x |
+
+The ranges come from repeated runs on one laptop GPU. A laptop throttles, so
+the same code moves by 20% from run to run. That is why every gate compares
+two things that the check measures one after the other.
+
+To see the absolute numbers for your card, finish the capstone and run:
+
+```bash
+./vc bench      # tok/s, the roofline floor, and the ceiling of your card
+./vc serve      # your server on localhost:8000, for curl
+```
+
+**Which models.** The capstone model (`tvllm/model.py`) runs the Qwen3 family
+and the Llama family. Set `VC_MODEL`. What fits depends on two numbers of your
+card: VRAM, and read bandwidth.
+
+- **The weights must fit, with room for the KV pool.** In bf16 a model needs 2
+  bytes for each parameter. On a 12 GB card that means approximately 3B
+  parameters at most.
+- **Batch 1 cannot go faster than bandwidth / weight bytes.** A 0.6B model
+  reads 1.2 GB for each token. A 3B model reads 6 GB.
+- **With a full KV pool, tok/s is close to bandwidth / (context × KV bytes for
+  each token).** Qwen3-0.6B needs 112 KiB of KV for each token. Llama-3.2-1B
+  needs 32 KiB. So at long context the larger Llama model serves more tokens.
+
 ## Start with no installation
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Venugopalan2610/vllm-from-scratch/blob/master/colab.ipynb)
 
 Use a free Colab T4. There is no local setup, and stage 1 is approximately three
-minutes away. Colab also puts the GPU stages (8, 8b, 8c, 12, 18, 18b) into reach
+minutes away. Colab also puts the GPU stages (8, 8b, 8c, 12, 18, 18b, 21-28) into reach
 of a machine that cannot run them. Colab has a CUDA toolkit, and the kernel
 stages need one.
 
@@ -114,10 +172,11 @@ are worth a port:
 
 Both tracks build and test the same file.
 
-The torch track has three stages that the JAX track does not have: **08b, 08c
-and 18b**. They are CUDA, and there is no honest JAX equivalent of a warp
-shuffle. So the ladders are 23 stages and 20 stages. The numbers do not shift,
-because the extra stages carry letters.
+The torch track has twelve stages that the JAX track does not have. **08b,
+08c and 18b** are CUDA, and there is no honest JAX equivalent of a warp
+shuffle. The capstone, **21 to 28**, connects your CUDA kernels into one
+engine. So the ladders are 32 stages and 20 stages. The numbers of the shared stages do not
+shift, because the extra stages carry letters or come at the end.
 
 | | torch track | jax track |
 |---|---|---|
@@ -142,7 +201,7 @@ much of an inference engine is framework code. The answer is: not much.
 
 ```
 ==========================================================================
-  Stage 08c of 23   Warps, occupancy and split-K   [*****]
+  Stage 08c of 32   Warps, occupancy and split-K   [*****]
   A2 - PagedAttention   [torch]
 ==========================================================================
 
@@ -154,13 +213,13 @@ WHY THIS STAGE EXISTS
   CONTEXT into chunks to manufacture blocks and merges the partial softmax
   states exactly. Batch 1 is every interactive request.
 
-WHAT YOU'RE BUILDING
+WHAT YOU ARE BUILDING
   Warp-shuffle reductions, then a split-K kernel and an exact merge pass.
 
   app/cuda/s08c_paged_attn_split.cu   <- edit this; the spec is in its header
   app/s08c_cuda_warps.py   <- and this
 
-HOW YOU'LL KNOW IT WORKED
+HOW YOU WILL KNOW IT WORKED
   At least 1.5x over stage 08b at 1, 2 and 4 sequences, and no more than a
   few percent given back at 64.
 
@@ -190,6 +249,8 @@ Open it.
 ./vc reset 5          rewind to stage 5 (your code is untouched)
 
 ./vc info             your GPU's measured roofline
+./vc bench            your capstone engine against the roof of your card
+./vc serve            your capstone server, on localhost:8000
 ./vc math 7 128       read-vs-compute timings, every division written out
 ./vc cliff            the L2-vs-VRAM bandwidth cliff
 ```
@@ -220,7 +281,7 @@ git show solutions:.solutions/s07_paged_attn.py
 - Progress lives in `.progress.json`, which git ignores. Delete it to start
   again.
 
-**All 453 torch checks and all 360 JAX checks pass against the reference
+**All 600 torch checks and all 414 JAX checks pass against the reference
 solutions.** Nothing here is aspirational. If a check fails, the cause is your
 code and not the harness.
 
@@ -234,8 +295,8 @@ dev/verify.sh 7 8      # or just some stages
 ```
 
 Run the two tracks as separate commands. Do not use `--both`. Together they want
-four models resident on one card. The torch run needs approximately three
-minutes after the kernels build. The JAX run needs approximately eight minutes.
+four models resident on one card. The torch run needs approximately four
+minutes after the kernels build. The JAX run needs approximately seven minutes.
 
 ## Read this first
 
@@ -271,6 +332,7 @@ Section 9 is the vocabulary. It includes warps, coalescing and occupancy.
 | A4 | 12-14 | CUDA graphs, batched sampler, streaming detokenization |
 | A5 | 15-16 | Async engine, OpenAI-compatible API, the metrics that matter |
 | A6 | 17-20 | Speculative decoding, quantization (**+ 18b, a CUDA int8 GEMV**), guided decoding, tensor parallel |
+| A7 | 21-28 | **The capstone**: your parts in one engine and one server: paged model, scheduler, graphs, int8, FP8 KV (24b), speculation, JSON mode, the OpenAI API, measured against the roof |
 
 Approximately half of the stages need no GPU. The allocator, the scheduler, the
 prefix cache, the sampler, the detokenizer, the metrics, the guided decoding and
@@ -280,10 +342,10 @@ These stages get the hardest tests. Their failure modes are leaks, starvation,
 livelock and distribution skew. In production, all four look like "the server
 became slow".
 
-The four stages with a letter are the CUDA ones: 08b, 08c and 18b, with 08
-itself. They need `nvcc`. They are the only stages that do. They are also where
-the course stops to ask what to compute, and starts to ask which thread touches
-which byte.
+Five stages hold CUDA that you write: 08, 08b, 08c, 18b and 24b. They need
+`nvcc`, and so does the capstone that runs them. They are
+where the course stops to ask what to compute, and starts to ask which thread
+touches which byte.
 
 ## This machine
 
@@ -293,9 +355,10 @@ which byte.
 - sm_89 gives native FP8, which stage 18 uses.
 - Stage 20 runs 2 gloo ranks on the CPU. You make the sharding and the
   collective logic correct. On one GPU there is no speedup to get.
-- **You need a CUDA toolkit** for stages 08, 08b, 08c and 18b. You write `.cu`
-  files, and `nvcc` must compile them. `./setup.sh` tells you if it cannot find
-  one. The other 19 stages need only the PyTorch wheel.
+- **You need a CUDA toolkit** for stages 08, 08b, 08c, 18b and 24b, and for the
+  capstone, which runs those kernels. You write `.cu` files, and `nvcc` must
+  compile them. `./setup.sh` tells you if it cannot find one. The other 19
+  stages need only the PyTorch wheel.
 - The first run of a kernel stage spends 20 to 40 seconds in `nvcc`. The build
   then stays in `.cudacache/`, and only a source change rebuilds it.
   `VC_CUDA_VERBOSE=1 ./vc test 8` shows the compiler command and the register

@@ -2,83 +2,89 @@
 
 `./vc lore 2 --jax` for the insight. `./vc test 2 --jax` to check yourself.
 
-WHAT YOU'RE BUILDING
+WHAT YOU ARE BUILDING
 
     cached_generate(model, prompt, max_tokens) -> list[int]
     kv_bytes_per_token(config) -> int
 
-Same rules as the torch track: one prefill over the whole prompt, then ONE
-token per forward, output token-identical to stage 01.
+The rules are the same as on the torch track: one prefill over the whole
+prompt, then ONE token for each forward pass. The output must be the same
+tokens as stage 01.
 
-THE PART THAT IS NOT THE SAME
+THE PART THAT IS DIFFERENT
 
-torch hands you back a cache that has grown by one token. You cannot do that
-here, because XLA compiles for exact shapes and a cache that changes shape
-every step is a compile every step -- which is what made stage 01 so slow.
+torch gives you a cache that is one token longer after each step. You cannot
+do that here. XLA compiles for exact shapes, so a cache that changes shape
+at every step costs a compile at every step. That made stage 01 so slow.
 
-So the cache is a fixed buffer you allocate once and write into:
+So the cache is a fixed buffer. You allocate it one time and write into it:
 
     cache = model.init_cache(batch=1, max_len=...)
-      -> (k, v), each (layers, batch, max_len, kv_heads, head_dim), zeros
+      -> (keys, values), each (layers, batch, max_len, kv_heads, head_dim), zeros
 
-    logits, cache = model.forward(ids, positions, cache, cache_len)
+    logits, cache = model.forward(token_ids, positions, cache, cache_len)
 
-      cache_len   (B,) how many slots are ALREADY valid, before this call.
-                  The model writes this call's K/V at cache_len .. +T-1, and
-                  masks attention to slots <= cache_len + t.
-      positions   absolute RoPE positions. For the prefill that is 0..L-1; for
-                  a decode step at slot s it is [[s]]. Get this wrong and the
-                  output drifts a few tokens in, which is the single most
-                  common way this stage fails.
+      cache_len   (B,) the number of slots that are ALREADY valid, before
+                  this call. The model writes the K and V of this call at
+                  cache_len .. cache_len + T - 1, and it masks attention to
+                  slots <= cache_len + t.
+      positions   the absolute RoPE positions. For the prefill that is
+                  0..L-1. For a decode step at slot s it is [[s]]. If this
+                  is wrong, the output changes after a few tokens. That is
+                  the most frequent failure of this stage.
 
-    You keep cache_len yourself. It is the whole bookkeeping job.
+    You keep cache_len yourself. That is all the bookkeeping.
 
-THE SKETCH
+THE OUTLINE
 
-    ids = model.encode(prompt)                      -> (L,)
-    cache = model.init_cache(1, big enough)
-    logits, cache = model.forward(ids[None], cache=cache, cache_len=[0])
+    prompt_ids = model.encode(prompt)                     -> (L,)
+    cache = model.init_cache(1, large enough)
+    logits, cache = model.forward(prompt_ids[None], cache=cache, cache_len=[0])
     cache_len = L
-    next = argmax(logits[0])
+    next_token = argmax(logits[0])
     loop:
-        if next is eos: stop
-        emit next
-        logits, cache = model.forward([[next]], positions=[[cache_len]],
+        if next_token is eos: stop
+        emit next_token
+        logits, cache = model.forward([[next_token]], positions=[[cache_len]],
                                       cache=cache, cache_len=[cache_len])
         cache_len += 1
-        next = argmax(logits[0])
+        next_token = argmax(logits[0])
 
 TRAPS
 
-  - init_cache's max_len is a HARD ceiling, and overflowing it does not raise.
-    `dynamic_update_slice` clamps an out-of-range start, so writing past the
-    end silently rewrites the last slot forever and the output degrades into
-    repetition. Size it for prompt + max_tokens.
+  - The max_len of init_cache is a HARD limit, and a write past it does not
+    raise an error. `dynamic_update_slice` clamps a start that is out of
+    range. So a write past the end writes the last slot again and again,
+    with no error, and the output becomes repetition. Make it large enough
+    for the prompt + max_tokens.
 
-  - Size it to EXACTLY prompt + max_tokens and every distinct prompt length
-    gives the decode step a distinct cache shape, so every new prompt costs
-    another compile. Round max_len up to a bucket (256, say) and prompts of
+  - If you make it EXACTLY prompt + max_tokens, each prompt length gives the
+    decode step a different cache shape, so each new prompt costs one more
+    compile. Round max_len up to a bucket (256, for example). Then prompts of
     200 and 250 tokens share one compiled decode step. This is your first
-    taste of stage 12, and it is nearly free to do here.
+    look at stage 12, and here it costs almost nothing.
 
-  - A fresh cache per call. Reuse one across two generate() calls without
-    resetting cache_len and the second request attends to the first's tokens.
+  - Make a new cache for each call. If you use one cache for two
+    generate() calls and do not reset cache_len, the second request attends
+    to the tokens of the first.
 
 kv_bytes_per_token must compute, from a Qwen3Config:
 
     2 (K and V) * num_hidden_layers * num_key_value_heads * head_dim * dtype_bytes
 
-The trap is num_key_value_heads. This model is GQA 16:8, so KV heads are half
-the attention heads; other models are 8x fewer. Use num_attention_heads by
-mistake and every memory budget from stage 06 onward is wrong by that factor.
+The trap is num_key_value_heads. This model is GQA 16:8, so it has half as
+many KV heads as attention heads. Other models have 8 times fewer. If you use
+num_attention_heads by mistake, every memory budget from stage 06 on is wrong
+by that factor.
 """
 
 
 def cached_generate(model, prompt: str, max_tokens: int) -> list[int]:
-    """Prefill once, then one token per forward. Same output as stage 01."""
+    """Prefill one time, then one token for each forward pass. The output is
+    the same as stage 01."""
     raise NotImplementedError("stage 02 (jax): implement cached_generate")
 
 
 def kv_bytes_per_token(config) -> int:
-    """Bytes of KV cache one token costs, across all layers, in bf16."""
+    """The bytes of KV cache for one token, over all layers, in bf16."""
     raise NotImplementedError("stage 02 (jax): implement kv_bytes_per_token")

@@ -5,14 +5,14 @@ exists so that the JAX track starts where the torch track starts: with a model
 that works, a tokenizer, and nothing else.
 
 The torch track gets that from HuggingFace `transformers`, which ships a Qwen3
-implementation. There is no Flax Qwen3, so `jvllm.model` is one: ~200 lines of
-jnp that loads the same safetensors file and produces the same logits.
+implementation. There is no Flax Qwen3, so `jvllm.model` is one: about 300 lines of
+jnp that load the same safetensors file and give the same logits.
 
     from jvllm import load_model
 
     model = load_model()                  # or load_model("Qwen/Qwen3-0.6B")
-    ids = model.encode("The capital of France is")
-    logits, cache = model.forward(ids[None], positions, cache, cache_len)
+    token_ids = model.encode("The capital of France is")
+    logits, cache = model.forward(token_ids[None], positions, cache, cache_len)
 
 Read `jvllm/model.py` before stage 01. The KV cache API in that file is the
 whole reason that the JAX stages separate from the torch stages. XLA needs
@@ -42,12 +42,12 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 # That is how the tensor-parallel stage gets a real mesh, real shardings and a
 # real psum, and not a Python loop that imitates the ranks.
 #
-# Append to the flags. Never overwrite them. A learner can have their own
-# XLA_FLAGS.
-_flags = os.environ.get("XLA_FLAGS", "")
-if "xla_force_host_platform_device_count" not in _flags:
+# Add to the flags. Never overwrite them. A learner can have XLA_FLAGS of
+# their own.
+_xla_flags = os.environ.get("XLA_FLAGS", "")
+if "xla_force_host_platform_device_count" not in _xla_flags:
     os.environ["XLA_FLAGS"] = (
-        _flags + " --xla_force_host_platform_device_count=8").strip()
+        _xla_flags + " --xla_force_host_platform_device_count=8").strip()
 
 from jvllm.compat import enable_pallas_triton, pallas_backend  # noqa: E402
 from jvllm.model import Qwen3, Qwen3Config, load_model  # noqa: E402

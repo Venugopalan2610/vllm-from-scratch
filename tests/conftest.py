@@ -9,37 +9,37 @@ import torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-MODEL = os.environ.get("VC_MODEL", "Qwen/Qwen3-0.6B")
+from tests.helpers import MODEL, record_measurement  # noqa: E402  (needs ROOT)
 
-# JAX preallocates 75% of VRAM the moment it touches the GPU, and torch is on
-# the same card in the same session. Set before anything imports jax.
+# JAX takes 75% of VRAM when it first uses the GPU, and torch uses the same
+# card in the same session. Set this before an import of jax.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 # Stage 20 needs a mesh of several devices, and one GPU is one device. So the
-# CPU backend supplies the ranks. Set this before jax starts its backends.
-_flags = os.environ.get("XLA_FLAGS", "")
-if "xla_force_host_platform_device_count" not in _flags:
+# CPU backend gives the ranks. Set this before jax starts its backends.
+_xla_flags = os.environ.get("XLA_FLAGS", "")
+if "xla_force_host_platform_device_count" not in _xla_flags:
     os.environ["XLA_FLAGS"] = (
-        _flags + " --xla_force_host_platform_device_count=8").strip()
+        _xla_flags + " --xla_force_host_platform_device_count=8").strip()
 
 
 # ---------------------------------------------------------------- backends
 #
-# Two tracks share this tree, and the file name says which one a check is on:
+# Two tracks share this tree. The file name tells the track of a check:
 #
 #   test_jax.py    the JAX twin of a stage that has one.
 #
 #   test_cuda.py   a stage on the torch track ONLY. It is a CUDA kernel, and
-#                  there is no honest JAX equivalent of a warp shuffle.
+#                  JAX has no true equivalent of a warp shuffle.
 #                  stages.yaml marks these stages `tracks: [torch]`.
 #
-#   test_stage.py  every other stage. A stage with no test_jax.py beside it is
-#                  framework-free, such as the allocator, the scheduler or the
-#                  detokenizer. It belongs to BOTH tracks, because it holds
-#                  nothing framework-shaped to port.
+#   test_stage.py  every other stage. A stage with no test_jax.py next to it
+#                  uses no framework, for example the allocator, the
+#                  scheduler or the detokenizer. It belongs to BOTH tracks,
+#                  because it has nothing to port.
 #
-# tests/test_harness.py checks this against stages.yaml, because the rule now
-# lives in two places and nothing else would notice them drifting apart.
+# tests/test_harness.py compares this rule with stages.yaml. The rule is in
+# two places, and nothing else finds a difference between them.
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -79,7 +79,7 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(scope="session")
-def dev():
+def device():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     return "cuda"
@@ -88,12 +88,12 @@ def dev():
 # --------------------------------------------------------------- cuda side
 
 @pytest.fixture(scope="session")
-def nvcc(dev):
+def nvcc(device):
     """Skip unless a CUDA toolkit can compile here.
 
-    The counterpart of `jpallas`. Stages 08, 08b and 08c compile a .cu with
+    The twin of `jpallas`. The CUDA stages compile a .cu file with
     torch.utils.cpp_extension, which needs nvcc and ninja. Without them the
-    checks skip rather than fail, the same way the Pallas checks do.
+    checks skip and do not fail, as the Pallas checks do.
     """
     from cudalib import probe
 
@@ -102,10 +102,19 @@ def nvcc(dev):
     return True
 
 
+@pytest.fixture(scope="session")
+def peak_gbs(device):
+    """The streaming bandwidth of this card in GB/s, measured one time for
+    the session. A check compares with this number, never with a datasheet."""
+    import cudalib
+
+    return cudalib.peak_bandwidth(fresh=True)
+
+
 # ---------------------------------------------------------------- jax side
 
 @pytest.fixture(scope="session")
-def jdev():
+def jax_device():
     """A JAX GPU device, or a skip. An import of jvllm pins the allocator."""
     pytest.importorskip("jvllm", reason="JAX not installed -- ./setup.sh --jax")
     import jax
@@ -116,10 +125,10 @@ def jdev():
 
 
 @pytest.fixture(scope="session")
-def jmodel(jdev):
-    """Qwen3 in JAX, bf16. The counterpart of the `hf` fixture.
+def jmodel(jax_device):
+    """Qwen3 in JAX, bf16. The JAX twin of the `hf` fixture.
 
-    Use for PERFORMANCE tests. This is how you would really serve.
+    Use it for PERFORMANCE checks. A real server uses this precision.
     """
     from jvllm import load_model
 
@@ -127,13 +136,13 @@ def jmodel(jdev):
 
 
 @pytest.fixture(scope="session")
-def jmodel_exact(jdev):
-    """Qwen3 in JAX, fp32. The counterpart of `hf_exact`, for the same reason.
+def jmodel_exact(jax_device):
+    """Qwen3 in JAX, fp32. The JAX twin of `hf_exact`, for the same reason.
 
-    In bf16, two correct implementations of greedy decode can produce
-    different SENTENCES: they reduce in different orders, logits move by ~1e-2,
-    and argmax flips wherever the top two candidates are near-tied. Correctness
-    is checked in fp32 where the margin swamps the noise.
+    In bf16, two correct greedy decodes can give different SENTENCES. They
+    add in different orders, the logits move by about 1e-2, and argmax
+    changes where the top two tokens are almost equal. So the correctness
+    checks use fp32, where the margin is much larger than the noise.
     """
     import jax.numpy as jnp
 
@@ -143,8 +152,8 @@ def jmodel_exact(jdev):
 
 
 @pytest.fixture(scope="session")
-def jpallas(jdev):
-    """Skip unless a Pallas GPU backend can actually compile here."""
+def jpallas(jax_device):
+    """Skip unless a Pallas GPU backend can compile here."""
     from jvllm import compat
 
     compat.silence_pallas_deprecations()
@@ -154,36 +163,60 @@ def jpallas(jdev):
     return kind
 
 
-def _load(dev, dtype):
+def _load(device, dtype):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(MODEL)
-    model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=dtype).to(dev).eval()
-    return model, tok
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=dtype)
+    return model.to(device).eval(), tokenizer
 
 
 @pytest.fixture(scope="session")
-def hf(dev):
-    """bf16 model. Use for PERFORMANCE tests. This is how you'd really serve."""
-    return _load(dev, torch.bfloat16)
+def hf(device):
+    """The bf16 model. Use it for PERFORMANCE checks. A real server uses this
+    precision."""
+    return _load(device, torch.bfloat16)
 
 
 @pytest.fixture(scope="session")
-def hf_exact(dev):
-    """fp32 model. Use for CORRECTNESS tests.
+def hf_exact(device):
+    """The fp32 model. Use it for CORRECTNESS checks.
 
-    Why two models: in bf16, a cached decode and an uncached recompute do not
-    produce bit-identical logits. Different reduction orders give ~1e-2 logit
-    differences, and when the top-2 candidates are nearly tied, argmax flips
-    and the two paths diverge into completely different sentences.
+    The reason for two models: in bf16, a cached decode and a recompute with
+    no cache do not give the same logits, bit for bit. A different order of
+    addition moves a logit by about 1e-2. When the top two tokens are almost
+    equal, argmax changes, and the two paths give different sentences.
 
-    That is not a bug in your code -- it is a real property of low-precision
-    inference, and it is why production LLM serving is not bit-reproducible
-    across batch sizes or cache configurations. But it makes a terrible
-    equivalence test, so correctness is checked in fp32 where the margin
-    swamps the noise.
+    That is not a bug in your code. It is a property of low-precision
+    inference. It is also why a production server does not give the same
+    bits across batch sizes or cache settings. But it makes a bad equality
+    check. So the correctness checks use fp32, where the margin is much
+    larger than the noise.
     """
-    return _load(dev, torch.float32)
+    return _load(device, torch.float32)
+
+
+@pytest.fixture(scope="session")
+def tmodel(hf):
+    """The capstone model (tvllm) in bf16, on the weights of `hf`.
+
+    It shares the embedding, the norms and the lm_head with `hf`, and it adds
+    fused copies of the QKV and gate/up matrices. So it costs much less memory
+    than a second load. Use it for PERFORMANCE checks."""
+    from tvllm import Model
+
+    model, tokenizer = hf
+    return Model(model, tokenizer, MODEL)
+
+
+@pytest.fixture(scope="session")
+def tmodel_exact(hf_exact):
+    """The capstone model in fp32. Use it for CORRECTNESS checks, for the
+    reason that `hf_exact` gives."""
+    from tvllm import Model
+
+    model, tokenizer = hf_exact
+    return Model(model, tokenizer, MODEL)
 
 
 @pytest.fixture(scope="session")
@@ -196,45 +229,39 @@ def prompts():
 
 
 class Timer:
-    """Report a measurement into the stage log so you can watch numbers move."""
+    """Put a measurement into the stage log, so that you can see the numbers
+    change."""
 
     def __init__(self, label):
         self.label = label
 
     def __enter__(self):
         torch.cuda.synchronize()
-        self.t = time.perf_counter()
+        self.start = time.perf_counter()
         return self
 
-    def __exit__(self, *a):
+    def __exit__(self, *exc_info):
         torch.cuda.synchronize()
-        self.ms = (time.perf_counter() - self.t) * 1000
+        self.ms = (time.perf_counter() - self.start) * 1000
 
     def report(self, tokens=None):
-        extra = f"  ({tokens / (self.ms / 1000):.1f} tok/s)" if tokens else ""
-        line = f"  \033[36m{self.label}\033[0m: {self.ms:.1f} ms{extra}"
-        print(line)
-        _record(self.label, self.ms, tokens)
-
-
-def _record(label, ms, tokens):
-    import json
-
-    f = ROOT / ".measurements.json"
-    d = json.loads(f.read_text()) if f.exists() else {}
-    d[label] = {"ms": round(ms, 2), "tok_s": round(tokens / (ms / 1000), 1) if tokens else None}
-    f.write_text(json.dumps(d, indent=2))
-
-
-def measurement(label):
-    import json
-
-    f = ROOT / ".measurements.json"
-    if not f.exists():
-        return None
-    return json.loads(f.read_text()).get(label)
+        rate = f"  ({tokens / (self.ms / 1000):.1f} tok/s)" if tokens else ""
+        print(f"  \033[36m{self.label}\033[0m: {self.ms:.1f} ms{rate}")
+        record_measurement(self.label, self.ms, tokens)
 
 
 @pytest.fixture
 def timer():
     return Timer
+
+
+def pytest_runtest_teardown(item):
+    """The capstone checks make KV pools and graph pools of several hundred
+    MB. Give the memory back after each check, because the next check shares
+    the card with four models."""
+    if "stage_2" in str(item.fspath) and "stage_20" not in str(item.fspath):
+        import gc
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

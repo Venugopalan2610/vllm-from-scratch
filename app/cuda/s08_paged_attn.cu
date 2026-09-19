@@ -2,77 +2,79 @@
 //
 // `./vc lore 8` for the insight. `./vc test 8` to check yourself.
 //
-// Stage 07 was correct and slow: a Python loop over sequences, one gather and
-// one SDPA call each. This file replaces all of it with two kernel launches.
+// Stage 07 was correct and slow: a Python loop over the sequences, with one
+// gather and one SDPA call for each. This file replaces all of it with two
+// kernel launches.
 //
 // ---------------------------------------------------------------------------
-// THE DECISION THIS STAGE IS ABOUT
+// THE DECISION OF THIS STAGE
 // ---------------------------------------------------------------------------
 //
-// Not the arithmetic. The arithmetic is stage 07's, unchanged. The decision
-// is WHAT ONE BLOCK OWNS, because everything else follows from it:
+// The arithmetic is not the decision. It is the arithmetic of stage 07, with
+// no change. The decision is WHAT ONE BLOCK OWNS, because all the rest
+// follows from it:
 //
-//     grid  = (num_seqs, num_heads)     one block per (sequence, query head)
-//     block = 128 threads               they cooperate on one output vector
+//     grid  = (num_seqs, num_heads)     one block for each (sequence, query head)
+//     block = 128 threads               they share one output vector
 //
-// One block computes one (head_dim,) output vector. It needs the whole
-// context for its sequence to do that, so it walks the block table itself.
-// Blocks never talk to each other, so there is no global synchronisation
-// anywhere in this kernel. That is not an accident, it is the reason this
-// decomposition was chosen.
+// One block computes one (head_dim,) output vector. For that, it needs the
+// whole context of its sequence, so it reads the block table itself. Blocks
+// never communicate, so this kernel has no global synchronization. That is
+// the reason for this decomposition.
 //
-// Inside the block, stage 08 uses the simplest possible mapping:
+// Inside the block, stage 08 uses the simplest mapping:
 //
-//     one thread per context position, walking head_dim serially
+//     one thread for each context position, with a serial walk down head_dim
 //
-// It is correct, and it is slow, and stage 08b is about exactly why.
-//
-// ---------------------------------------------------------------------------
-// ONLINE SOFTMAX
-// ---------------------------------------------------------------------------
-//
-// The score row never exists in memory. At 2048 context that row is 8 KB for
-// each (seq, head). To write it out and read it back costs more traffic than
-// the K that it came from. Use the trick from FlashAttention:
-//
-//     m_new = max(m_old, max(scores))      running maximum
-//     alpha = exp(m_old - m_new)           the value of the old accumulator
-//     p     = exp(scores - m_new)
-//     l     = l * alpha + sum(p)           running denominator
-//     acc   = acc * alpha + sum(p * V)     running numerator
-//     out   = acc / l
-//
-// Process the context in tiles of blockDim.x positions and fold each tile in.
+// It is correct, and it is slow. Stage 08b is about the reason.
 //
 // ---------------------------------------------------------------------------
-// WHAT WILL SAVE YOU AN AFTERNOON
+// THE ONLINE SOFTMAX
 // ---------------------------------------------------------------------------
 //
-//   - Accumulate in float, always, even when the cache is half. Summing 2048
-//     half products in half loses several digits and the tolerances catch it.
+// The score row never goes to memory. At a context of 2048, that row is 8 KB
+// for each (seq, head). A write and a read of it cost more traffic than the K
+// that made it. Use the method of FlashAttention:
 //
-//   - __syncthreads() must be reached by every thread in the block. Putting
-//     one inside `if (pos < n)` hangs the kernel, and a hung kernel looks
-//     like a hung test, not like a crash.
+//     new_max     = max(running_max, max(scores))
+//     rescale     = exp(running_max - new_max)     the value of the old sums
+//     p           = exp(scores - new_max)
+//     running_sum = running_sum * rescale + sum(p)       the denominator
+//     accumulator = accumulator * rescale + sum(p * V)   the numerator
+//     output      = accumulator / running_sum
 //
-//   - Mask by position, and not by block. The allocator recycles blocks, so a
-//     slot after context_len holds the tokens of another request. A score on
-//     those tokens gives a plausible and wrong answer.
+// Process the context in tiles of blockDim.x positions, and add each tile.
+//
+// ---------------------------------------------------------------------------
+// TRAPS
+// ---------------------------------------------------------------------------
+//
+//   - Accumulate in float, always, also when the cache is half. A sum of 2048
+//     half products in half loses several digits, and the tolerances find it.
+//
+//   - Every thread of the block must reach a __syncthreads(). One inside
+//     `if (position < context_len)` stops the kernel. A kernel that stops
+//     looks like a test that stops, not like a crash.
+//
+//   - Mask by position, not by block. The allocator reuses blocks, so a slot
+//     after context_len holds the tokens of another request. A score on
+//     those tokens gives an answer that looks correct and is wrong.
 //
 //   - GQA: query head h reads KV head h / (num_heads / num_kv_heads).
 //
 //   - The cache layout is (num_blocks, num_kv_heads, block_size, head_dim).
-//     So the address of position `pos` of sequence `s` is
-//         phys = block_tables[s][pos / block_size]
-//         row  = ((phys * num_kv_heads + kvh) * block_size + pos % block_size)
-//         k    = key_cache + row * head_dim
+//     So the address of position `position` of sequence `seq` is
+//         block_id = block_tables[seq][position / block_size]
+//         row      = (block_id * num_kv_heads + kv_head) * block_size
+//                    + position % block_size
+//         key_row  = key_cache + row * head_dim
 //     Use int64_t for that product. A large cache overflows an int.
 //
-//   - Check every launch. C10_CUDA_KERNEL_LAUNCH_CHECK() turns a silent
+//   - Check every launch. C10_CUDA_KERNEL_LAUNCH_CHECK() changes a silent
 //     failure into an exception. Without it, a kernel that never ran looks
 //     like a numerical bug.
 //
-// Build errors point at real line numbers in this file. To see the compiler
+// A build error shows the real line number in this file. To see the compiler
 // command and the register counts:  VC_CUDA_VERBOSE=1 ./vc test 8
 
 #include <ATen/cuda/CUDAContext.h>
@@ -85,33 +87,33 @@ constexpr int kThreads = 128;
 
 // TODO: __global__ void write_kv_kernel(...)
 //
-// A scatter, and the easiest kernel you will write here. One grid-stride loop
-// over num_tokens * num_kv_heads * head_dim. For each element work out which
-// cache slot it belongs to:
+// A scatter, and the easiest kernel of this course. One grid-stride loop
+// over num_tokens * num_kv_heads * head_dim. For each element, find its
+// cache slot:
 //
-//     block = slot / block_size
-//     off   = slot % block_size
+//     block_id = slot / block_size
+//     offset   = slot % block_size
 //
 // and copy. No reduction, no shared memory, no barriers.
 
 // TODO: __global__ void paged_attn_v1(...)
 //
-// The shape above. One block per (seq, head), 128 threads, one thread per
-// position in the tile, online softmax folded tile by tile.
+// The shape above. One block for each (seq, head), 128 threads, one thread
+// for each position of the tile, and the online softmax, one tile at a time.
 //
 // You need shared memory for four things:
 //   - the query vector, which you read one time and every position uses,
 //   - the probabilities of the tile,
-//   - the running accumulator,
+//   - the accumulator,
 //   - a scratch array for the tree reductions.
-// Pass the size as the third launch argument. Declare it as
-// `extern __shared__ float smem[]`.
+// Give the size as the third launch argument. Declare it as
+// `extern __shared__ float shared[]`.
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// The host side. These two functions are what app/s08_paged_cuda.py calls.
-// The launch configuration is yours: it is part of the kernel, not plumbing.
+// The host side. app/s08_paged_cuda.py calls these two functions. The launch
+// configuration is yours: it is part of the kernel.
 // ---------------------------------------------------------------------------
 
 void write_kv(torch::Tensor key_cache, torch::Tensor value_cache,
@@ -128,5 +130,5 @@ torch::Tensor paged_attn(torch::Tensor query, torch::Tensor key_cache,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("paged_attn", &paged_attn, "paged decode attention (CUDA)");
-  m.def("write_kv", &write_kv, "scatter K/V into the paged cache (CUDA)");
+  m.def("write_kv", &write_kv, "scatter K and V into the paged cache (CUDA)");
 }

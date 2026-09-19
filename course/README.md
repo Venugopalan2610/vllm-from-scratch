@@ -83,7 +83,7 @@ need a GPU. Some of them need no GPU at all.
 
 ## What exists
 
-The ladder has seven arcs. The notebooks follow them.
+The ladder has eight arcs. The notebooks follow them.
 
 **Part 1, The Naive Loop** (stages 01-03)
 
@@ -139,6 +139,17 @@ The ladder has seven arcs. The notebooks follow them.
 | `quantization/` | Fewer bytes per weight, and the trap that cancels the win. Then quantize, and find the speed you lost. |
 | `guided/` | Mask the logits that cannot come next. Then make invalid output impossible, and find what the mask does not promise. **No GPU.** |
 | `tensorParallel/` | Where to cut, and how few times the ranks must talk. Then count the collectives. **No GPU.** |
+
+**Part 8, The Capstone** (stages 21-28, 24b)
+
+Stages 24 to 27 put quantization, speculative decoding and guided decoding
+into the engine. The Part 7 notebooks teach those features.
+
+| | |
+|---|---|
+| `engine/` | Why the parts never met, and the flat batch that lets them. One scheduler rule for every case. Then build that scheduler. **The challenge needs no GPU.** |
+| `graphs/` | A thousand small kernels in each step, against the weight-read floor. The padding row that overwrites block 0. |
+| `roof/` | The floor of a step, in tokens for each GB/s, and why a larger model can serve more tokens. Then measure a real step against it. |
 
 ## The method
 

@@ -2,19 +2,19 @@
 
 `./vc lore 15` for the insight. `./vc test 15` to check yourself.
 
-Two rules, and they point in opposite directions:
+Two rules, in opposite directions:
 
-    the engine loop must never block on HTTP
-    HTTP must never block on the GPU
+    the engine loop must never wait on HTTP
+    HTTP must never wait on the GPU
 
-So one background task runs step() forever. Each HTTP request is a consumer on
-a queue that the loop feeds.
+So one background task runs step() for ever. Each HTTP request reads from a
+queue that the loop fills.
 
-Real vLLM V1 goes further and puts the engine in a separate PROCESS. Python
-overhead on the API side stalled the GPU between steps by a measurable
-amount.
+Real vLLM V1 goes further and puts the engine in a separate PROCESS. The
+Python overhead on the API side stopped the GPU between steps, by an amount
+that they could measure.
 
-The tests inject a fake step-engine, so this stage is about the plumbing, not
+The checks give a fake step engine, so this stage is about the plumbing, not
 the model.
 """
 
@@ -25,16 +25,16 @@ import uuid
 
 
 class AsyncLLMEngine:
-    """Wraps a synchronous step-based engine.
+    """Runs a synchronous step engine.
 
-    The injected `step_engine` provides:
+    The step engine that the caller gives provides:
         add_request(rid, prompt, max_tokens)
         step() -> list[(rid, delta_text, finished)]
         has_work() -> bool
         abort(rid)
 
     Required:
-        .num_active                      in-flight requests
+        .num_active                      the requests in progress
         async start() / stop()
         async generate(prompt, max_tokens, rid=None) -> async iterator of str
         async abort(rid)
@@ -44,27 +44,28 @@ class AsyncLLMEngine:
         raise NotImplementedError("stage 15: implement AsyncLLMEngine")
 
     async def _loop(self):
-        """The engine loop. One per server, running forever.
+        """The engine loop. One for each server, and it runs for ever.
 
             while running:
                 if not engine.has_work():  await sleep(idle);  continue
                 for rid, delta, finished in engine.step():
-                    push (delta, finished) onto that request's queue
-                await asyncio.sleep(0)      # yield, or you starve the server
+                    put (delta, finished) on the queue of that request
+                await asyncio.sleep(0)      # yield, or the server stops
 
-        That trailing yield matters. A tight loop with no await point never
-        returns control to the event loop, and your HTTP handlers never run.
+        The yield at the end is important. A tight loop with no await never
+        gives control back to the event loop, and your HTTP handlers never
+        run.
         """
         raise NotImplementedError
 
     async def generate(self, prompt, max_tokens, rid=None):
-        """Async generator yielding text deltas.
+        """An async generator that yields text deltas.
 
-        The critical part is the `finally:` block. If the consumer stops
-        iterating -- client disconnected, request cancelled, timeout -- you
-        must call engine.abort(rid) to release its KV blocks. Skip it and every
-        abandoned request leaks memory until the process dies. This is the most
-        common real-world serving leak.
+        The `finally:` block is the critical part. If the consumer stops the
+        iteration (a client disconnect, a cancel, a timeout), you must call
+        engine.abort(rid) to free its KV blocks. If you do not, every
+        abandoned request keeps its memory until the process stops. That is
+        the most frequent memory leak of real servers.
         """
         raise NotImplementedError
 
@@ -73,23 +74,23 @@ class AsyncLLMEngine:
 
 
 def create_app(engine, model_name="vllm-from-scratch"):
-    """Build a FastAPI app exposing:
+    """Make a FastAPI app with:
 
         GET  /health          -> {"status": "ok"}
         GET  /v1/models       -> {"object": "list", "data": [{"id": ...}]}
         POST /v1/completions  -> body: prompt, max_tokens, stream
 
-    Non-streaming returns:
+    A response with no stream is:
         {"id", "object": "text_completion", "created", "model",
          "choices": [{"index": 0, "text": ..., "finish_reason": "stop"}]}
 
-    Streaming returns text/event-stream, one `data: {json}` line per delta,
-    then a final chunk with finish_reason="stop", then literally:
+    A stream is text/event-stream: one `data: {json}` line for each delta,
+    then a last chunk with finish_reason="stop", then exactly:
 
         data: [DONE]
 
-    Clients rely on that sentinel to know the stream ended cleanly rather than
-    being cut off, so it is not optional.
+    Clients use that line to know that the stream ended correctly and was
+    not cut. So it is necessary.
 
     Start the engine loop from a lifespan handler, not at import time.
     """

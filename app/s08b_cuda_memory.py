@@ -1,34 +1,34 @@
-"""Stage 08b - the host side. Identical in shape to stage 08's.
+"""Stage 08b - the host side. It has the same shape as the host side of
+stage 08.
 
 `./vc lore 8b`. `./vc test 8b`.
 
 The kernel is in app/cuda/s08b_paged_attn_vec.cu. Copy your stage 08 kernel
-into it and change the access pattern; the spec is in that file's header.
+into it, and change the access pattern. The header of that file has the
+spec.
 
-Nothing about this wrapper changes, and that is the point of the stage. The
+This wrapper does not change, and that is the point of the stage. The
 function signature, the tolerances and the oracle are all the same. Only the
-bytes moved per transaction are different.
+bytes that each transaction moves are different.
 """
 
 import math
-
-import torch
 
 from cudalib import build
 
 SOURCE = "app/cuda/s08b_paged_attn_vec.cu"
 
 
-def _ext():
+def _extension():
     return build("s08b_paged_attn_vec", SOURCE)
 
 
 def paged_attention_vec(query, key_cache, value_cache, block_tables,
                         context_lens, scale=None):
-    """Same signature, same numbers, same oracle as stage 08.
+    """The same signature, the same numbers and the same oracle as stage 08.
 
-    The checks compare you against stage 07 for correctness and against
-    stage 08 for speed, and they measure the bandwidth you actually achieved
-    against what this card can deliver.
+    The checks compare you with stage 07 for correctness and with stage 08
+    for speed. They also measure the bandwidth that you got against the
+    bandwidth of this card.
     """
     raise NotImplementedError("stage 08b: call your paged_attn kernel")

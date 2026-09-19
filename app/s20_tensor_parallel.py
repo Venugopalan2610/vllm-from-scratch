@@ -3,94 +3,103 @@
 `./vc lore 20` for the insight. `./vc test 20` to check yourself.
 
 You have one GPU, so you get no speedup here. You get two other things. You
-make the sharding and the collective logic correct, and you learn exactly where
-the communication lands. That second part decides if TP is worth its cost.
+make the sharding and the collective logic correct, and you learn exactly
+where the communication occurs. That second part decides if TP is worth its
+cost.
 
-The pattern, and the reason it is only ONE all-reduce per block:
+The pattern, and the reason for only ONE all-reduce in each block:
 
     MLP:  out = W2 @ act(W1 @ x)
 
         W1 is COLUMN-parallel   (split the output dim)  -> each rank owns a
-                                                           slice of the hidden
-        W2 is ROW-parallel      (split the input dim)   -> consumes that slice
-                                                           and produces a
-                                                           PARTIAL full output
+                                                           part of the hidden
+        W2 is ROW-parallel      (split the input dim)   -> uses that part and
+                                                           makes a PARTIAL
+                                                           full output
 
-    No communication between them. One all-reduce at the end sums the partials.
+    No communication between them. One all-reduce at the end adds the
+    partial outputs.
 
-    Attention: shard by whole HEADS (Q, K, V column-parallel), output
+    Attention: shard on whole HEADS (Q, K, V column-parallel), and the output
     projection row-parallel. Again one all-reduce.
 
-The classic bug is a shard in the middle of a head, and not a shard by whole
-heads. It mixes parts of the subspaces of different heads. The output then
-looks plausible and is completely wrong.
+The usual bug is a shard in the middle of a head, not a shard on whole
+heads. It mixes parts of different heads. The output then looks correct and
+is completely wrong.
 """
 
 import torch
 import torch.nn.functional as F
 
 
-def shard_column(W, rank, world_size):
-    """W (out, in) -> (out // world_size, in). Splits the OUTPUT dimension."""
+def shard_column(weight, rank, world_size):
+    """weight (out, in) -> (out // world_size, in). It splits the OUTPUT
+    dimension."""
     raise NotImplementedError("stage 20: implement shard_column")
 
 
-def shard_row(W, rank, world_size):
-    """W (out, in) -> (out, in // world_size). Splits the INPUT dimension."""
+def shard_row(weight, rank, world_size):
+    """weight (out, in) -> (out, in // world_size). It splits the INPUT
+    dimension."""
     raise NotImplementedError("stage 20: implement shard_row")
 
 
-def shard_heads(W, rank, world_size, num_heads, head_dim):
-    """Split a (num_heads * head_dim, hidden) projection by whole heads."""
+def shard_heads(weight, rank, world_size, num_heads, head_dim):
+    """Split a (num_heads * head_dim, hidden) projection on whole heads."""
     raise NotImplementedError("stage 20: implement shard_heads")
 
 
-def tp_mlp_forward(x, W1, W2, world_size, act=F.gelu):
-    """Sharded MLP, all ranks simulated in-process.
+def tp_mlp_forward(inputs, up_weight, down_weight, world_size, act=F.gelu):
+    """The sharded MLP. All ranks run in this process.
 
-    For each rank: take its W1 column shard and its W2 row shard, compute
-    act(x @ w1.T) @ w2.T -- a partial sum of the full output. Then sum across
-    ranks. That sum IS the all-reduce.
+    For each rank: take its column shard of up_weight and its row shard of
+    down_weight, and compute act(inputs @ up.T) @ down.T. That is a partial
+    sum of the output. Then add the partial sums of all ranks. That sum IS
+    the all-reduce.
 
-    Result must equal the unsharded MLP for every world_size.
+    The result must equal the MLP with no shards, for each world_size.
     """
     raise NotImplementedError("stage 20: implement tp_mlp_forward")
 
 
-def tp_attention_forward(x, Wq, Wk, Wv, Wo, world_size, num_heads, head_dim):
-    """Sharded attention. Q/K/V split by head, output projection row-parallel.
+def tp_attention_forward(inputs, query_weight, key_weight, value_weight,
+                         output_weight, world_size, num_heads, head_dim):
+    """Sharded attention. Q, K and V split on heads. The output projection is
+    row-parallel.
 
-    Each rank runs attention over its own subset of heads -- heads are already
-    independent, which is exactly why this decomposition is so clean.
+    Each rank runs attention over its own heads. The heads are already
+    independent, and that is why this split is so clean.
     """
     raise NotImplementedError("stage 20: implement tp_attention_forward")
 
 
 def allreduce_bytes_per_token(hidden_size, dtype_bytes=2, num_layers=1,
                               ops_per_layer=2):
-    """Bytes each rank all-reduces per token.
+    """The bytes that each rank all-reduces for each token.
 
         hidden_size * dtype_bytes * num_layers * ops_per_layer
 
-    Work this out before adopting TP. For a 4096-hidden 32-layer model in bf16
-    it is 512 KB per token per rank, every token. Over NVLink that disappears;
-    over PCIe or Ethernet it can dominate your decode step, which is why TP is
-    an intra-node technique and pipeline parallelism is the inter-node one.
+    Calculate this before you use TP. For a model with a hidden size of 4096
+    and 32 layers in bf16, it is 512 KB for each token on each rank. Over
+    NVLink that cost is small. Over PCIe or Ethernet it can be most of the
+    decode step. That is why people use TP inside one node, and pipeline
+    parallelism across nodes.
     """
     raise NotImplementedError("stage 20: implement allreduce_bytes_per_token")
 
 
-def run_distributed_mlp(W1, W2, x, world_size=2, backend="gloo", port=29517):
-    """The same MLP, but with real processes and a real dist.all_reduce.
+def run_distributed_mlp(up_weight, down_weight, inputs, world_size=2,
+                        backend="gloo", port=29517):
+    """The same MLP, with real processes and a real dist.all_reduce.
 
-    Spawn world_size processes, init_process_group, shard, compute the partial,
-    dist.all_reduce(SUM), and return rank 0's result.
+    Start world_size processes, call init_process_group, shard, compute the
+    partial sum, call dist.all_reduce(SUM), and return the result of rank 0.
 
-    One trap: return plain Python data from the child, not a Tensor. Tensors
-    cross process boundaries as shared-memory handles, and the parent will try
-    to map one after the child has exited.
+    A trap: return Python data from the child process, not a Tensor. A tensor
+    goes to another process as a shared-memory handle, and the parent then
+    tries to map it after the child stops.
 
-    gloo on CPU is used here because you have a single GPU. On real multi-GPU
-    hardware this is NCCL, and the collective is the same call.
+    This uses gloo on the CPU, because you have one GPU. On real hardware
+    with many GPUs this is NCCL, and the collective is the same call.
     """
     raise NotImplementedError("stage 20: implement run_distributed_mlp")

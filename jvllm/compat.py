@@ -1,27 +1,30 @@
-"""Making Pallas run on the GPU you actually own.
+"""How to make Pallas run on the GPU that you own.
 
-Pallas has two GPU backends. Mosaic GPU is the default from JAX 0.9 on, and it
-targets Hopper and Blackwell -- it wants tensor-core layouts and TMA that an
-sm_89 consumer card does not have. The older Triton backend lowers to the same
-Triton IR that stage 08's torch twin uses, and runs on anything from Turing up.
+Pallas has two GPU backends. Mosaic GPU is the default from JAX 0.9 on. It
+targets Hopper and Blackwell, and it wants tensor-core layouts and TMA that
+an sm_89 consumer card does not have. The older Triton backend lowers to
+Triton IR, and it runs on all cards from Turing up.
 
-Two things get in the way on a laptop GPU:
+Two things get in the way on a consumer GPU:
 
-  1. Mosaic is picked by default, and then fails to infer layouts with a
-     message ("Failed to infer a possible set of layouts") that says nothing
-     about your GPU being too old.
-  2. The Triton backend gates on a hardcoded ALLOWLIST of device kinds --
-     A100, H100, L4, RTX 4090, and so on. An RTX 4080 Laptop GPU is not on it,
-     and you get "No supported GPU devices found" on a card that supports it
-     perfectly well.
+  1. JAX selects Mosaic by default. Mosaic then fails to infer layouts, with
+     a message ("Failed to infer a possible set of layouts") that says
+     nothing about an old GPU.
+  2. The Triton backend accepts only the device kinds on a fixed list: A100,
+     H100, L4, RTX 4090, and more. Many laptop parts are not on it. You then
+     get "No supported GPU devices found" on a card that can run it.
 
 (2) is a lookup table, and JAX exposes the table. `enable_pallas_triton()`
-reads the compute capability off the device you have and registers it. Nothing
-here patches JAX behaviour; it only fills in a row that upstream has not
-enumerated yet.
+reads the compute capability of your device and registers it. Nothing here
+changes the behavior of JAX. It only adds a row that upstream did not list
+yet.
 """
 
 import warnings
+
+HOPPER_COMPUTE_CAPABILITY = 90
+GPU_PLATFORMS = ("gpu", "cuda", "rocm")
+QUIET_DEPRECATIONS = ("jax-pallas-triton", "jax-pallas-call-mgpu")
 
 
 def _device():
@@ -33,90 +36,92 @@ def _device():
         return None
 
 
-def enable_pallas_triton():
-    """Register this GPU with Pallas's Triton backend. Idempotent.
+def _compute_capability(device):
+    """"8.9" -> ("8.9", 89), or None if the device does not say."""
+    capability = getattr(device, "compute_capability", None)
+    if capability is None:
+        return None
+    arch_name = str(capability)
+    try:
+        return arch_name, int(arch_name.replace(".", ""))
+    except ValueError:
+        return None
 
-    Returns True if the Triton backend is usable after this call.
+
+def enable_pallas_triton():
+    """Register this GPU with the Triton backend of Pallas. A second call
+    does nothing new.
+
+    -> True if the Triton backend can run after this call.
     """
     try:
-        from jax._src.pallas.triton import gpu_info as gi
+        from jax._src.pallas.triton import gpu_info
     except ImportError:
-        return False        # no Triton backend in this JAX build
+        return False        # this JAX build has no Triton backend
 
-    dev = _device()
-    if dev is None or dev.platform not in ("gpu", "cuda", "rocm"):
+    device = _device()
+    if device is None or device.platform not in GPU_PLATFORMS:
         return False
-
-    kind = dev.device_kind
+    kind = device.device_kind
     try:
-        if gi.gpu_version_from_device_kind(kind) is not None or kind in gi.registry:
+        if (gpu_info.gpu_version_from_device_kind(kind) is not None
+                or kind in gpu_info.registry):
             return True     # upstream already knows this card
     except Exception:
         pass
 
-    cc = getattr(dev, "compute_capability", None)
-    if cc is None:
+    capability = _compute_capability(device)
+    if capability is None:
         return False
-
     # jax reports "8.9". The Triton backend wants arch_name "8.9" and an
     # integer compute_capability of 89.
-    arch = str(cc)
-    try:
-        cc_int = int(arch.replace(".", ""))
-    except ValueError:
-        return False
-
-    gi.registry[kind] = lambda: gi.GpuInfo(
-        gpu_version=None, arch_name=arch, compute_capability=cc_int
-    )
+    arch_name, capability_number = capability
+    gpu_info.registry[kind] = lambda: gpu_info.GpuInfo(
+        gpu_version=None, arch_name=arch_name,
+        compute_capability=capability_number)
     return True
 
 
 def pallas_backend():
     """'triton', 'mosaic', or None if Pallas cannot run here.
 
-    Mosaic needs sm_90+. Below that we register and use Triton.
+    Mosaic needs sm_90 or newer. Below that, register and use Triton.
     """
-    dev = _device()
-    if dev is None:
-        return None
-    if dev.platform == "cpu":
+    device = _device()
+    if device is None or device.platform == "cpu":
         return None
     if enable_pallas_triton():
         return "triton"
-    cc = str(getattr(dev, "compute_capability", "0"))
-    try:
-        if int(cc.replace(".", "")) >= 90:
-            return "mosaic"
-    except ValueError:
-        pass
+    capability = _compute_capability(device)
+    if capability and capability[1] >= HOPPER_COMPUTE_CAPABILITY:
+        return "mosaic"
     return None
 
 
 def compiler_params(num_warps=4, num_stages=3):
-    """CompilerParams for `pl.pallas_call`, or None to take the default.
+    """CompilerParams for `pl.pallas_call`, or None for the default.
 
-    Pass the result straight through:
+    Give the result directly:
 
         pl.pallas_call(..., compiler_params=jvllm.compat.compiler_params())
     """
     if pallas_backend() != "triton":
         return None
-    from jax.experimental.pallas import triton as plt
+    from jax.experimental.pallas import triton as pallas_triton
 
-    return plt.CompilerParams(num_warps=num_warps, num_stages=num_stages)
+    return pallas_triton.CompilerParams(num_warps=num_warps,
+                                        num_stages=num_stages)
 
 
 def silence_pallas_deprecations():
     """JAX 0.11 warns on every Triton-backend pallas_call.
 
-    The warning is aimed at library authors with a Hopper CI fleet. On a
-    consumer card the Triton backend is the only one that works, so the warning
-    is noise on a path you cannot leave.
+    The warning is for library authors with a Hopper CI fleet. On a consumer
+    card the Triton backend is the only one that works, so the warning is
+    noise on a path that you cannot leave.
     """
     warnings.filterwarnings(
-        "ignore", message=".*Pallas Triton backend is deprecated.*"
-    )
+        "ignore", message=".*Pallas Triton backend is deprecated.*")
     try:
         from jax._src import deprecations
 
@@ -126,11 +131,11 @@ def silence_pallas_deprecations():
         pass
 
 
-def _quiet_warn(orig):
+def _quiet_warn(original_warn):
     def warn(deprecation_id, message, stacklevel=2):
-        if deprecation_id in ("jax-pallas-triton", "jax-pallas-call-mgpu"):
-            return
-        return orig(deprecation_id, message, stacklevel)
+        if deprecation_id in QUIET_DEPRECATIONS:
+            return None
+        return original_warn(deprecation_id, message, stacklevel)
 
     warn._jvllm_quiet = True
     return warn

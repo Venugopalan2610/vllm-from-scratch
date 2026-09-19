@@ -1,13 +1,13 @@
 """Stage 08c - warp primitives, occupancy and split-K.
 
-Spec in app/cuda/s08c_paged_attn_split.cu.
+The spec is in app/cuda/s08c_paged_attn_split.cu.
 
-The correctness checks are the same as the last two stages, with one more. The
-merge across splits must be exact for EVERY split count, and not only for the
-count that your heuristic picks.
+The correctness checks are those of the last two stages, with one more. The
+merge across splits must be exact for EVERY number of splits, not only for
+the number that your rule selects.
 
-The gate is small-batch throughput. That is the case a bandwidth-perfect
-kernel still loses, and the case every interactive request lives in.
+The gate is the throughput at a small batch. A kernel with perfect bandwidth
+still loses there, and every interactive request is there.
 """
 
 import pytest
@@ -16,100 +16,103 @@ import torch
 from app.s07_paged_attn import paged_attention, reference_attention
 from app.s08b_cuda_memory import paged_attention_vec
 from app.s08c_cuda_warps import paged_attention_split, splits_for
-from tests.helpers import build_paged, kv_bytes, rand_kv
+from tests.helpers import (
+    kv_bytes,
+    paged_problem,
+    poison_past_context,
+    probe_script,
+    report_kernel_stats,
+)
+
+KERNEL_TOLERANCE = dict(rtol=1e-3, atol=1e-3)
+
+
+def _assert_agrees_with_stage_07(query, paged_cache, **split_options):
+    torch.testing.assert_close(
+        paged_attention_split(query, *paged_cache, **split_options),
+        paged_attention(query, *paged_cache), **KERNEL_TOLERANCE)
+
+
+def _sm_count():
+    return torch.cuda.get_device_properties(0).multi_processor_count
 
 
 @pytest.mark.parametrize("block_size", [1, 4, 16])
-@pytest.mark.parametrize("L", [1, 7, 16, 33, 129])
-def test_agrees_with_stage_07(nvcc, dev, block_size, L):
-    """The oracle still has not moved."""
-    S, H, KVH, D = 3, 4, 4, 16
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, block_size)
-    torch.testing.assert_close(paged_attention_split(q, kc, vc, bt, ctx),
-                               paged_attention(q, kc, vc, bt, ctx),
-                               rtol=1e-3, atol=1e-3)
+@pytest.mark.parametrize("context_len", [1, 7, 16, 33, 129])
+def test_agrees_with_stage_07(nvcc, device, block_size, context_len):
+    """The oracle still did not move."""
+    query, _, _, paged_cache = paged_problem(3, 4, 4, 16, context_len,
+                                             block_size, device)
+    _assert_agrees_with_stage_07(query, paged_cache)
 
 
 @pytest.mark.parametrize("splits", [1, 2, 3, 7, 8, 32])
-def test_the_merge_is_exact_for_any_split_count(nvcc, dev, splits):
-    """Forced split counts, including 1, including counts that do not divide
-    the context and leave the last block short or empty.
+def test_the_merge_is_exact_for_any_split_count(nvcc, device, splits):
+    """Forced numbers of splits, also 1, and numbers that do not divide the
+    context, so the last split is short or empty.
 
-    exp(m_j - M) is the same rescale the online softmax already does, one
-    level up. If the merge is only right when the splits are even, the
-    rescale is wrong and a ragged batch will find it.
+    exp(max_j - M) is the rescale of the online softmax, one level up. If the
+    merge is correct only for even splits, the rescale is wrong, and a
+    ragged batch finds it.
     """
-    S, H, KVH, D, L = 2, 8, 4, 128, 1000
-    k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-    q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
+    query, keys, values, paged_cache = paged_problem(
+        2, 8, 4, 128, 1000, 16, device, torch.float16)
     torch.testing.assert_close(
-        paged_attention_split(q, kc, vc, bt, ctx, splits=splits),
-        reference_attention(q, k, v), rtol=3e-3, atol=3e-3)
+        paged_attention_split(query, *paged_cache, splits=splits),
+        reference_attention(query, keys, values), rtol=3e-3, atol=3e-3)
 
 
-def test_the_reductions_do_not_race(nvcc, dev):
-    """Many queries through the same kernel, all of which must be right.
+def test_the_reductions_do_not_race(nvcc, device):
+    """Many queries through the same kernel, and all must be correct.
 
-    A block reduction that hands its answer back through shared memory needs
-    a barrier after every thread has READ it, not only before. Without one,
-    the next reduction's first write lands on the result a slower warp has
-    not collected yet. The output is then wrong for a few percent of the
-    elements, on some inputs, some of the time -- which is exactly the shape
-    of bug a single assertion is likely to miss.
+    A block reduction that gives its answer through shared memory needs a
+    barrier after every thread READS it, not only before. Without it, the
+    first write of the next reduction replaces the result before a slow warp
+    reads it. The output is then wrong for a few percent of the elements, on
+    some inputs, some of the time. One assertion probably misses that kind
+    of bug.
 
-    Split-K makes it worse: more reductions per block, and a merge pass that
-    reuses the same scratch again.
+    Split-K makes it worse: more reductions in each block, and a merge pass
+    that uses the same scratch again.
     """
-    S, H, KVH, D, L = 2, 8, 4, 128, 1000
-    k, v = rand_kv(S, KVH, L, D, dev)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-
-    bad = 0
-    for i in range(25):
-        q = torch.randn(S, H, D, device=dev)
-        want = paged_attention(q, kc, vc, bt, ctx)
-        got = paged_attention_split(q, kc, vc, bt, ctx, splits=32)
-        if not torch.allclose(got, want, rtol=1e-3, atol=1e-3):
-            bad += 1
-    assert bad == 0, (
-        f"{bad} of 25 queries came back wrong. Nothing about the input "
-        "changed between them except the numbers, so this is a race, not "
-        "arithmetic. Check that every shared-memory result is read before "
-        "the next reduction is allowed to overwrite it.")
+    _, _, _, paged_cache = paged_problem(2, 8, 4, 128, 1000, 16, device)
+    num_wrong = 0
+    for _ in range(25):
+        query = torch.randn(2, 8, 128, device=device)
+        if not torch.allclose(paged_attention_split(query, *paged_cache,
+                                                    splits=32),
+                              paged_attention(query, *paged_cache),
+                              **KERNEL_TOLERANCE):
+            num_wrong += 1
+    assert num_wrong == 0, (
+        f"{num_wrong} of 25 queries were wrong. Only the numbers of the input "
+        "changed between them, so this is a race, not arithmetic. Make sure "
+        "that every thread reads a shared-memory result before the next "
+        "reduction can overwrite it.")
 
 
-def test_no_shared_memory_hazards(nvcc, dev):
-    """The same question as the one above, asked by a tool instead of by luck.
+def test_no_shared_memory_hazards(nvcc, device):
+    """The same question as the check above, asked by a tool, not by luck.
 
-    compute-sanitizer instruments every shared-memory access and reports any
-    pair that is not separated by a barrier. It finds the race above whether
-    or not the timing happens to expose it, and it names both source lines.
+    compute-sanitizer instruments every shared-memory access and reports
+    each pair that has no barrier between them. It finds the race above also
+    when the timing does not show it, and it names both source lines.
 
-    Worth remembering the invocation. It needs no driver permission, unlike
-    the performance counters:
+    Remember the command. It needs no driver permission, unlike the
+    performance counters:
 
-        compute-sanitizer --tool racecheck --racecheck-report analysis \
+        compute-sanitizer --tool racecheck --racecheck-report analysis \\
             .venv/bin/python your_script.py
     """
     import cudalib
-    from cudalib.build import CACHE
 
-    driver = CACHE / "racecheck_08c.py"
-    driver.parent.mkdir(exist_ok=True)
-    driver.write_text(
-        "import sys, torch\n"
-        f"sys.path.insert(0, {str(cudalib.ROOT)!r})\n"
-        "from app.s08c_cuda_warps import paged_attention_split as f\n"
-        "from tests.helpers import build_paged, rand_kv\n"
-        "k, v = rand_kv(2, 4, 512, 128, 'cuda')\n"
-        "q = torch.randn(2, 8, 128, device='cuda')\n"
-        "kc, vc, bt, ctx = build_paged(k, v, 16)\n"
-        "f(q, kc, vc, bt, ctx, splits=8)\n"
-        "torch.cuda.synchronize()\n")
-
+    driver = probe_script(
+        "racecheck_08c.py",
+        "from app.s08c_cuda_warps import paged_attention_split\n"
+        "from tests.helpers import paged_problem\n"
+        "query, _, _, paged_cache = paged_problem(2, 8, 4, 128, 512, 16, "
+        "'cuda')\n"
+        "paged_attention_split(query, *paged_cache, splits=8)\n")
     hazards = cudalib.racecheck(driver)
     if hazards is None:
         pytest.skip("compute-sanitizer is not installed")
@@ -117,232 +120,198 @@ def test_no_shared_memory_hazards(nvcc, dev):
         print(f"  {line}")
     assert not hazards, (
         "compute-sanitizer found shared-memory accesses with no barrier "
-        "between them. The lines it names are the two halves of the race.")
+        "between them. The lines that it names are the two halves of the "
+        "race.")
 
 
-def test_splits_shorter_than_the_context(nvcc, dev):
-    """More splits than there are tokens: some blocks get nothing at all.
+def test_splits_shorter_than_the_context(nvcc, device):
+    """More splits than tokens: some blocks get nothing.
 
-    An empty split must report l = 0 and m = -inf so the merge ignores it.
-    Reporting a zero maximum instead poisons every other split's weight.
+    An empty split must report sum = 0 and max = -inf, so that the merge
+    ignores it. A maximum of zero poisons the weight of every other split.
     """
-    S, H, KVH, D, L = 2, 4, 4, 64, 5
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    torch.testing.assert_close(
-        paged_attention_split(q, kc, vc, bt, ctx, splits=16),
-        paged_attention(q, kc, vc, bt, ctx), rtol=1e-3, atol=1e-3)
+    query, _, _, paged_cache = paged_problem(2, 4, 4, 64, 5, 16, device)
+    _assert_agrees_with_stage_07(query, paged_cache, splits=16)
 
 
-@pytest.mark.parametrize("H,KVH", [(8, 2), (16, 8), (4, 4)])
-def test_gqa_ratios(nvcc, dev, H, KVH):
-    """Query head h must read KV head h // (H // KVH)."""
-    S, D, L = 2, 64, 40
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    torch.testing.assert_close(paged_attention_split(q, kc, vc, bt, ctx),
-                               paged_attention(q, kc, vc, bt, ctx),
-                               rtol=1e-3, atol=1e-3)
+@pytest.mark.parametrize("num_heads,num_kv_heads", [(8, 2), (16, 8), (4, 4)])
+def test_gqa_ratios(nvcc, device, num_heads, num_kv_heads):
+    """Query head h must read KV head h // (num_heads // num_kv_heads)."""
+    query, _, _, paged_cache = paged_problem(2, num_heads, num_kv_heads, 64,
+                                             40, 16, device)
+    _assert_agrees_with_stage_07(query, paged_cache)
 
 
-def test_ragged_context_lengths(nvcc, dev):
-    """Every sequence gets the same number of splits, but not the same number
-    of tokens in them."""
-    S, H, KVH, D, Lmax = 8, 8, 4, 64, 200
-    k, v = rand_kv(S, KVH, Lmax, D, dev)
-    kc, vc, bt, _ = build_paged(k, v, 16)
-    lens = torch.tensor([200, 1, 17, 16, 199, 33, 64, 128],
-                        dtype=torch.int32, device=dev)
-    q = torch.randn(S, H, D, device=dev)
-    torch.testing.assert_close(paged_attention_split(q, kc, vc, bt, lens),
-                               paged_attention(q, kc, vc, bt, lens),
-                               rtol=1e-3, atol=1e-3)
+def test_ragged_context_lengths(nvcc, device):
+    """Every sequence gets the same number of splits, but not the same
+    number of tokens in them."""
+    query, _, _, (key_cache, value_cache, block_tables, _) = paged_problem(
+        8, 8, 4, 64, 200, 16, device)
+    context_lens = torch.tensor([200, 1, 17, 16, 199, 33, 64, 128],
+                                dtype=torch.int32, device=device)
+    _assert_agrees_with_stage_07(query, (key_cache, value_cache, block_tables,
+                                         context_lens))
 
 
-def test_ignores_junk_beyond_context_len(nvcc, dev):
-    S, H, KVH, D, L = 2, 4, 2, 32, 12
-    bs = 8
-    k, v = rand_kv(S, KVH, L, D, dev)
-    kc, vc, bt, _ = build_paged(k, v, bs)
-    lens = torch.tensor([L, L], dtype=torch.int32, device=dev)
-    q = torch.randn(S, H, D, device=dev)
-    before = paged_attention_split(q, kc, vc, bt, lens)
-
-    for s in range(S):
-        for b in range(bt.shape[1]):
-            phys = int(bt[s, b])
-            for off in range(bs):
-                if b * bs + off >= L:
-                    kc[phys, :, off] = 999.0
-                    vc[phys, :, off] = 999.0
-
-    after = paged_attention_split(q, kc, vc, bt, lens)
-    torch.testing.assert_close(before, after, rtol=1e-3, atol=1e-3)
+def test_ignores_junk_beyond_context_len(nvcc, device):
+    context_len, block_size = 12, 8
+    query, _, _, paged_cache = paged_problem(2, 4, 2, 32, context_len,
+                                             block_size, device)
+    before = paged_attention_split(query, *paged_cache)
+    key_cache, value_cache, block_tables, _ = paged_cache
+    poison_past_context(key_cache, value_cache, block_tables, context_len,
+                        block_size)
+    torch.testing.assert_close(before,
+                               paged_attention_split(query, *paged_cache),
+                               **KERNEL_TOLERANCE)
 
 
-def test_the_heuristic_actually_splits(nvcc, dev):
-    """A heuristic that always returns 1 passes every correctness check above
-    and wins nothing. At one sequence there is not enough work to fill the
-    GPU, and splits_for has to notice."""
-    p = torch.cuda.get_device_properties(0)
-    one = splits_for(1, 16, 4096)
-    many = splits_for(64, 16, 1024)
-    print(f"\n  {p.multi_processor_count} SMs")
-    print(f"  1 seq  x 16 heads, 4096 ctx  ->  {one} splits"
-          f"   ({16 * one} blocks)")
-    print(f"  64 seqs x 16 heads, 1024 ctx  ->  {many} splits"
-          f"   ({1024 * many} blocks)")
-    assert one > 1, (
-        "16 blocks cannot fill this GPU, so a long context at batch 1 has to "
-        "be split")
-    assert one >= many, "fewer sequences need more splits, not fewer"
+def test_the_heuristic_actually_splits(nvcc, device):
+    """A rule that always returns 1 passes every correctness check above and
+    gains nothing. At one sequence there is not enough work to fill the GPU,
+    and splits_for must see that."""
+    one_seq = splits_for(1, 16, 4096)
+    many_seqs = splits_for(64, 16, 1024)
+    print(f"\n  {_sm_count()} SMs")
+    print(f"  1 seq  x 16 heads, 4096 ctx  ->  {one_seq} splits"
+          f"   ({16 * one_seq} blocks)")
+    print(f"  64 seqs x 16 heads, 1024 ctx  ->  {many_seqs} splits"
+          f"   ({1024 * many_seqs} blocks)")
+    assert one_seq > 1, (
+        "16 blocks cannot fill this GPU, so a long context at batch 1 must be "
+        "split")
+    assert one_seq >= many_seqs, "fewer sequences need more splits, not fewer"
 
 
-def test_it_wins_at_small_batch(nvcc, dev):
-    """The gate. Where stage 08b runs out of parallelism, this does not."""
+def test_it_wins_at_small_batch(nvcc, device):
+    """The gate. Where stage 08b has too little parallelism, this does not."""
     import cudalib
 
-    p = torch.cuda.get_device_properties(0)
-    H, KVH, D, L = 16, 8, 128, 2048
+    num_heads, context_len = 16, 2048
     rows = []
-    for S in (1, 2, 4):
-        k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-        q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-        kc, vc, bt, ctx = build_paged(k, v, 16)
-        a = cudalib.bench_ms(lambda: paged_attention_vec(q, kc, vc, bt, ctx),
-                             best_of=2)
-        b = cudalib.bench_ms(lambda: paged_attention_split(q, kc, vc, bt, ctx),
-                             best_of=2)
-        rows.append((S, a, b, splits_for(S, H, L)))
+    for num_seqs in (1, 2, 4):
+        query, _, _, paged_cache = paged_problem(
+            num_seqs, num_heads, 8, 128, context_len, 16, device,
+            torch.float16)
+        stage08b_ms, stage08c_ms = cudalib.compare_ms(
+            lambda: paged_attention_vec(query, *paged_cache),
+            lambda: paged_attention_split(query, *paged_cache))
+        rows.append((num_seqs, stage08b_ms, stage08c_ms,
+                     splits_for(num_seqs, num_heads, context_len)))
 
-    print(f"\n  {p.multi_processor_count} SMs, {L} tokens of context\n")
+    print(f"\n  {_sm_count()} SMs, {context_len} tokens of context\n")
     print(f"  {'seqs':>5} {'blocks 08b':>11} {'blocks 08c':>11}"
           f" {'stage 08b':>11} {'stage 08c':>11} {'gain':>7}")
-    for S, a, b, sp in rows:
-        print(f"  {S:>5} {S * H:>11} {S * H * sp:>11}"
-              f" {a:>9.3f}ms {b:>9.3f}ms {a / b:>6.2f}x")
+    for num_seqs, stage08b_ms, stage08c_ms, num_splits in rows:
+        print(f"  {num_seqs:>5} {num_seqs * num_heads:>11} "
+              f"{num_seqs * num_heads * num_splits:>11}"
+              f" {stage08b_ms:>9.3f}ms {stage08c_ms:>9.3f}ms "
+              f"{stage08b_ms / stage08c_ms:>6.2f}x")
 
-    worst = min(a / b for _, a, b, _ in rows)
+    worst = min(row[1] / row[2] for row in rows)
     assert worst > 1.5, (
-        f"only {worst:.2f}x over stage 08b at small batch. Either the warp "
+        f"only {worst:.2f}x over stage 08b at a small batch. Either the warp "
         "reductions did not replace the shared-memory ones, or the grid is "
         "still (num_seqs, num_heads).")
-    print(f"\n  \033[1m{worst:.2f}x over stage 08b where the GPU was empty."
-          f"\033[0m")
+    print(f"\n  \033[1m{worst:.2f}x over stage 08b where the GPU was "
+          "empty.\033[0m")
 
 
-def test_what_split_k_costs_at_a_full_grid(nvcc, dev):
-    """Split-K is a trade, and this is the other side of it.
+def test_what_split_k_costs_at_a_full_grid(nvcc, device, peak_gbs):
+    """Split-K is an exchange, and this is its other side.
 
-    At 64 sequences the grid already covered every SM, so there was no
-    idleness to sell. What you still pay for is the per-group softmax: every
-    lane of a group now works out its own m, alpha and p, where stage 08b had
-    one thread do it for the whole block. Redundant arithmetic is free right
-    up to the point where the kernel is not waiting on memory any more, and
-    at a full grid it is not.
+    At 64 sequences the grid already covers every SM, so there is no idle
+    capacity to use. You still pay for the softmax of each group. Every lane
+    of a group now computes its own max, rescale and p. In stage 08b, one
+    thread did that for the whole block. Repeated arithmetic costs nothing
+    until the kernel stops waiting on memory, and at a full grid it does not
+    wait.
 
-    Expect a few percent. If it is worse than that, the split path is being
-    taken when it should not be: `splits_for` has to return 1 here.
+    Expect a few percent. If it is worse, the split path runs when it must
+    not: `splits_for` must return 1 here.
     """
     import cudalib
 
-    S, H, KVH, D, L = 64, 16, 8, 128, 1024
-    k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-    q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    by = kv_bytes(ctx, KVH, D, q.element_size())
+    num_seqs, num_heads, context_len = 64, 16, 1024
+    query, _, _, paged_cache = paged_problem(num_seqs, num_heads, 8, 128,
+                                             context_len, 16, device,
+                                             torch.float16)
+    num_bytes = kv_bytes(paged_cache[3], 8, 128, query.element_size())
+    # Interleave the rounds. Both kernels are at the memory roof here. The
+    # difference between them is smaller than the drift of the clock.
+    stage08b_ms, stage08c_ms = cudalib.compare_ms(
+        lambda: paged_attention_vec(query, *paged_cache),
+        lambda: paged_attention_split(query, *paged_cache))
 
-    peak = cudalib.peak_bandwidth(fresh=True)
-    # Use best_of. Both kernels sit at the memory roof here. The difference
-    # between them is smaller than the drift, because one kernel throttles
-    # down while the clock runs on the other.
-    a = cudalib.bench_ms(lambda: paged_attention_vec(q, kc, vc, bt, ctx),
-                         best_of=3)
-    b = cudalib.bench_ms(lambda: paged_attention_split(q, kc, vc, bt, ctx),
-                         best_of=3)
-    ga, gb = by / (a * 1e-3) / 1e9, by / (b * 1e-3) / 1e9
+    num_splits = splits_for(num_seqs, num_heads, context_len)
+    assert num_splits == 1, (
+        f"splits_for gives {num_splits} splits for {num_seqs * num_heads} "
+        f"blocks on {_sm_count()} SMs. The grid is already full. A split "
+        "only adds a merge.")
 
-    assert splits_for(S, H, L) == 1, (
-        f"splits_for says {splits_for(S, H, L)} splits for {S * H} blocks on "
-        f"{torch.cuda.get_device_properties(0).multi_processor_count} SMs. "
-        "The grid is already full; splitting it only adds a merge.")
-
-    print(f"\n  peak {peak:.0f} GB/s, measured now")
-    print(f"  stage 08b  {a:>8.3f}ms  {ga:>6.0f} GB/s  {100 * ga / peak:>3.0f}%")
-    print(f"  stage 08c  {b:>8.3f}ms  {gb:>6.0f} GB/s  {100 * gb / peak:>3.0f}%")
-    print(f"  \033[2mcost of the split-K shape where it buys nothing: "
-          f"{100 * (b / a - 1):.0f}%\033[0m")
-    assert a / b > 0.85, (
-        f"{a / b:.2f}x. A few percent is the price of the per-group softmax; "
-        "this is more than that. Check that splits_for returns 1 here, and "
-        "that one split does not go through the merge kernel at all.")
+    for label, milliseconds in (("stage 08b", stage08b_ms),
+                                ("stage 08c", stage08c_ms)):
+        gbs = num_bytes / (milliseconds * 1e-3) / 1e9
+        print(f"  {label}  {milliseconds:>8.3f}ms  {gbs:>6.0f} GB/s  "
+              f"{100 * gbs / peak_gbs:>3.0f}%")
+    print(f"  \033[2mthe cost of the split-K shape where it gives nothing: "
+          f"{100 * (stage08c_ms / stage08b_ms - 1):.0f}%\033[0m")
+    assert stage08b_ms / stage08c_ms > 0.85, (
+        f"{stage08b_ms / stage08c_ms:.2f}x. A few percent is the cost of the "
+        "softmax of each group, and this is more. Make sure that splits_for "
+        "returns 1 here, and that one split does not go through the merge "
+        "kernel.")
 
 
-def test_occupancy_is_reported(nvcc, dev):
-    """Not a gate. Registers per thread decide how many warps an SM can hold,
-    and that is how much memory latency it can hide."""
+def test_occupancy_is_reported(nvcc, device):
+    """Not a gate. The registers of each thread set how many warps an SM can
+    hold, and that sets how much memory latency it can hide."""
     import cudalib
 
-    S, H, KVH, D, L = 2, 4, 2, 128, 64
-    k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-    q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    paged_attention_split(q, kc, vc, bt, ctx)
+    query, _, _, paged_cache = paged_problem(2, 4, 2, 128, 64, 16, device,
+                                             torch.float16)
+    paged_attention_split(query, *paged_cache)          # force the build
 
     stats = cudalib.kernel_stats("s08c_paged_attn_split")
     if not stats:
         pytest.skip("cuobjdump not available")
-    print()
-    for name, s in sorted(stats.items()):
-        if "EmptyKernel" in name:
-            continue
-        print(f"  {name[-40:]:>40}  {s['reg']:>3} regs  "
-              f"{s['shared']:>5}B shared  {s['local']:>4}B spilled")
-    occ = cudalib.occupancy("s08c_paged_attn_split", "paged_attn_split", 128)
-    if occ:
-        print(f"\n  occupancy from the register count: {100 * occ:.0f}% "
-              f"of the warps an SM can hold")
-    spilled = {n: s for n, s in stats.items() if s.get("local")}
-    assert not spilled, f"these kernels spill to local memory: {list(spilled)}"
+    spilled = report_kernel_stats(stats)
+    occupancy = cudalib.occupancy("s08c_paged_attn_split", "paged_attn_split",
+                                  128)
+    if occupancy:
+        print(f"\n  occupancy from the register count: {100 * occupancy:.0f}% "
+              "of the warps that an SM can hold")
+    assert not spilled, f"these kernels spill to local memory: {spilled}"
 
 
-def test_the_counters_agree(nvcc, dev):
+def test_the_counters_agree(nvcc, device):
     """Not a gate, and it skips on most machines.
 
-    test_occupancy_is_reported computes occupancy from the register count,
-    which is a ceiling. This reads what the SMs actually held, which is that
-    ceiling minus whatever the grid could not supply. At one sequence, the
+    test_occupancy_is_reported computes the occupancy from the register
+    count, which is a ceiling. This check reads what the SMs really held:
+    that ceiling minus what the grid could not supply. At one sequence, the
     gap between the two numbers IS the argument for split-K.
 
-    Reading GPU performance counters needs a driver option that is off by
-    default. `./vc ncu 8c` prints the fix. Skipping here is normal.
+    To read GPU performance counters, a driver option must be on, and it is
+    off by default. `./vc ncu 8c` prints the fix. A skip here is normal.
     """
     import cudalib
-    from cudalib.build import CACHE
 
-    driver = CACHE / "ncu_probe_08c.py"
-    driver.parent.mkdir(exist_ok=True)
-    driver.write_text(
-        "import sys, torch\n"
-        f"sys.path.insert(0, {str(cudalib.ROOT)!r})\n"
-        "from app.s08c_cuda_warps import paged_attention_split as f\n"
-        "from tests.helpers import build_paged, rand_kv\n"
-        "k, v = rand_kv(1, 8, 4096, 128, 'cuda', dtype=torch.float16)\n"
-        "q = torch.randn(1, 16, 128, device='cuda', dtype=torch.float16)\n"
-        "kc, vc, bt, ctx = build_paged(k, v, 16)\n"
-        "f(q, kc, vc, bt, ctx)\n"
-        "torch.cuda.synchronize()\n")
-
-    got = cudalib.ncu_metrics(
+    driver = probe_script(
+        "ncu_probe_08c.py",
+        "from app.s08c_cuda_warps import paged_attention_split\n"
+        "from tests.helpers import paged_problem\n"
+        "query, _, _, paged_cache = paged_problem(1, 16, 8, 128, 4096, 16, "
+        "'cuda', torch.float16)\n"
+        "paged_attention_split(query, *paged_cache)\n")
+    counters = cudalib.ncu_metrics(
         driver,
         ["sm__warps_active.avg.pct_of_peak_sustained_active",
          "dram__bytes.sum.per_second"],
         kernel="regex:paged_attn_split")
-    if not got:
-        pytest.skip("GPU performance counters are not readable here "
+    if not counters:
+        pytest.skip("the GPU performance counters are not readable here "
                     "(see ./vc ncu 8c)")
     print()
-    for name, value in got.items():
+    for name, value in counters.items():
         print(f"  {name.split('.')[0][-44:]:>44}  {value:>14}")

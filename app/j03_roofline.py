@@ -2,12 +2,12 @@
 
 `./vc lore 3 --jax` for the insight. `./vc test 3 --jax` to check yourself.
 
-WHAT YOU'RE BUILDING
+WHAT YOU ARE BUILDING
 
     model_bytes(model) -> int                          total weight bytes
-    time_prefill(model, n_tokens, iters=10) -> float    ms per FORWARD PASS
-    time_decode(model, ctx_len, steps=40) -> float      ms per TOKEN
-    achieved_gbs(nbytes, ms_per_token) -> float
+    time_prefill(model, num_tokens, iters=10) -> float    ms per FORWARD PASS
+    time_decode(model, context_len, steps=40) -> float      ms per TOKEN
+    achieved_gbs(num_bytes, ms_per_token) -> float
 
 This stage produces no new capability. It produces a NUMBER you will spend the
 next seventeen stages moving. Do not skip it.
@@ -50,16 +50,16 @@ def model_bytes(model) -> int:
     raise NotImplementedError("stage 03 (jax): implement model_bytes")
 
 
-def time_prefill(model, n_tokens: int, iters: int = 10) -> float:
-    """Milliseconds for one forward pass over n_tokens."""
+def time_prefill(model, num_tokens: int, iters: int = 10) -> float:
+    """Milliseconds for one forward pass over num_tokens."""
     raise NotImplementedError("stage 03 (jax): implement time_prefill")
 
 
-def time_decode(model, ctx_len: int, steps: int = 40) -> float:
+def time_decode(model, context_len: int, steps: int = 40) -> float:
     """Milliseconds per token in steady-state decode at a given context."""
     raise NotImplementedError("stage 03 (jax): implement time_decode")
 
 
-def achieved_gbs(nbytes: int, ms_per_token: float) -> float:
-    """Effective memory bandwidth, in GB/s, for reading nbytes per token."""
+def achieved_gbs(num_bytes: int, ms_per_token: float) -> float:
+    """Effective memory bandwidth, in GB/s, for reading num_bytes per token."""
     raise NotImplementedError("stage 03 (jax): implement achieved_gbs")

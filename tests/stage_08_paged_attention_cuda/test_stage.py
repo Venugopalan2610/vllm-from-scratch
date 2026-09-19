@@ -1,10 +1,11 @@
-"""Stage 08 - Paged attention in CUDA.
+"""Stage 08 - paged attention in CUDA.
 
-Spec in app/cuda/s08_paged_attn.cu and app/s08_paged_cuda.py.
+The spec is in app/cuda/s08_paged_attn.cu and app/s08_paged_cuda.py.
 
-Every correctness check here compares against stage 07, which is your oracle.
-The last two checks matter most. The kernel must be faster than the PyTorch
-version. And the bandwidth that it reports is the number that stage 08b moves.
+Every correctness check here compares with stage 07, which is your oracle.
+The last two checks are the most important. The kernel must be faster than
+the PyTorch version. And the bandwidth that it reports is the number that
+stage 08b changes.
 """
 
 import pytest
@@ -12,189 +13,176 @@ import torch
 
 from app.s07_paged_attn import paged_attention, reference_attention, write_kv
 from app.s08_paged_cuda import paged_attention_cuda, write_kv_cuda
-from tests.helpers import bench_ms, build_paged, kv_bytes, rand_kv
+from tests.helpers import (
+    bench_ms,
+    kv_bytes,
+    paged_problem,
+    poison_past_context,
+    random_query,
+)
+
+KERNEL_TOLERANCE = dict(rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("block_size", [1, 4, 16])
-@pytest.mark.parametrize("L", [1, 7, 16, 33, 129])
-def test_agrees_with_stage_07(nvcc, dev, block_size, L):
-    """Same numbers as the PyTorch version, every layout, every length."""
-    S, H, KVH, D = 3, 4, 4, 16
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, block_size)
-
-    want = paged_attention(q, kc, vc, bt, ctx)
-    got = paged_attention_cuda(q, kc, vc, bt, ctx)
-    torch.testing.assert_close(got, want, rtol=1e-3, atol=1e-3)
+@pytest.mark.parametrize("context_len", [1, 7, 16, 33, 129])
+def test_agrees_with_stage_07(nvcc, device, block_size, context_len):
+    """The same numbers as the PyTorch version, every layout, every
+    length."""
+    query, _, _, paged_cache = paged_problem(3, 4, 4, 16, context_len,
+                                              block_size, device)
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               paged_attention(query, *paged_cache),
+                               **KERNEL_TOLERANCE)
 
 
-def test_agrees_with_the_dense_reference_too(nvcc, dev):
-    """Belt and braces: not just consistent with stage 07, but correct."""
-    S, H, KVH, D, L = 4, 8, 8, 64, 100
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    want = reference_attention(q, k, v)
-    got = paged_attention_cuda(q, kc, vc, bt, ctx)
-    torch.testing.assert_close(got, want, rtol=2e-3, atol=2e-3)
+def test_agrees_with_the_dense_reference_too(nvcc, device):
+    """A second check: not only the same as stage 07, but correct."""
+    query, keys, values, paged_cache = paged_problem(4, 8, 8, 64, 100, 16,
+                                                      device)
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               reference_attention(query, keys, values),
+                               rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.parametrize("H,KVH", [(8, 2), (16, 8), (4, 4)])
-def test_gqa_ratios(nvcc, dev, H, KVH):
-    """Query head h must read KV head h // (H // KVH)."""
-    S, D, L = 2, 64, 40
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    want = paged_attention(q, kc, vc, bt, ctx)
-    got = paged_attention_cuda(q, kc, vc, bt, ctx)
-    torch.testing.assert_close(got, want, rtol=1e-3, atol=1e-3)
+@pytest.mark.parametrize("num_heads,num_kv_heads", [(8, 2), (16, 8), (4, 4)])
+def test_gqa_ratios(nvcc, device, num_heads, num_kv_heads):
+    """Query head h must read KV head h // (num_heads // num_kv_heads)."""
+    query, _, _, paged_cache = paged_problem(2, num_heads, num_kv_heads, 64,
+                                              40, 16, device)
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               paged_attention(query, *paged_cache),
+                               **KERNEL_TOLERANCE)
 
 
-def test_ragged_context_lengths(nvcc, dev):
-    S, H, KVH, D, Lmax = 8, 8, 4, 64, 200
-    k, v = rand_kv(S, KVH, Lmax, D, dev)
-    kc, vc, bt, _ = build_paged(k, v, 16)
-    lens = torch.tensor([200, 1, 17, 16, 199, 33, 64, 128],
-                        dtype=torch.int32, device=dev)
-    q = torch.randn(S, H, D, device=dev)
-    want = paged_attention(q, kc, vc, bt, lens)
-    got = paged_attention_cuda(q, kc, vc, bt, lens)
-    torch.testing.assert_close(got, want, rtol=1e-3, atol=1e-3)
+def test_ragged_context_lengths(nvcc, device):
+    query, _, _, (key_cache, value_cache, block_tables, _) = paged_problem(
+        8, 8, 4, 64, 200, 16, device)
+    context_lens = torch.tensor([200, 1, 17, 16, 199, 33, 64, 128],
+                                dtype=torch.int32, device=device)
+    arguments = (query, key_cache, value_cache, block_tables, context_lens)
+    torch.testing.assert_close(paged_attention_cuda(*arguments),
+                               paged_attention(*arguments), **KERNEL_TOLERANCE)
 
 
-def test_ignores_junk_beyond_context_len(nvcc, dev):
-    """The masking test again, because a kernel is much easier to get wrong."""
-    S, H, KVH, D, L = 2, 4, 2, 32, 12
-    bs = 8
-    k, v = rand_kv(S, KVH, L, D, dev)
-    kc, vc, bt, _ = build_paged(k, v, bs)
-    lens = torch.tensor([L, L], dtype=torch.int32, device=dev)
-    q = torch.randn(S, H, D, device=dev)
-    before = paged_attention_cuda(q, kc, vc, bt, lens)
-
-    for s in range(S):
-        for b in range(bt.shape[1]):
-            phys = int(bt[s, b])
-            for off in range(bs):
-                if b * bs + off >= L:
-                    kc[phys, :, off] = 999.0
-                    vc[phys, :, off] = 999.0
-
-    after = paged_attention_cuda(q, kc, vc, bt, lens)
-    torch.testing.assert_close(before, after, rtol=1e-3, atol=1e-3)
+def test_ignores_junk_beyond_context_len(nvcc, device):
+    """The masking check again, because a kernel is much easier to get
+    wrong."""
+    context_len, block_size = 12, 8
+    query, _, _, paged_cache = paged_problem(2, 4, 2, 32, context_len,
+                                              block_size, device)
+    before = paged_attention_cuda(query, *paged_cache)
+    key_cache, value_cache, block_tables, _ = paged_cache
+    poison_past_context(key_cache, value_cache, block_tables, context_len,
+                        block_size)
+    torch.testing.assert_close(before, paged_attention_cuda(query, *paged_cache),
+                               **KERNEL_TOLERANCE)
 
 
-def test_fp16_accumulates_in_fp32(nvcc, dev):
-    """Long contexts in fp16 are where sloppy accumulation shows up.
+def test_fp16_accumulates_in_fp32(nvcc, device):
+    """A long context in fp16 shows careless accumulation.
 
-    Sum 2048 fp16 products in fp16 and you lose several digits. Accumulate in
-    float inside the kernel and this passes comfortably.
+    An fp16 sum of 2048 fp16 products loses several digits. Accumulate in
+    float inside the kernel, and this passes easily.
     """
-    S, H, KVH, D, L = 2, 8, 8, 128, 2048
-    k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-    q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-    want = reference_attention(q, k, v)
-    got = paged_attention_cuda(q, kc, vc, bt, ctx)
-    torch.testing.assert_close(got, want, rtol=3e-3, atol=3e-3)
+    query, keys, values, paged_cache = paged_problem(
+        2, 8, 8, 128, 2048, 16, device, torch.float16)
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               reference_attention(query, keys, values),
+                               rtol=3e-3, atol=3e-3)
 
 
-def test_write_kv_matches_stage_07(nvcc, dev):
-    """The scatter kernel. Stage 07's write_kv is the oracle."""
-    T, KVH, D, BS, NB = 40, 4, 64, 16, 32
-    key = torch.randn(T, KVH, D, device=dev)
-    val = torch.randn(T, KVH, D, device=dev)
-    slots = torch.randperm(NB * BS, device=dev)[:T].to(torch.int32)
+def test_write_kv_matches_stage_07(nvcc, device):
+    """The scatter kernel. The write_kv of stage 07 is the oracle."""
+    num_tokens, num_kv_heads, head_dim, block_size, num_blocks = 40, 4, 64, 16, 32
+    key = torch.randn(num_tokens, num_kv_heads, head_dim, device=device)
+    value = torch.randn(num_tokens, num_kv_heads, head_dim, device=device)
+    slots = torch.randperm(num_blocks * block_size,
+                           device=device)[:num_tokens].to(torch.int32)
 
-    want_k = torch.zeros(NB, KVH, BS, D, device=dev)
-    want_v = torch.zeros_like(want_k)
-    write_kv(want_k, want_v, key, val, slots)
+    def caches():
+        key_cache = torch.zeros(num_blocks, num_kv_heads, block_size, head_dim,
+                                device=device)
+        return key_cache, torch.zeros_like(key_cache)
 
-    got_k = torch.zeros_like(want_k)
-    got_v = torch.zeros_like(want_k)
-    write_kv_cuda(got_k, got_v, key, val, slots)
+    expected_keys, expected_values = caches()
+    write_kv(expected_keys, expected_values, key, value, slots)
+    written_keys, written_values = caches()
+    write_kv_cuda(written_keys, written_values, key, value, slots)
+    torch.testing.assert_close(written_keys, expected_keys)
+    torch.testing.assert_close(written_values, expected_values)
 
-    torch.testing.assert_close(got_k, want_k)
-    torch.testing.assert_close(got_v, want_v)
 
-
-def test_the_launch_is_checked(nvcc, dev):
-    """A kernel that never ran must raise, not return silent garbage.
+def test_the_launch_is_checked(nvcc, device):
+    """A kernel that never ran must raise an error, not return garbage.
 
     Every launch needs C10_CUDA_KERNEL_LAUNCH_CHECK() after it. Without one,
-    an illegal configuration fails invisibly and you spend an evening
-    debugging arithmetic that never executed.
+    an illegal configuration fails with no sign, and you debug arithmetic
+    that never ran.
     """
-    S, H, KVH, D, L = 2, 4, 4, 32, 40
-    k, v = rand_kv(S, KVH, L, D, dev)
-    q = torch.randn(S, H, D, device=dev)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
+    query, _, _, paged_cache = paged_problem(2, 4, 4, 32, 40, 16, device)
 
     # num_heads must be a multiple of num_kv_heads. A kernel that does not
-    # check this reads KV head h // 0 or walks off the cache.
-    bad = torch.randn(S, 6, D, device=dev)
+    # check this reads KV head h // 0, or goes past the end of the cache.
+    bad_query = random_query(2, 6, 32, device)
     with pytest.raises(Exception):
-        paged_attention_cuda(bad, kc, vc, bt, ctx)
+        paged_attention_cuda(bad_query, *paged_cache)
 
-    # ... and the good path still works afterwards. A sticky CUDA error here
-    # means the failure corrupted the context rather than being caught.
-    torch.testing.assert_close(paged_attention_cuda(q, kc, vc, bt, ctx),
-                               paged_attention(q, kc, vc, bt, ctx),
-                               rtol=1e-3, atol=1e-3)
+    # The good path must still work after it. A sticky CUDA error here means
+    # that the failure corrupted the context, and nothing caught it.
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               paged_attention(query, *paged_cache),
+                               **KERNEL_TOLERANCE)
 
 
-def test_it_is_actually_faster(nvcc, dev):
-    """The whole point of the stage."""
+def test_it_is_actually_faster(nvcc, device):
+    """The point of the stage."""
     rows = []
-    for S, L in ((8, 256), (32, 512), (64, 1024)):
-        H, KVH, D = 16, 8, 128
-        k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-        q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-        kc, vc, bt, ctx = build_paged(k, v, 16)
+    for num_seqs, context_len in ((8, 256), (32, 512), (64, 1024)):
+        query, _, _, paged_cache = paged_problem(
+            num_seqs, 16, 8, 128, context_len, 16, device, torch.float16)
+        torch_ms = bench_ms(lambda: paged_attention(query, *paged_cache),
+                            iters=10)
+        cuda_ms = bench_ms(lambda: paged_attention_cuda(query, *paged_cache))
+        rows.append((num_seqs, context_len, torch_ms, cuda_ms))
 
-        torch_ms = bench_ms(lambda: paged_attention(q, kc, vc, bt, ctx), iters=10)
-        cuda_ms = bench_ms(lambda: paged_attention_cuda(q, kc, vc, bt, ctx))
-        rows.append((S, L, torch_ms, cuda_ms))
+    print(f"\n  {'seqs':>5} {'ctx':>6} {'stage 07':>11} {'stage 08':>11} "
+          f"{'speedup':>9}")
+    for num_seqs, context_len, torch_ms, cuda_ms in rows:
+        print(f"  {num_seqs:>5} {context_len:>6} {torch_ms:>9.2f}ms "
+              f"{cuda_ms:>9.3f}ms {torch_ms / cuda_ms:>8.0f}x")
 
-    print(f"\n  {'seqs':>5} {'ctx':>6} {'stage 07':>11} {'stage 08':>11} {'speedup':>9}")
-    for S, L, a, b in rows:
-        print(f"  {S:>5} {L:>6} {a:>9.2f}ms {b:>9.3f}ms {a / b:>8.0f}x")
-
-    worst = min(a / b for _, _, a, b in rows)
+    worst = min(torch_ms / cuda_ms for _, _, torch_ms, cuda_ms in rows)
     assert worst > 3.0, (
-        f"only {worst:.1f}x faster at best. Two kernel launches should crush a "
-        "Python loop that does num_seqs separate gathers."
-    )
-    print(f"\n  \033[1mWorst case: {worst:.0f}x faster than the PyTorch version.\033[0m")
-    print("  \033[2mYou deleted num_seqs kernel launches and num_seqs gathers,")
-    print("  and the score row never reaches HBM at all.\033[0m")
+        f"only {worst:.1f}x faster in the worst case. Two kernel launches "
+        "must be much faster than a Python loop of num_seqs gathers.")
+    print(f"\n  \033[1mWorst case: {worst:.0f}x faster than the PyTorch "
+          "version.\033[0m")
+    print("  \033[2mYou removed num_seqs kernel launches and num_seqs")
+    print("  gathers, and the score row never goes to HBM.\033[0m")
 
 
-def test_how_much_of_the_card_you_are_using(nvcc, dev):
-    """Not a gate. The number stage 08b exists to move.
+def test_how_much_of_the_card_you_are_using(nvcc, device):
+    """Not a gate. The number that stage 08b changes.
 
-    Peak is measured right here rather than read from a datasheet, and right
-    next to the kernel rather than at import time, because a laptop GPU
-    throttles: a peak measured cold and a kernel measured hot is a comparison
-    between two different machines.
+    The check measures the peak here, and does not read it from a datasheet.
+    It measures it next to the kernel, not at import time. A laptop GPU throttles: a peak measured cold
+    and a kernel measured hot are a comparison of two different machines.
     """
     import cudalib
 
-    S, H, KVH, D, L = 64, 16, 8, 128, 1024
-    k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)
-    q = torch.randn(S, H, D, device=dev, dtype=torch.float16)
-    kc, vc, bt, ctx = build_paged(k, v, 16)
-
+    query, _, _, paged_cache = paged_problem(64, 16, 8, 128, 1024, 16,
+                                              device, torch.float16)
+    context_lens = paged_cache[3]
     peak = cudalib.peak_bandwidth(fresh=True)
     gbs, _ = cudalib.achieved_bandwidth(
-        lambda: paged_attention_cuda(q, kc, vc, bt, ctx),
-        kv_bytes(ctx, KVH, D, q.element_size()))
+        lambda: paged_attention_cuda(query, *paged_cache),
+        kv_bytes(context_lens, 8, 128, query.element_size()))
 
     print(f"\n  peak (measured now)  {peak:>7.0f} GB/s")
     print(f"  your kernel          {gbs:>7.0f} GB/s   "
           f"\033[1m{100 * gbs / peak:.0f}% of it\033[0m")
-    print("  \033[2mOne thread per position walks head_dim on its own, so the 32")
-    print("  threads of a warp ask for 32 scattered rows at once. The bytes")
-    print("  arrive; the requests are what you overspent. Stage 08b.\033[0m")
+    print("  \033[2mOne thread for each position walks head_dim alone, so the")
+    print("  32 threads of a warp ask for 32 scattered rows at one time. The")
+    print("  bytes arrive. The requests are what you spent too much of.")
+    print("  Stage 08b.\033[0m")

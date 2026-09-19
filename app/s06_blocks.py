@@ -3,10 +3,10 @@
 `./vc lore 6` for the insight. `./vc test 6` to check yourself.
 
 This is virtual memory for the KV cache. Attention does not change yet. This
-stage is the memory manager alone. Make it correct, and stage 07 is mostly
+stage is only the memory manager. Make it correct, and stage 07 is mostly
 bookkeeping.
 
-The mapping, worth holding in your head:
+Keep this mapping in mind:
 
     OS                          here
     ---------------------------------------------------
@@ -20,21 +20,21 @@ The mapping, worth holding in your head:
 
 
 class OutOfBlocks(Exception):
-    """Raised when the pool cannot satisfy an allocation."""
+    """The pool does not have the blocks for an allocation."""
 
 
 class BlockAllocator:
-    """A free list over `num_blocks` physical blocks, each holding
+    """A free list over `num_blocks` physical blocks. Each block holds
     `block_size` tokens of KV.
 
     Required attributes:
-        .num_blocks   total blocks in the pool
-        .block_size   tokens per block
-        .num_free     how many are currently free
+        .num_blocks   all the blocks of the pool
+        .block_size   the tokens in one block
+        .num_free     the number of free blocks now
 
     Required methods:
-        allocate(n=1) -> list[int]   physical block ids; raises OutOfBlocks
-        free(block_ids)              return blocks to the pool
+        allocate(n=1) -> list[int]   physical block ids, or OutOfBlocks
+        free(block_ids)              give blocks back to the pool
     """
 
     def __init__(self, num_blocks: int, block_size: int = 16):
@@ -45,34 +45,36 @@ class BlockAllocator:
         raise NotImplementedError
 
     def allocate(self, n: int = 1) -> list[int]:
-        """Hand out n free blocks. Raise OutOfBlocks if there aren't n free.
+        """Give n free blocks. Raise OutOfBlocks if fewer than n are free.
 
-        All-or-nothing: a failed allocation must not leak partial blocks.
+        All or nothing: an allocation that fails must not keep some blocks.
         """
         raise NotImplementedError
 
     def free(self, block_ids) -> None:
-        """Return blocks to the pool. A call on a block that is already free
-        must raise. It means that two sequences each believe that they own the
-        block, and the corruption that follows is very hard to trace back.
+        """Give blocks back to the pool. A call on a block that is already
+        free must raise an error. It means that two sequences both think that
+        they own the block. The corruption that follows is very difficult to
+        find.
         """
         raise NotImplementedError
 
 
 class BlockTable:
-    """One sequence's page table: logical token position -> physical slot.
+    """The page table of one sequence: logical token position -> physical
+    slot.
 
     Required attributes:
         .blocks       list[int] of physical block ids, in logical order
-        .num_tokens   how many tokens are currently stored
+        .num_tokens   the number of tokens stored now
 
     Required methods:
-        append_token()          grow by one token, allocating a block only when
-                                the current tail block is full
-        reserve(n_tokens)       ensure capacity for n_tokens total
+        append_token()          add one token. Allocate a block only when
+                                the last block is full.
+        reserve(num_tokens)     make room for num_tokens in total
         slot(pos) -> (block_id, offset)
         slot_index(pos) -> int  flat index: block_id * block_size + offset
-        free()                  return every block to the allocator
+        free()                  give every block back to the allocator
     """
 
     def __init__(self, allocator: BlockAllocator):
@@ -81,21 +83,21 @@ class BlockTable:
     def append_token(self) -> None:
         raise NotImplementedError
 
-    def reserve(self, n_tokens: int) -> None:
+    def reserve(self, num_tokens: int) -> None:
         raise NotImplementedError
 
     def slot(self, pos: int) -> tuple[int, int]:
-        """Logical position -> (physical block id, offset within block).
+        """Logical position -> (physical block id, offset in the block).
 
             block_id = self.blocks[pos // block_size]
             offset   = pos % block_size
 
-        Raise IndexError for a position that has not been allocated yet.
+        Raise IndexError for a position that has no block yet.
         """
         raise NotImplementedError
 
     def slot_index(self, pos: int) -> int:
-        """Flat slot index, the form a kernel actually wants:
+        """The flat slot index, the form that a kernel uses:
 
             block_id * block_size + offset
         """
@@ -107,10 +109,11 @@ class BlockTable:
 
 def capacity_contiguous(vram_bytes: int, kv_bytes_per_token: int,
                         max_len: int) -> int:
-    """How many sequences fit if each RESERVES max_len tokens up front.
+    """The number of sequences that fit if each one RESERVES max_len tokens
+    at the start.
 
-    This is the pre-vLLM world: you cannot know a sequence's final length, so
-    you allocate for the worst case and eat the waste.
+    This is the world before vLLM. You cannot know the final length of a
+    sequence, so you allocate for the worst case and accept the waste.
 
         vram_bytes // (max_len * kv_bytes_per_token)
     """
@@ -119,10 +122,11 @@ def capacity_contiguous(vram_bytes: int, kv_bytes_per_token: int,
 
 def capacity_paged(vram_bytes: int, kv_bytes_per_token: int,
                    block_size: int, seq_lens: list[int]) -> int:
-    """How many of `seq_lens` fit when each pays only for the blocks it uses.
+    """The number of `seq_lens` that fit when each one pays only for the
+    blocks that it uses.
 
-    A sequence of length L occupies ceil(L / block_size) blocks, i.e.
-    ceil(L / block_size) * block_size token-slots. Greedily admit sequences in
-    the given order until the next one does not fit; return how many fit.
+    A sequence of length L uses ceil(L / block_size) blocks, that is
+    ceil(L / block_size) * block_size token slots. Admit the sequences in
+    order until the next one does not fit. Return the number that fit.
     """
     raise NotImplementedError("stage 06: implement capacity_paged")

@@ -2,7 +2,7 @@
 
 `./vc lore 4 --jax` for the insight. `./vc test 4 --jax` to check yourself.
 
-WHAT YOU'RE BUILDING
+WHAT YOU ARE BUILDING
 
     static_batch_generate(model, prompts, max_tokens) -> list[list[int]]
     padding_waste(output_lens) -> float
@@ -16,64 +16,65 @@ WHY THIS TRACK PADS ON THE RIGHT AND THE TORCH TRACK PADS ON THE LEFT
 torch pads on the left, so that index -1 holds the last real token of every
 row. The mask in HF hides the pad at the front.
 
-You write into a cache instead, so the natural layout is the opposite. The
-prompt of each row starts at slot 0 and runs to L_b. The pad sits at the END,
-and the generated tokens overwrite it.
+You write into a cache, so the usual layout is the opposite. The prompt of
+each row starts at slot 0 and goes to L_b. The pad is at the END, and the
+generated tokens overwrite it.
 
-Which means the last position is NOT everyone's last token, and you have to say
-where each row's logits live:
+So the last position is NOT the last token of every row. You must tell the
+model where to read the logits of each row:
 
-    logits, cache = model.forward(ids, positions, cache, cache_len,
-                                  logits_index=jnp.array([L - 1 for L in lens]))
+    logits, cache = model.forward(token_ids, positions, cache, cache_len,
+                                  logits_index=jnp.array(prompt_lens) - 1)
 
-    logits_index   (B,) per-row position to read logits from -> (B, V)
+    logits_index   (B,) the position of each row to read logits from -> (B, V)
 
-Get this wrong and short prompts in the batch generate a continuation of the
-PAD, which reads as fluent nonsense rather than an obvious error. It is the
-single most common way this stage fails.
+If this is wrong, the short prompts of the batch continue the PAD. The text
+looks fluent and has no meaning, so the error is not obvious. That is the
+most frequent failure of this stage.
 
-THE SKETCH
+THE OUTLINE
 
-    lens = [len(model.encode(p)) for p in prompts]
-    T    = max(lens)
-    ids  = right-padded (B, T)
-    cache = model.init_cache(B, big enough)
+    prompt_lens = [len(model.encode(prompt)) for prompt in prompts]
+    longest     = max(prompt_lens)
+    token_ids   = right-padded (B, longest)
+    cache = model.init_cache(B, large enough)
 
-    logits, cache = model.forward(ids, cache=cache, cache_len=zeros(B),
-                                  logits_index=array(lens) - 1)
-    cache_len = array(lens)             # per row, NOT T
-    next = argmax(logits, -1)           # (B,)
+    logits, cache = model.forward(token_ids, cache=cache, cache_len=zeros(B),
+                                  logits_index=array(prompt_lens) - 1)
+    cache_len = array(prompt_lens)        # for each row, NOT longest
+    next_tokens = argmax(logits, -1)      # (B,)
 
     loop:
-        record next for every row still running
-        logits, cache = model.forward(next[:, None],
+        record next_tokens for each row that still runs
+        logits, cache = model.forward(next_tokens[:, None],
                                       positions=cache_len[:, None],
                                       cache=cache, cache_len=cache_len)
         cache_len = cache_len + 1
-        next = argmax(logits, -1)
+        next_tokens = argmax(logits, -1)
 
-Note that `cache_len = lens`, and not T. For every short row, the prefill wrote
-waste K and V into slots L_b to T-1. Set cache_len to L_b. The first decoded
-token then overwrites that waste, and the mask never reads it.
+Note that `cache_len = prompt_lens`, not longest. For each short row, the
+prefill wrote waste K and V into slots L_b to longest - 1. Set cache_len to
+L_b. The first decoded token then overwrites that waste, and the mask never
+reads it.
 
 WHERE THE WASTE IS
 
-Two different wastes, and this stage is about seeing both:
+There are two different wastes, and this stage shows both:
 
-  - PREFILL waste: the batch pads every row out to the longest prompt. So a
+  - PREFILL waste: the batch pads every row to the longest prompt. So a
     batch of [12, 400] tokens does 800 tokens of prefill work for 412 tokens
     of prompt. That is the shape of the batch, and no layout corrects it.
 
-  - DECODE waste: the batch runs until its SLOWEST member finishes. A row that
-    hit eos on step 3 keeps occupying its slot for another 60 steps, and here
-    it does not even get cheaper when it finishes, because the shape is fixed.
-    `padding_waste` measures this one.
+  - DECODE waste: the batch runs until its SLOWEST row finishes. A row that
+    got eos at step 3 keeps its slot for 60 more steps. Here it does not
+    even get cheaper when it finishes, because the shape is fixed.
+    `padding_waste` measures this waste.
 
-Stage 05 fixes the second by refilling the slot. Nothing fixes the first except
-not batching wildly different prompt lengths together, which is a scheduling
-decision you make in stage 10.
+Stage 05 fixes the second waste: it fills the slot again. Only one thing
+fixes the first: do not batch prompts of very different lengths together.
+You make that scheduling decision in stage 10.
 
-    padding_waste(output_lens) -> 1 - sum(lens) / (n_rows * max(lens))
+    padding_waste(output_lens) -> 1 - sum(lens) / (num_rows * max(lens))
 """
 
 
@@ -84,5 +85,5 @@ def static_batch_generate(model, prompts: list[str],
 
 
 def padding_waste(output_lens: list[int]) -> float:
-    """Fraction of decoded token-slots wasted on rows that already finished."""
+    """The fraction of decode slots spent on rows that already finished."""
     raise NotImplementedError("stage 04 (jax): implement padding_waste")

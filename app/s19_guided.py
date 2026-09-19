@@ -2,59 +2,61 @@
 
 `./vc lore 19` for the insight. `./vc test 19` to check yourself.
 
-"Respond in JSON" as a prompt instruction is a request. Logit masking is a
-guarantee: at every step, compute which tokens could legally come next and set
-every other logit to -inf. Illegal output becomes unrepresentable.
+"Respond in JSON" in a prompt is a request. Logit masking is a guarantee:
+at every step, compute the tokens that can legally come next, and set every
+other logit to -inf. The model then cannot write illegal output.
 
-The grammar validator is supplied for you in tests/helpers.py -- compiling a
-schema to an automaton is its own discipline. What matters here, and what
-actually breaks in production, is the other two parts:
+tests/helpers.py gives you the grammar validator. To compile a schema to an
+automaton is a different subject. Two other parts are important here, and
+they are what breaks in production:
 
-  1. TOKENIZER ALIGNMENT. The grammar thinks in characters; the model thinks in
-     BPE tokens, and they do not line up. A single token can span a closing
-     quote, a comma, and the start of the next key. A token is legal only if
+  1. TOKENIZER ALIGNMENT. The grammar works in characters. The model works
+     in BPE tokens, and the two do not align. One token can hold a closing
+     quote, a comma and the start of the next key. A token is legal only if
      EVERY character in it is legal.
 
-  2. KEEPING IT OFF THE CRITICAL PATH. Building a mask means asking the
-     validator about every candidate token. Do that inside the decode loop and
-     you have added milliseconds to a step that takes milliseconds. Cache by
-     grammar STATE, and build masks while the GPU is busy with the forward pass.
+  2. KEEP IT OFF THE CRITICAL PATH. To make a mask, you ask the validator
+     about every candidate token. Do that inside the decode loop, and you
+     add milliseconds to a step of a few milliseconds. Cache by grammar
+     STATE, and make masks while the GPU runs the forward pass.
 """
 
 import torch
 
 
 def allowed_token_ids(tokenizer, validator, prefix, candidate_ids):
-    """Which candidates keep us on a path to valid output.
+    """The candidates that keep the output on a path to valid output.
 
-    A token is allowed if validator(prefix + tokenizer.decode([tid])) is
-    'valid' or 'prefix'. Only 'invalid' is excluded -- 'prefix' means
-    incomplete-but-still-rescuable, which is most of generation.
+    Allow a token if validator(prefix + tokenizer.decode([token_id])) is
+    'valid' or 'prefix'. Refuse only 'invalid'. 'prefix' means "not
+    complete, but it can still become valid", and that is most of a
+    generation.
     """
     raise NotImplementedError("stage 19: implement allowed_token_ids")
 
 
 def build_mask(vocab_size, allowed_ids, device="cpu"):
-    """Bool tensor over the vocabulary: True = allowed."""
+    """A bool tensor over the vocabulary: True = allowed."""
     raise NotImplementedError("stage 19: implement build_mask")
 
 
 def apply_logit_mask(logits, mask):
-    """Disallowed positions -> -inf, so softmax gives them exactly zero.
+    """A position that is not allowed -> -inf, so softmax gives it exactly
+    zero.
 
     Use -inf, not a large negative number. A finite penalty leaves a small
-    probability that a long generation will eventually sample, and then your
-    "guaranteed" JSON is invalid once every few thousand requests.
+    probability that a long generation samples one day. Then your
+    "guaranteed" JSON is not valid one time in a few thousand requests.
     """
     raise NotImplementedError("stage 19: implement apply_logit_mask")
 
 
 class MaskCache:
-    """Memoize masks by key. Required: .hits .misses .size, get(key).
+    """Keep the masks by key. Required: .hits .misses .size, get(key).
 
-    Key choice is the whole game. Key on full text and you get a ~0% hit rate,
-    because the text is different every step. Key on the grammar STATE and a
-    handful of masks cover an entire generation.
+    The key is the most important decision. A key of the full text gives a
+    hit rate of about 0%, because the text changes at every step. A key of
+    the grammar STATE lets a few masks cover a whole generation.
     """
 
     def __init__(self, builder):
@@ -68,8 +70,8 @@ class GuidedDecoder:
         mask_for(text) -> BoolTensor
         is_complete(text) -> bool
 
-    If eos_id is given, it is allowed ONLY when the current text is already
-    'valid' -- that is what stops the model finishing mid-object.
+    If the caller gives eos_id, allow it ONLY when the text is already
+    'valid'. That stops the model from finishing in the middle of an object.
     """
 
     def __init__(self, tokenizer, validator, candidate_ids, eos_id=None,

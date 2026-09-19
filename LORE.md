@@ -7,7 +7,8 @@ the system stops being a pile of tricks and becomes a series of forced moves.
 
 ## 1. The fact: is this IO-bound or CPU-bound?
 
-That's the whole question. It's the same question you'd ask about any service.
+That is the whole question. It is the same question that you ask about any
+service.
 Everything else in this document falls out of the answer.
 
 **No number below appears without its arithmetic.** You should never have to
@@ -29,7 +30,7 @@ Two steps. Time them separately.
 ```
     14 GB          GB cancels, leaving seconds
 ------------  =  0.037 s  =  37 ms
-  380 GB/s          ^-- your card, measured by ./vc info
+  380 GB/s          ^-- an example card. ./vc info measures yours
 ```
 
 ### Step 2: do the math
@@ -46,8 +47,8 @@ physics. Just an op, the way a request is a request.)
 
 ```
     14 GFLOP          GFLOP cancels, leaving seconds
----------------  =  0.00028 s  =  0.28 ms
-  50,000 GFLOP/s        ^-- your card, measured by ./vc info
+---------------  =  0.00025 s  =  0.25 ms
+  57,000 GFLOP/s        ^-- the same example card
 ```
 
 ### Compare the two
@@ -55,10 +56,10 @@ physics. Just an op, the way a request is a request.)
 | Step | The division | Time |
 |---|---|---|
 | Read 14 GB of weights | `14 GB / 380 GB/s` | **37 ms** |
-| Compute on them | `14 GFLOP / 50000 GFLOP/s` | **0.28 ms** |
+| Compute on them | `14 GFLOP / 57000 GFLOP/s` | **0.25 ms** |
 
 ```
-37 ms reading  /  0.28 ms computing  =  132x more time spent waiting
+37 ms reading  /  0.25 ms computing  =  150x more time spent waiting
 ```
 
 **The GPU is idle over 99% of the time, waiting for memory.** It is not
@@ -77,7 +78,7 @@ waiting, run them in the *same* pass:
 | Bytes read | 14 GB | **14 GB** — same weights, read once |
 | Read time | `14 / 380` = 37 ms | `14 / 380` = **37 ms** |
 | Operations | 14 GFLOP | `14 x 128` = 1792 GFLOP |
-| Compute time | `14 / 50000` = 0.28 ms | `1792 / 50000` = **36 ms** |
+| Compute time | `14 / 57000` = 0.25 ms | `1792 / 57000` = **31 ms** |
 | Tokens out | 1 | **128** |
 | Wall clock | ~37 ms | ~40 ms |
 
@@ -103,17 +104,19 @@ A batch turns a GEMV into a GEMM. A GPU exists to run a GEMM. A GEMV wastes it.
 This is the same instinct as cache blocking or loop tiling on a CPU. Load the
 line one time. Take all of the work out of it before the cache drops it.
 
-Look at the two time columns. They are now equal: 37 ms to read, 36 ms to
-compute. That is not a coincidence. That is where the batch size comes from:
+Look at the two time columns. They are now close: 37 ms to read, 31 ms to
+compute. They become equal at one batch size, and that is where the batch size
+comes from:
 
 ```
    37 ms of reading
---------------------  =  132 requests before compute becomes the bottleneck
- 0.28 ms per request
+--------------------  =  150 requests before compute becomes the bottleneck
+ 0.25 ms per request
 ```
 
-> **Batch ~130 is where decode stops being memory-bound on this GPU.**
-> Below it, extra requests are nearly free. Above it, you're paying for math.
+> **At batch ~150, decode stops waiting on memory on this example card.**
+> Below it, an extra request costs almost nothing. Above it, you pay for
+> arithmetic.
 
 That is the entire argument for continuous batching, and why production servers
 set `max_num_seqs` (the batch size knob) in the hundreds.
@@ -154,7 +157,7 @@ The reason is mechanical. Past the ridge, step time is `0.25ms x B`, so:
 You have hit the compute roofline and it does not move. Hence "ridge point": a
 peak you sit on, not a wall you push through.
 
-### "But the weights never change — can't they just stay in cache?"
+### "But the weights never change. Why can they not stay in the cache?"
 
 That is true. Only a retraining run changes them. But read-only does not mean
 free to read, and the weights are much too large for the cache:
@@ -181,7 +184,7 @@ cache to do it:
 All three attack the same denominator. None of them makes the read free,
 because 14 GB does not fit in 50 MB.
 
-### The compressed form you'll see everywhere else
+### The compressed form that you see everywhere else
 
 A paper or a blog post does not write out both timings. It divides them into one
 number and compares that number against the hardware. This is the "roofline
@@ -191,7 +194,7 @@ model". It confuses everybody, so here it is, slowly.
 
 |  | What it is | Changes when... |
 |---|---|---|
-| **~138 FLOP/byte** | a property of your **hardware** | you buy a different GPU |
+| **~150 FLOP/byte** | a property of your **hardware** | you buy a different GPU |
 | **B FLOP/byte** | a property of your **workload** | you change the batch size |
 
 You cannot observe either number with a probe on a running GPU. You compute both
@@ -212,8 +215,8 @@ has exactly the same shape as the ratio of the workload. That is the *only*
 reason to do this division: to put the hardware and the workload on the same
 footing.
 
-On a laptop GPU this number moves between approximately 124 and approximately
-150 from run to run, because the clocks throttle. Do not chase the exact value.
+On a laptop GPU this number moves by 20% or more from run to run, because the
+clocks throttle. Do not chase the exact value.
 
 **Why the workload's ratio is exactly B.** Let `N` = number of weights, bf16:
 
@@ -251,7 +254,7 @@ memory-bound  means   time_reading   >   time_computing
                         ------      >    -------
                           BW              Bytes
 
-                    138 (hardware)   >   B (workload)
+                    150 (hardware)   >   B (workload)
 ```
 
 It is the same inequality with the terms in a different order. The intensity
@@ -266,7 +269,7 @@ memory:   14 GB     / 0.037 s  =    378 GB/s      vs    380 peak  ->  ~100% busy
 compute:  14 GFLOP  / 0.037 s  =    378 GFLOP/s   vs 57,000 peak  ->   ~0.7% busy
 ```
 
-The 138 never appears in the output of a profiler. You compute it in advance, to
+The 150 never appears in the output of a profiler. You compute it in advance, to
 predict *which of those two lines reaches its limit*.
 
 ### Everything else follows
@@ -278,7 +281,7 @@ costs almost nothing*. It gives you all of this:
 - What limits the batch? KV cache memory → **PagedAttention** (stages 6-9)
 - Who gets memory when it runs out? → **the scheduler** (stage 10)
 - Prefill is the opposite (compute-bound) and disrupts decode → **chunked prefill** (11)
-- 1 ms of GPU work shouldn't cost 1 ms of Python → **CUDA graphs** (12)
+- 1 ms of GPU work must not cost 1 ms of Python → **CUDA graphs** (12)
 - A check on K tokens costs the same as one new token → **speculative decoding** (17)
 - Fewer weight bytes = proportionally faster decode → **quantization** (18)
 
@@ -299,14 +302,14 @@ bytes = 2 (K and V)
       * dtype_bytes
 ```
 
-Three properties make it uniquely nasty to manage, and they're why a whole paper
-exists about it:
+Three properties make it uniquely difficult to manage. They are the reason that
+a whole paper exists about it:
 
 1. **It grows one token at a time**, unpredictably. You cannot know the final size
-   at admission, because you don't know when the model will emit EOS.
-2. **It's enormous.** At long context it rivals or exceeds the weights. It is the
+   at admission, because you do not know when the model will emit EOS.
+2. **It is enormous.** At long context it rivals or exceeds the weights. It is the
    binding constraint on batch size, and batch size is throughput.
-3. **It's per-sequence**, so it fragments.
+3. **It is per-sequence**, so it fragments.
 
 Pre-vLLM systems allocated one contiguous buffer per sequence, sized to `max_len`.
 The waste came in three flavors:
@@ -561,7 +564,7 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
         └── Model ── attention backend (FlashAttention / FlashInfer / CUDA)
 ```
 
-**Key V0 → V1 changes** (2025), all of which you'll independently rediscover:
+**Key V0 → V1 changes** (2025), and you find all of them again yourself:
 
 - The engine loop moved into its **own process**. The Python overhead on the API
   side stalled the GPU between steps by a measurable amount.
@@ -580,7 +583,7 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
 
 - KV cache per token, Llama-3-8B (32 layers, 8 KV heads, head_dim 128, bf16):
   `2 * 32 * 8 * 128 * 2 = 128 KB/token`. A 4k-token conversation = **512 MB**.
-  On your 12 GB card, after ~5 GB for an 8B model in fp8, that's roughly a dozen
+  On your 12 GB card, after ~5 GB for an 8B model in fp8, that is approximately a dozen
   such conversations. **That number is your throughput.**
 - Block size 16 is the standard default. It is large enough to spread the cost
   of a block-table lookup. It is small enough that the average waste, 8 tokens
@@ -751,6 +754,88 @@ stages 06 to 09 before you reach them.
 
 ---
 
+## 11. The capstone: the parts meet
+
+Stages 06 to 20 each build one part, and each part passes its checks alone.
+That proves the parts. It does not prove the engine. These facts only appear
+when the parts run together, and the capstone (stages 21 to 28) is where you
+meet them.
+
+**The host decides the shape of the engine.** The HuggingFace model grows its
+cache by concatenation, and it hides the attention call. No paged kernel can
+live inside it. So the capstone model, `tvllm/model.py`, takes a FLAT batch
+and calls an attention backend that you write. That one interface change lets
+a single step hold decodes and prefill chunks from many sequences.
+
+**The scheduler has only one rule.** Stages 10 and 11 were two separate
+simulations. In a real engine, every sequence has pending tokens: one for a
+decode, many for a prefill, all of them after a preemption. Each step gives
+pending tokens to sequences until the budget runs out. vLLM V1 schedules like
+this, and it is why V1 has no separate prefill step.
+
+**Padding must go somewhere harmless.** A captured graph has a fixed batch, so
+the engine pads. Stage 12 padded with zeros. In a paged engine, slot 0 is
+block 0, and block 0 belongs to a real sequence. A padding row must write to
+slot -1, which the stage 08 kernel skips.
+
+**A real step blocks the event loop.** Stage 15 called step() inline, and the
+fake step took no time. A real step holds the GPU for 5 to 50 ms, and no HTTP
+request moves for that time. Put step() in a worker thread, and send it
+commands through a queue. vLLM V1 separates the API server and the engine core
+for the same reason.
+
+**A kernel has a crossover, so the engine dispatches.** Your int8 GEMV wins at
+a few rows and loses above them, because the rows then share the weight read.
+So each matmul takes the int8 path below a crossover and bf16 above it. Measure
+the crossover in the real graphed step. One matrix of a small model fits in L2,
+and a benchmark of it gives the wrong answer.
+
+**At long context, the KV cache is the bytes.** At 16 sequences of 2048 tokens
+the KV read is three times the weight read. An FP8 cache halves it. The kernel
+must then convert two values with one instruction, or it waits on arithmetic
+and gives back most of the win.
+
+**A verify is a decode batch.** K draft tokens are K+1 decode rows that share
+one block table. Each row sees its own context, so the verify is causal, it
+runs on the decode kernel, and it replays a graph. With greedy decoding the
+output is the same token for token. With sampling, the rejection rule of stage
+17 keeps the distribution exact.
+
+**A grammar mask is a cache lookup.** A JSON automaton has a few dozen states
+in one answer, and the mask depends only on the state. Build each mask one
+time and keep it. Near max_tokens, admit only the tokens that bring the object
+closer to complete, or the answer ends open.
+
+### What the capstone measures, and why as ratios
+
+The last stage divides the roofline floor of the steps that your engine ran
+by the time that they took. For each step:
+
+```
+floor = max(weight_bytes / BW,  2 * params * tokens / FLOPS)
+      + context_tokens * kv_bytes_per_token / BW
+```
+
+A throughput number changes from card to card. This ratio does not, because
+the floor changes by the same factor. The reference engine reaches 39% to 59%
+of the roof on a laptop. The gap is where to work next:
+
+- **Prefill steps run eager.** Capture a mixed step, or write a paged prefill
+  kernel, so that a prefill chunk does not gather its whole context first.
+- **About a thousand small kernels in each step.** Fuse RoPE with the Q and K
+  norms, and fuse the residual add with the next norm.
+- **The host syncs one time in each step.** Overlap the host work of step n+1
+  with the GPU work of step n.
+- **Int8 capacity, not only latency.** Stage 24 keeps a bf16 copy of each
+  weight for the large batches. A mixed-precision kernel that is fast at every
+  batch size, like Marlin in vLLM, removes that copy.
+- **Speculation for guided requests.** A JSON request does not speculate now.
+  Check each draft token against the automaton, and it can.
+- **Tensor parallelism in the engine.** Stage 20 shards on one machine with
+  gloo. It needs two GPUs to be real.
+
+---
+
 ## Appendix A: "What if a model fit entirely in cache?"
 
 This is a reasonable question, after you accept that decode waits on memory.
@@ -788,7 +873,7 @@ To put frontier intelligence into that space, you need approximately a 1000x
 gain in intelligence for each parameter. The scaling laws move the other way.
 Capability climbs with the logarithm of the parameter count.
 
-### The catch that doesn't go away
+### The catch that does not go away
 
 Give yourself the magic 25M-parameter genius anyway. **The KV cache does not
 become smaller.** The context length and the layer count set its size. The
@@ -801,7 +886,7 @@ Everything in stages 06 to 09 then becomes **more** important, and not less:
 paging, prefix sharing and eviction. The memory-bound problem does not change
 with scale.
 
-### The industry already made this bet -- in silicon, not models
+### The industry already made this bet, in silicon and not in models
 
 Nobody waited for the models to become smaller. Companies built chips with
 enough SRAM to hold the model:

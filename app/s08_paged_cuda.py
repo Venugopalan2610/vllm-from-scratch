@@ -2,35 +2,34 @@
 
 `./vc lore 8` for the insight. `./vc test 8` to check yourself.
 
-The kernel lives in app/cuda/s08_paged_attn.cu and that is where the stage
-is. This file is the seam between Python and it, and the seam has a job:
-everything the kernel is allowed to ASSUME has to be made true here.
+The kernel is in app/cuda/s08_paged_attn.cu, and the stage is there. This
+file is the connection between Python and the kernel. The connection has one
+job: it must make true everything that the kernel ASSUMES.
 
     contiguous?      a kernel indexes with plain arithmetic, so a transposed
-                     or sliced tensor silently reads the wrong addresses
+                     or sliced tensor reads the wrong addresses, with no error
     dtype?           int32 for the block table and the context lengths
     on the GPU?      .is_cuda, checked in the .cu with TORCH_CHECK
 
-cudalib.build() compiles the .cu on first call and caches it, keyed on the
-source text. Edit the kernel, run the checks, and the rebuild happens for
-you. The first build takes 20-40 seconds; after that it is a dict lookup.
+cudalib.build() compiles the .cu at the first call and keeps the result,
+with the source text as the key. Edit the kernel, run the checks, and the
+build occurs again. The first build takes 20 to 40 seconds. After that it is
+a dict lookup.
 
 Call build() INSIDE the function, never at import time. A kernel that does
-not compile should fail the check that uses it, not stop pytest from
+not compile must fail the check that uses it. It must not stop pytest from
 collecting the stage.
 """
 
 import math
-
-import torch
 
 from cudalib import build
 
 SOURCE = "app/cuda/s08_paged_attn.cu"
 
 
-def _ext():
-    """The compiled extension. Memoized, so calling it per invocation is free."""
+def _extension():
+    """The compiled extension. build() keeps it, so a call costs nothing."""
     return build("s08_paged_attn", SOURCE)
 
 

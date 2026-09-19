@@ -1,7 +1,7 @@
-"""Stage 14 - Incremental detokenization and stop conditions.
+"""Stage 14 - incremental detokenization and stop conditions.
 
-Spec in app/s14_detokenizer.py. The core invariant: streaming must produce
-exactly what batch decoding produces. Always.
+The spec is in app/s14_detokenizer.py. The main invariant: a stream must
+give exactly what a batch decode gives. Always.
 """
 
 import random
@@ -10,6 +10,7 @@ import pytest
 
 from app.s14_detokenizer import IncrementalDetokenizer
 
+REPLACEMENT_CHARACTER = "�"
 CASES = [
     "Hello world, this is a test.",
     "日本語のテキストです",
@@ -24,141 +25,146 @@ CASES = [
 ]
 
 
-def stream(tok, ids, **kw):
-    d = IncrementalDetokenizer(tok, **kw)
-    out = "".join(d.add_token(t) for t in ids)
-    return out + d.finalize(), d
+def token_ids_of(tokenizer, text):
+    return tokenizer(text, add_special_tokens=False).input_ids
+
+
+def stream(tokenizer, token_ids, **options):
+    """-> (all the streamed text, the detokenizer)."""
+    detokenizer = IncrementalDetokenizer(tokenizer, **options)
+    streamed = "".join(detokenizer.add_token(token) for token in token_ids)
+    return streamed + detokenizer.finalize(), detokenizer
 
 
 @pytest.mark.parametrize("text", CASES)
 def test_streaming_equals_batch_decode(hf, text):
-    """The invariant. No exceptions, no 'close enough'."""
-    _, tok = hf
-    ids = tok(text, add_special_tokens=False).input_ids
-    got, _ = stream(tok, ids)
-    want = tok.decode(ids)
-    assert got == want, (
-        f"\ninput:    {text!r}\nstreamed: {got!r}\nbatch:    {want!r}"
-    )
+    """The invariant. No exceptions, no "almost the same"."""
+    _, tokenizer = hf
+    token_ids = token_ids_of(tokenizer, text)
+    streamed, _ = stream(tokenizer, token_ids)
+    expected = tokenizer.decode(token_ids)
+    assert streamed == expected, (
+        f"\ninput:    {text!r}\nstreamed: {streamed!r}\nbatch:    {expected!r}")
 
 
 def test_fuzz_random_token_sequences(hf):
-    """Random token ids find the boundary cases handwritten strings miss."""
-    _, tok = hf
+    """Random token ids find the boundary cases that hand-written strings
+    miss."""
+    _, tokenizer = hf
     rng = random.Random(0)
-    vocab = min(tok.vocab_size, 150000)
+    vocab_size = min(tokenizer.vocab_size, 150000)
     for trial in range(60):
-        ids = [rng.randrange(vocab) for _ in range(rng.randint(1, 25))]
-        got, _ = stream(tok, ids)
-        want = tok.decode(ids)
-        assert got == want, f"trial {trial}, ids={ids}\n got {got!r}\nwant {want!r}"
+        token_ids = [rng.randrange(vocab_size)
+                     for _ in range(rng.randint(1, 25))]
+        streamed, _ = stream(tokenizer, token_ids)
+        expected = tokenizer.decode(token_ids)
+        assert streamed == expected, (
+            f"trial {trial}, ids={token_ids}\n     got {streamed!r}\n"
+            f"expected {expected!r}")
 
 
 def test_naive_per_token_decoding_is_broken(hf):
-    """Demonstrates why this stage exists. Not a test of your code."""
-    _, tok = hf
-    text = "Emoji: 🎉🚀 done"
-    ids = tok(text, add_special_tokens=False).input_ids
-    naive = "".join(tok.decode([t]) for t in ids)
-    correct = tok.decode(ids)
-    got, _ = stream(tok, ids)
+    """Shows why this stage exists. Not a check of your code."""
+    _, tokenizer = hf
+    token_ids = token_ids_of(tokenizer, "Emoji: 🎉🚀 done")
+    one_at_a_time = "".join(tokenizer.decode([token]) for token in token_ids)
+    correct = tokenizer.decode(token_ids)
+    streamed, _ = stream(tokenizer, token_ids)
 
-    print(f"\n  naive per-token: {naive!r}")
-    print(f"  correct:         {correct!r}")
-    print(f"  yours:           {got!r}")
-    assert got == correct
-    if naive != correct:
-        print("\n  \033[2mThe naive version emits U+FFFD for the first half of a")
-        print("  multi-byte codepoint. Users see mojibake that 'repairs itself'")
-        print("  one token later -- a very recognisable streaming bug.\033[0m")
+    print(f"\n  one token at a time: {one_at_a_time!r}")
+    print(f"  correct:             {correct!r}")
+    print(f"  yours:               {streamed!r}")
+    assert streamed == correct
+    if one_at_a_time != correct:
+        print("\n  \033[2mThe simple version emits U+FFFD for the first half of")
+        print("  a multi-byte character. Users see broken characters that are")
+        print("  correct one token later. That is a well-known streaming")
+        print("  bug.\033[0m")
 
 
 def test_no_replacement_characters_are_ever_emitted(hf):
-    """Hold a partial UTF-8 character in the buffer. Never stream it."""
-    _, tok = hf
+    """Keep a partial UTF-8 character in the buffer. Never stream it."""
+    _, tokenizer = hf
     for text in ("🎉🚀🌟", "日本語", "🇯🇵 flag"):
-        ids = tok(text, add_special_tokens=False).input_ids
-        d = IncrementalDetokenizer(tok)
-        for t in ids:
-            chunk = d.add_token(t)
-            assert "�" not in chunk, (
-                f"emitted a replacement char for {text!r} -- an incomplete "
-                "codepoint was flushed instead of buffered"
-            )
+        detokenizer = IncrementalDetokenizer(tokenizer)
+        for token in token_ids_of(tokenizer, text):
+            assert REPLACEMENT_CHARACTER not in detokenizer.add_token(token), (
+                f"emitted a replacement character for {text!r}. A character "
+                "that was not complete went out, and it had to stay in the "
+                "buffer.")
 
 
 # ---- stop strings ---------------------------------------------------
 
 def test_stop_string_truncates_output(hf):
-    _, tok = hf
-    ids = tok("The answer is 42. STOP and more text",
-              add_special_tokens=False).input_ids
-    got, d = stream(tok, ids, stop_strings=["STOP"])
-    assert d.stopped
-    assert d.stop_reason == "STOP"
-    assert "STOP" not in got, "the stop string itself must not be emitted"
-    assert "more text" not in got, "text after the stop string leaked out"
-    assert got.startswith("The answer is 42.")
+    _, tokenizer = hf
+    token_ids = token_ids_of(tokenizer, "The answer is 42. STOP and more text")
+    streamed, detokenizer = stream(tokenizer, token_ids, stop_strings=["STOP"])
+    assert detokenizer.stopped
+    assert detokenizer.stop_reason == "STOP"
+    assert "STOP" not in streamed, "the stop string must not be emitted"
+    assert "more text" not in streamed, "text after the stop string got out"
+    assert streamed.startswith("The answer is 42.")
 
 
 def test_stop_string_spanning_multiple_tokens(hf):
-    """The straddling case: the stop string is not a single token."""
-    _, tok = hf
+    """The crossing case: the stop string is not one token."""
+    _, tokenizer = hf
     stop = "\n\nHuman:"
-    full = "Some reply here." + stop + " next turn"
-    ids = tok(full, add_special_tokens=False).input_ids
-    assert len(tok(stop, add_special_tokens=False).input_ids) > 1, \
-        "test assumes the stop string is multi-token"
+    assert len(token_ids_of(tokenizer, stop)) > 1, (
+        "this check needs a stop string of several tokens")
+    token_ids = token_ids_of(tokenizer, "Some reply here." + stop + " next turn")
 
-    got, d = stream(tok, ids, stop_strings=[stop])
-    assert d.stopped, "failed to detect a stop string that spans tokens"
-    assert stop not in got
-    assert "next turn" not in got
+    streamed, detokenizer = stream(tokenizer, token_ids, stop_strings=[stop])
+    assert detokenizer.stopped, (
+        "did not find a stop string that crosses tokens")
+    assert stop not in streamed
+    assert "next turn" not in streamed
 
 
 def test_partial_stop_string_is_never_emitted_early(hf):
-    """You cannot un-send an SSE frame.
+    """You cannot take back an SSE frame.
 
-    While "STO" might still become "STOP", it must be held back.
+    While "STO" can still become "STOP", keep it back.
     """
-    _, tok = hf
-    ids = tok("Wait for it: STOP now", add_special_tokens=False).input_ids
-    d = IncrementalDetokenizer(tok, stop_strings=["STOP"])
+    _, tokenizer = hf
+    detokenizer = IncrementalDetokenizer(tokenizer, stop_strings=["STOP"])
     emitted = ""
-    for t in ids:
-        emitted += d.add_token(t)
+    for token in token_ids_of(tokenizer, "Wait for it: STOP now"):
+        emitted += detokenizer.add_token(token)
         assert "STOP" not in emitted
-        if d.stopped:
+        if detokenizer.stopped:
             break
-    assert d.stopped
+    assert detokenizer.stopped
 
 
 def test_no_stop_string_means_nothing_is_held_back(hf):
-    _, tok = hf
-    ids = tok("plain text with no stops", add_special_tokens=False).input_ids
-    got, d = stream(tok, ids)
-    assert not d.stopped
-    assert got == tok.decode(ids)
+    _, tokenizer = hf
+    token_ids = token_ids_of(tokenizer, "plain text with no stops")
+    streamed, detokenizer = stream(tokenizer, token_ids)
+    assert not detokenizer.stopped
+    assert streamed == tokenizer.decode(token_ids)
 
 
 def test_multiple_stop_strings(hf):
-    _, tok = hf
-    ids = tok("alpha beta END gamma", add_special_tokens=False).input_ids
-    got, d = stream(tok, ids, stop_strings=["FINISH", "END", "DONE"])
-    assert d.stopped and d.stop_reason == "END"
-    assert "gamma" not in got
+    _, tokenizer = hf
+    token_ids = token_ids_of(tokenizer, "alpha beta END gamma")
+    streamed, detokenizer = stream(tokenizer, token_ids,
+                                   stop_strings=["FINISH", "END", "DONE"])
+    assert detokenizer.stopped and detokenizer.stop_reason == "END"
+    assert "gamma" not in streamed
 
 
 def test_finalize_flushes_the_held_back_tail(hf):
-    """Text held back for stop-string safety must still arrive at the end."""
-    _, tok = hf
-    text = "the end of this is held back"
-    ids = tok(text, add_special_tokens=False).input_ids
-    d = IncrementalDetokenizer(tok, stop_strings=["NEVER_APPEARS"])
-    during = "".join(d.add_token(t) for t in ids)
-    tail = d.finalize()
-    assert during + tail == tok.decode(ids), (
-        "finalize() must flush the safety buffer, or every response is "
-        "silently truncated by a few characters"
-    )
-    assert tail != "", "expected some text to have been held back"
+    """The text kept back for stop-string safety must still arrive at the
+    end."""
+    _, tokenizer = hf
+    token_ids = token_ids_of(tokenizer, "the end of this is held back")
+    detokenizer = IncrementalDetokenizer(tokenizer,
+                                         stop_strings=["NEVER_APPEARS"])
+    during = "".join(detokenizer.add_token(token) for token in token_ids)
+    tail = detokenizer.finalize()
+    assert during + tail == tokenizer.decode(token_ids), (
+        "finalize() must emit the safety buffer. If not, every response "
+        "loses a few characters at the end, with no error.")
+    assert tail != "", "expected some text in the buffer at the end"

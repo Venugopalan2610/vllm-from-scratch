@@ -2,90 +2,95 @@
 
 `./vc lore 18` for the insight. `./vc test 18` to check yourself.
 
-Decode reads every weight to produce every token (stage 01's fact), so decode
-time is proportional to WEIGHT BYTES. Halve the bytes, nearly halve the time.
-That is the entire argument, and it is why quantization is a serving technique
-and not just a memory trick.
+Decode reads every weight to make every token (the fact of stage 01), so
+the decode time is proportional to the WEIGHT BYTES. Make the bytes half as
+many, and the time is almost half. That is the whole argument. It is why
+quantization is a serving method, not only a memory method.
 
-Weight-only, per-output-channel, symmetric INT8:
+Weight-only, symmetric int8, with one scale for each output channel:
 
-    scale_i = max(|W[i, :]|) / 127          one scale per output row
+    scale_i = max(|W[i, :]|) / 127          one scale for each output row
     q[i, :] = round(W[i, :] / scale_i)
 
-Per-CHANNEL rather than per-tensor matters: one outlier row would otherwise
-crush the resolution of every other row.
+One scale for each CHANNEL, not for the tensor, is important: if not, one
+row with outliers destroys the resolution of every other row.
 
 The activations stay in bf16. Only the weights become small, and the kernel
-dequantizes them in its epilogue. That is what "weight-only" means.
+dequantizes them after the dot product. That is the meaning of
+"weight-only".
 
-It is also why the accuracy stays good. An activation outlier is what breaks
-naive quantization, and this method never quantizes an activation.
+It is also why the accuracy stays good. Activation outliers break simple
+quantization, and this method never quantizes an activation.
 
-Then do the same to the KV cache, which is the other big reader.
+Then do the same to the KV cache, which is the other large reader.
 """
 
 import torch
 import torch.nn as nn
 
 
-def quantize_int8_per_channel(W):
-    """W (out, in) -> (int8 tensor, float32 scales (out,)).
+def quantize_int8_per_channel(weight):
+    """weight (out, in) -> (int8 weight, float32 scales (out,)).
 
-    Clamp the scale away from zero, or an all-zero row gives you inf.
+    Clamp the scale above zero. If not, a row of zeros gives inf.
     """
     raise NotImplementedError("stage 18: implement quantize_int8_per_channel")
 
 
-def dequantize_int8(q, scales):
-    """q.float() * scales[:, None]"""
+def dequantize_int8(int8_weight, scales):
+    """int8_weight.float() * scales[:, None]"""
     raise NotImplementedError("stage 18: implement dequantize_int8")
 
 
 class QuantizedLinear(nn.Module):
-    """Drop-in nn.Linear replacement holding INT8 weights.
+    """An nn.Linear with int8 weights. It replaces nn.Linear with no other
+    change. Keep the weight in a buffer named int8_weight.
 
     Required:
         from_linear(nn.Linear) -> QuantizedLinear     classmethod
-        forward(x)                                    matches the original
+        forward(inputs)                               matches the original
         nbytes() -> int                               storage cost
     """
 
     @classmethod
-    def from_linear(cls, lin):
+    def from_linear(cls, linear):
         raise NotImplementedError("stage 18: implement QuantizedLinear.from_linear")
 
 
-def quantize_fp8(t):
-    """Per-tensor FP8 (e4m3): returns (float8_e4m3fn tensor, float scale).
+def quantize_fp8(tensor):
+    """FP8 (e4m3) with one scale for the tensor. -> (float8_e4m3fn tensor,
+    float scale).
 
-    Your GPU is sm_89, so torch.float8_e4m3fn is native. The max representable
+    Ada and newer GPUs have torch.float8_e4m3fn in hardware. The largest
     magnitude is 448, so scale = amax / 448.
 
-    Unlike INT8, FP8 keeps an exponent, so it handles the wide dynamic range of
-    KV cache entries much better than an integer format at the same width.
+    FP8 keeps an exponent, and int8 does not. So at the same width, FP8 holds
+    the wide range of KV cache values much better than an integer format.
     """
     raise NotImplementedError("stage 18: implement quantize_fp8")
 
 
-def dequantize_fp8(q, scale, dtype=torch.bfloat16):
+def dequantize_fp8(fp8_tensor, scale, dtype=torch.bfloat16):
     raise NotImplementedError("stage 18: implement dequantize_fp8")
 
 
 def quantize_model_(model, skip=("lm_head",)):
-    """Replace every nn.Linear with a QuantizedLinear, in place. Return the count.
+    """Replace each nn.Linear with a QuantizedLinear, in place. Return the
+    number replaced.
 
-    Skip lm_head: it is huge, it feeds directly into the sampler, and
-    quantizing it costs more accuracy than it saves bytes.
+    Skip lm_head: it is large, its output goes directly to the sampler, and
+    its quantization costs more accuracy than the bytes it saves.
     """
     raise NotImplementedError("stage 18: implement quantize_model_")
 
 
 @torch.inference_mode()
 def perplexity(model, tokenizer, text, max_len=512):
-    """exp(mean cross-entropy of next-token prediction).
+    """exp(the mean cross-entropy of the next-token prediction).
 
-    Your accuracy guard. Compute logits, shift by one, cross-entropy against
-    the true next tokens, exponentiate. Any quantization scheme must move this
-    number only slightly, or you have traded correctness for speed.
+    This number guards the accuracy. Compute the logits, shift them by one,
+    get the cross-entropy against the true next tokens, and take the exp. A
+    quantization must change this number only a little. If not, you gave
+    correctness for speed.
     """
     raise NotImplementedError("stage 18: implement perplexity")

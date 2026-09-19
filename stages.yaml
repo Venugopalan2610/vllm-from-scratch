@@ -56,7 +56,7 @@ arcs:
           reads every weight from HBM to make one token. The two want opposite
           optimizations. This is THE fact behind every later design decision.
         deliver: "A microbenchmark separating prefill ms/token from decode ms/token."
-        measure: "Achieved GB/s during decode vs your GPU's peak. You'll be near peak."
+        measure: "Achieved GB/s during decode vs your GPU's peak. You get near the peak."
         jax_file: "app/j03_roofline.py"
         jax_insight: >
           The same roofline, with one new trap. JAX dispatch is ASYNCHRONOUS.
@@ -220,7 +220,7 @@ arcs:
           across REQUESTS. One prefill of a shared system prompt then serves
           everybody. This is why APC looks like cheating.
         deliver: "Refcounted blocks, CoW on write, content-hash prefix cache with LRU eviction."
-        measure: "TTFT for a 2000-token shared system prompt, cold vs warm."
+        measure: "Blocks shared and prefill work saved for a shared system prompt. Stage 22 measures it on a real model."
 
   - id: A3
     name: "The Scheduler"
@@ -322,8 +322,8 @@ arcs:
           futures and queues. Real vLLM V1 goes further and uses a separate
           EngineCore process, so that Python overhead on the API side cannot
           stall the GPU.
-        deliver: "/v1/chat/completions with SSE streaming, cancellation, backpressure."
-        measure: "TTFT under concurrent load. Verify that a client disconnect frees the KV blocks."
+        deliver: "/v1/completions with SSE streaming and cancellation, around an engine that you inject."
+        measure: "Streams interleave, and a disconnect calls abort. Stage 27 connects the real engine."
 
       - id: "16-observability"
         file: "app/s16_metrics.py"
@@ -409,8 +409,8 @@ arcs:
         difficulty: 5
         insight: >
           Shard the attention heads and the MLP columns across the ranks, with
-          one all-reduce for each layer. You have one GPU, so run 2 ranks on it
-          with NCCL, and make the collectives and the sharding logic correct.
+          one all-reduce for each layer. You have one GPU, so run 2 gloo ranks
+          on the CPU, and make the collectives and the sharding logic correct.
           The lesson is where the communication lands. It is not the speedup.
         deliver: "Column/row-parallel Linear, 2-rank sharded model, output matches 1-rank."
         measure: "Correctness first. Then all-reduce bytes per token per layer."
@@ -421,3 +421,135 @@ arcs:
           ranks. You write column-parallel, then row-parallel, with exactly one
           psum between blocks. It is a mesh and two PartitionSpecs.
         jax_deliver: "shard_map MLP and attention over a multi-device CPU mesh, one psum per block."
+
+  - id: A7
+    name: "The Capstone: One Engine"
+    blurb: "Every part you built, in one server, measured against the roof."
+    stages:
+      - id: "21-paged-model"
+        tracks: ["torch"]
+        file: "app/s21_paged_runner.py"
+        name: "The model runs on your paged cache"
+        difficulty: 4
+        insight: >
+          Stages 06 to 08c passed their checks on random tensors, and none of
+          them ran inside a model. The HF model cannot host them, because its
+          cache grows by concatenation. tvllm/model.py takes a flat batch and
+          calls your attention backend. Your backend writes K and V with your
+          stage 08 kernel and reads them with your stage 08c kernel. Put the
+          decodes first, so that one launch serves them all.
+        deliver: "A ModelRunner that runs a mixed batch of decodes and prefill chunks on the paged cache."
+        measure: "Tokens identical to HF in fp32, for ragged batches, shuffled blocks and chunked prefill."
+
+      - id: "22-engine"
+        tracks: ["torch"]
+        file: "app/s22_engine.py"
+        name: "One engine from the parts"
+        difficulty: 5
+        insight: >
+          Stages 10 and 11 were two schedulers in a simulation. Here they
+          become one rule. Each sequence has pending tokens: one for a decode,
+          many for a prefill, all of them after a preemption. Each step gives
+          pending tokens to sequences until the budget runs out. The prefix
+          cache, the sampler and the detokenizer attach to that loop.
+        deliver: "An LLMEngine with a token budget, preemption by recompute, prefix caching, sampling and stop strings."
+        measure: "Tokens identical to HF under preemption and with the prefix cache. No leaked block."
+
+      - id: "23-graphs"
+        tracks: ["torch"]
+        file: "app/s23_graphs.py"
+        name: "The real decode step, captured"
+        difficulty: 4
+        insight: >
+          The eager step at batch 1 costs about two times the weight-read
+          time, because it is about a thousand small kernels. Capture the
+          decode step for each bucket. A padding row must write to slot -1,
+          because a zero slot writes into block 0, and block 0 belongs to a
+          real sequence.
+        deliver: "A GraphedModelRunner that replays a captured decode step and runs everything else eager."
+        measure: "At least 1.2x over eager at batch 1, and at least 50% of the weight-read floor."
+
+      - id: "24-quantized"
+        tracks: ["torch"]
+        file: "app/s24_quantized.py"
+        name: "Quantized weights in the engine"
+        difficulty: 3
+        insight: >
+          Your stage 18b GEMV reads half the bytes of bf16, and it wins at a
+          few rows. Above a crossover, cuBLAS in bf16 wins, because the rows
+          share the weight read. So each matmul dispatches on its row count.
+          Measure the crossover in the real graphed step, not on one matrix:
+          one matrix of a small model fits in L2, and the result is wrong.
+        deliver: "Int8 weights in every matmul, with a dispatch to bf16 above a measured crossover."
+        measure: "At least 1.3x at batch 1, no loss at batch 32, perplexity within 3%."
+
+      - id: "24b-fp8-kv-cache"
+        tracks: ["torch"]
+        file: "app/s24b_kv_fp8.py"
+        files: ["app/cuda/s24b_kv_fp8.cu", "app/s24b_kv_fp8.py"]
+        name: "The KV cache in FP8"
+        difficulty: 5
+        insight: >
+          At long context the KV cache, not the weights, is most of the bytes
+          of a step. Store it in FP8. Your stage 08c kernel reads it with
+          16-byte loads, converts two values with one instruction, and folds
+          the key scale into the query and the value scale into the output.
+          Half the bytes to read, and twice the tokens in the pool.
+        deliver: "FP8 write and attention kernels, calibrated scales, and an FP8 runner."
+        measure: "At least 1.2x at 16 x 2048 tokens, perplexity through the decode kernel within 3%."
+
+      - id: "25-speculative"
+        tracks: ["torch"]
+        file: "app/s25_speculative.py"
+        name: "Speculative decoding inside the engine"
+        difficulty: 4
+        insight: >
+          A verify of K draft tokens is K+1 decode rows that share one block
+          table. Each row sees its own context, so the verify is causal, runs
+          on your stage 08c kernel, and replays a captured graph. Greedy
+          accepts while the draft matches the argmax. Sampling uses the
+          stage 17 rule with a one-hot draft, so the output does not move.
+        deliver: "A SpeculativeEngine with n-gram drafts and an exact verify."
+        measure: "Greedy output identical in fp32, the target distribution kept, at least 1.5x on a copy task."
+
+      - id: "26-guided"
+        tracks: ["torch"]
+        file: "app/s26_guided.py"
+        name: "Guided JSON decoding inside the engine"
+        difficulty: 5
+        insight: >
+          Stage 19 validated the whole text again for every token, and its
+          cache never hit. A real engine walks a character automaton, and it
+          caches the masks by automaton state: a whole JSON answer needs a
+          few dozen states. Near max_tokens, admit only the tokens that bring
+          the object closer to complete, or the answer ends open.
+        deliver: "A JSON automaton, masks cached by state, a forced close, and a GuidedEngine."
+        measure: "Every answer parses. The automaton agrees with json. A second round builds almost no mask."
+
+      - id: "27-serve"
+        tracks: ["torch"]
+        file: "app/s27_serve.py"
+        name: "The server, for real"
+        difficulty: 4
+        insight: >
+          A real step holds the GPU for 5 to 50 ms, and the stage 15 loop runs
+          it inside the event loop. Run step() in a worker thread, and send
+          add_request and abort to it through a deque. Then speak the API that
+          clients send: chat, sampling fields, stop strings, streaming, JSON
+          mode, usage and the real finish_reason.
+        deliver: "/v1/completions and /v1/chat/completions on your full engine, with /metrics."
+        measure: "Chat, JSON mode, streaming and stop strings work. A disconnect frees real blocks. The event loop stays free."
+
+      - id: "28-benchmark"
+        tracks: ["torch"]
+        file: "app/s28_bench.py"
+        name: "Against the roof"
+        difficulty: 3
+        insight: >
+          A throughput number alone says nothing, because it changes from card
+          to card. The floor of a step also changes, by the same factor. So
+          divide: the floor of the steps that your engine ran, divided by the
+          time that they took. That ratio travels between cards, and it tells
+          you what remains to win.
+        deliver: "A benchmark that measures the engine against the roofline floor of its own steps."
+        measure: "At least 30% of the floor, and at least 2x your stage 05 engine on the same requests."

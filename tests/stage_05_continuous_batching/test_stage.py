@@ -1,197 +1,190 @@
-"""Stage 05 - Continuous batching (iteration-level scheduling).
+"""Stage 05 - continuous batching (scheduling at each iteration).
 
-The spec is in app/s05_continuous.py. Summary:
+The spec is in app/s05_continuous.py. In short:
 
     ContinuousEngine(model, tokenizer, max_batch_size)
         .waiting  .running  .max_batch_size  .steps
         .add_request(rid, prompt, max_tokens)
         .has_work() -> bool
-        .step()     -> list[Request]   # finished THIS step
+        .step()     -> list[Request]   # the requests that finished in THIS step
         .run_to_completion() -> {rid: output_ids}
 
     run_all(model, tokenizer, jobs, max_batch_size) -> {rid: output_ids}
         jobs = [(rid, prompt, max_tokens), ...]
 
-The rule that defines this stage: a finished sequence leaves the batch on the
-step it finishes, and a waiting one takes its slot immediately.
+The rule of this stage: a finished sequence leaves the batch in the step
+where it finishes. A waiting sequence then takes its row at once.
 """
-
-import time
-
-import pytest
-import torch
 
 from app.s02_cache import cached_generate
 from app.s04_static_batch import static_batch_generate
 from app.s05_continuous import ContinuousEngine, run_all
+from tests.helpers import elapsed_ms
 
-P = "The history of computing began"
+PROMPT = "The history of computing began"
 
 
-def test_matches_sequential_at_every_batch_size(hf_exact, prompts, dev):
-    """Correctness first, and specifically at max_batch_size=1 and 2.
+def _engine_with(model, tokenizer, max_batch_size, max_tokens_list):
+    engine = ContinuousEngine(model, tokenizer, max_batch_size=max_batch_size)
+    for rid, max_tokens in enumerate(max_tokens_list):
+        engine.add_request(rid, PROMPT, max_tokens)
+    return engine
 
-    Those force requests to be admitted mid-flight, into a batch that is
-    already running -- which is where the cache-splicing bugs live.
+
+def _static_forward_passes(output_lens, batch_size):
+    """The passes of a static batch: each chunk pays for its longest row."""
+    return sum(max(output_lens[start:start + batch_size])
+               for start in range(0, len(output_lens), batch_size))
+
+
+def test_matches_sequential_at_every_batch_size(hf_exact, prompts, device):
+    """Correctness first, and at max_batch_size=1 and 2.
+
+    Those sizes force the admission of requests into a batch that already
+    runs. The bugs of the cache join are there.
     """
-    model, tok = hf_exact
-    want = {i: cached_generate(model, tok, p, max_tokens=15)
-            for i, p in enumerate(prompts)}
-    jobs = [(i, p, 15) for i, p in enumerate(prompts)]
+    model, tokenizer = hf_exact
+    expected = {rid: cached_generate(model, tokenizer, prompt, max_tokens=15)
+                for rid, prompt in enumerate(prompts)}
+    jobs = [(rid, prompt, 15) for rid, prompt in enumerate(prompts)]
 
-    for bs in (1, 2, 4):
-        got = run_all(model, tok, jobs, max_batch_size=bs)
-        for i, p in enumerate(prompts):
-            assert got[i] == want[i], (
-                f"\nmax_batch_size={bs}, prompt {p!r}\n"
-                f"sequential: {tok.decode(want[i])!r}\n"
-                f"engine:     {tok.decode(got[i])!r}\n"
-                "Mid-flight admission corrupts the batch when the mask is "
-                "extended after the forward instead of before."
-            )
-
-
-def test_max_tokens_is_respected_per_request(hf_exact, dev):
-    """Each request carries its OWN budget. That is what makes the batch ragged."""
-    model, tok = hf_exact
-    jobs = [(0, P, 3), (1, P, 7), (2, P, 11)]
-    got = run_all(model, tok, jobs, max_batch_size=4)
-    assert len(got[0]) == 3
-    assert len(got[1]) == 7
-    assert len(got[2]) == 11
-    # and they must be prefixes of one another, since the prompt is identical
-    assert got[1][:3] == got[0]
-    assert got[2][:7] == got[1]
+    for max_batch_size in (1, 2, 4):
+        generated = run_all(model, tokenizer, jobs,
+                            max_batch_size=max_batch_size)
+        for rid, prompt in enumerate(prompts):
+            assert generated[rid] == expected[rid], (
+                f"\nmax_batch_size={max_batch_size}, prompt {prompt!r}\n"
+                f"sequential: {tokenizer.decode(expected[rid])!r}\n"
+                f"engine:     {tokenizer.decode(generated[rid])!r}\n"
+                "An admission into a running batch corrupts it when the mask "
+                "gets its column after the forward pass, not before.")
 
 
-def test_step_returns_finished_and_evicts_them(hf, dev):
-    """A finished request must leave .running on the step it finishes."""
-    model, tok = hf
-    eng = ContinuousEngine(model, tok, max_batch_size=4)
-    for i, n in enumerate((2, 5, 9)):
-        eng.add_request(i, P, n)
-
-    seen = set()
-    while eng.has_work():
-        finished = eng.step()
-        for r in finished:
-            assert r.finished, f"request {r.id} returned but .finished is False"
-            assert r not in eng.running, (
-                f"request {r.id} finished but is still in .running -- "
-                "evict before the next forward, that is the whole stage"
-            )
-            seen.add(r.id)
-    assert seen == {0, 1, 2}
+def test_max_tokens_is_respected_per_request(hf_exact, device):
+    """Each request has its OWN budget. That makes the batch ragged."""
+    model, tokenizer = hf_exact
+    generated = run_all(model, tokenizer, [(0, PROMPT, 3), (1, PROMPT, 7),
+                                           (2, PROMPT, 11)], max_batch_size=4)
+    assert [len(generated[rid]) for rid in range(3)] == [3, 7, 11]
+    # The prompt is the same, so each output is a prefix of the next.
+    assert generated[1][:3] == generated[0]
+    assert generated[2][:7] == generated[1]
 
 
-def test_never_exceeds_max_batch_size(hf, dev):
-    model, tok = hf
-    eng = ContinuousEngine(model, tok, max_batch_size=2)
-    for i in range(6):
-        eng.add_request(i, P, 4)
-    while eng.has_work():
-        eng.step()
-        assert len(eng.running) <= 2, f"batch grew to {len(eng.running)}, cap is 2"
+def test_step_returns_finished_and_evicts_them(hf, device):
+    """A finished request must leave .running in the step where it
+    finishes."""
+    model, tokenizer = hf
+    engine = _engine_with(model, tokenizer, 4, (2, 5, 9))
+    finished_ids = set()
+    while engine.has_work():
+        for request in engine.step():
+            assert request.finished, (
+                f"request {request.id} was returned but .finished is False")
+            assert request not in engine.running, (
+                f"request {request.id} finished but is still in .running. "
+                "Evict before the next forward pass. That is the stage.")
+            finished_ids.add(request.id)
+    assert finished_ids == {0, 1, 2}
 
 
-def test_waiting_requests_backfill_freed_slots(hf, dev):
-    """The point of the whole stage, counted in forward passes.
+def test_never_exceeds_max_batch_size(hf, device):
+    model, tokenizer = hf
+    engine = _engine_with(model, tokenizer, 2, [4] * 6)
+    while engine.has_work():
+        engine.step()
+        assert len(engine.running) <= 2, (
+            f"the batch grew to {len(engine.running)}, the limit is 2")
 
-    `.steps` must count FORWARD PASSES, not loop iterations -- an iteration that
-    only harvests and evicts does no GPU work and must not be counted.
 
-    Workload: three long requests interleaved with short ones. Static batching
-    processes them in fixed chunks of 4, so every chunk pays for its longest
-    member. Continuous batching streams the short ones through the slots the
-    finished ones vacate.
+def test_waiting_requests_backfill_freed_slots(hf, device):
+    """The point of the stage, counted in forward passes.
+
+    `.steps` must count FORWARD PASSES, not loop iterations. An iteration
+    that only records and evicts does no GPU work, and it must not count.
+
+    The load: three long requests between short ones. A static batch does
+    them in fixed chunks of 4, so every chunk pays for its longest row.
+    Continuous batching moves the short ones through the rows that the
+    finished ones free.
     """
-    model, tok = hf
-    lens = [30, 4, 4, 4, 30, 4, 4, 4, 30, 4, 4, 4]
-    BS = 4
+    model, tokenizer = hf
+    output_lens = [30, 4, 4, 4, 30, 4, 4, 4, 30, 4, 4, 4]
+    batch_size = 4
+    engine = _engine_with(model, tokenizer, batch_size, output_lens)
+    while engine.has_work():
+        engine.step()
 
-    eng = ContinuousEngine(model, tok, max_batch_size=BS)
-    for i, n in enumerate(lens):
-        eng.add_request(i, P, n)
-    while eng.has_work():
-        eng.step()
-
-    no_backfill = sum(max(lens[i:i + BS]) for i in range(0, len(lens), BS))
-    lower_bound = max(max(lens), -(-sum(lens) // BS))
-
-    print(f"\n  output lengths: {lens}   (batch size {BS})")
-    print(f"  {sum(lens)} tokens total")
+    static_passes = _static_forward_passes(output_lens, batch_size)
+    lower_bound = max(max(output_lens), -(-sum(output_lens) // batch_size))
+    print(f"\n  output lengths: {output_lens}   (batch size {batch_size})")
+    print(f"  {sum(output_lens)} tokens in total")
     print(f"\n  lower bound (perfect packing): {lower_bound:>3} forward passes")
-    print(f"  static, no backfill:           {no_backfill:>3} forward passes")
-    print(f"  \033[1myour engine:                   {eng.steps:>3} forward passes\033[0m")
-    print(f"\n  \033[1m{no_backfill / eng.steps:.2f}x fewer passes than static\033[0m")
+    print(f"  static, no backfill:           {static_passes:>3} forward passes")
+    print(f"  \033[1myour engine:                   {engine.steps:>3} forward "
+          "passes\033[0m")
+    print(f"\n  \033[1m{static_passes / engine.steps:.2f}x fewer passes than "
+          "static\033[0m")
+    assert engine.steps < static_passes * 0.6, (
+        f"{engine.steps} forward passes against {static_passes} for static "
+        "batching. The freed rows do not get requests from .waiting.")
+    assert engine.steps >= lower_bound, (
+        f"{engine.steps} passes is below the lower bound of {lower_bound}. "
+        "One sequence can emit only one token in each forward pass, so your "
+        "count has a bug.")
 
-    assert eng.steps < no_backfill * 0.6, (
-        f"{eng.steps} forward passes vs {no_backfill} for static batching -- "
-        "freed slots are not being backfilled from .waiting"
-    )
-    assert eng.steps >= lower_bound, (
-        f"{eng.steps} passes is below the {lower_bound} lower bound; a single "
-        "sequence can only emit one token per forward pass, so this is a bug "
-        "in your accounting"
-    )
 
-
-def test_requests_can_arrive_after_the_engine_is_running(hf_exact, dev):
-    """Real servers get requests while mid-generation. Correctness must hold."""
-    model, tok = hf_exact
-    eng = ContinuousEngine(model, tok, max_batch_size=4)
-    eng.add_request(0, "The capital of France is", 15)
-
+def test_requests_can_arrive_after_the_engine_is_running(hf_exact, device):
+    """A real server gets requests during a generation. Correctness must
+    stay."""
+    model, tokenizer = hf_exact
+    engine = ContinuousEngine(model, tokenizer, max_batch_size=4)
+    engine.add_request(0, "The capital of France is", 15)
     for _ in range(5):
-        eng.step()
+        engine.step()
+    engine.add_request(1, "In 1969, humans first", 15)   # joins a running batch
 
-    eng.add_request(1, "In 1969, humans first", 15)  # joins mid-flight
+    outputs = {}
+    while engine.has_work():
+        for request in engine.step():
+            outputs[request.id] = request.output_ids
 
-    out = {}
-    while eng.has_work():
-        for r in eng.step():
-            out[r.id] = r.output_ids
-
-    assert out[0] == cached_generate(model, tok, "The capital of France is", 15)
-    assert out[1] == cached_generate(model, tok, "In 1969, humans first", 15), (
-        "a request admitted into an already-running batch produced the wrong "
-        "tokens -- check its position_ids and its row of the attention mask"
-    )
+    assert outputs[0] == cached_generate(model, tokenizer,
+                                         "The capital of France is", 15)
+    assert outputs[1] == cached_generate(model, tokenizer,
+                                         "In 1969, humans first", 15), (
+        "a request that joined a running batch made the wrong tokens. Look "
+        "at its position_ids and at its row of the attention mask.")
 
 
-def test_beats_static_batching_on_skewed_output_lengths(hf, dev):
-    """The payoff. Real traffic has wildly uneven output lengths."""
-    model, tok = hf
-    lens = [4, 6, 5, 80, 4, 7, 5, 6, 90, 4, 5, 6]
-    BS = 4
+def test_beats_static_batching_on_skewed_output_lengths(hf, device):
+    """The result. Real traffic has very uneven output lengths."""
+    model, tokenizer = hf
+    output_lens = [4, 6, 5, 80, 4, 7, 5, 6, 90, 4, 5, 6]
+    batch_size = 4
+    static_batch_generate(model, tokenizer, ["warm"], 2)
 
-    static_batch_generate(model, tok, ["warm"], 2)
+    def run_static():
+        for start in range(0, len(output_lens), batch_size):
+            chunk = output_lens[start:start + batch_size]
+            static_batch_generate(model, tokenizer, [PROMPT] * len(chunk),
+                                  max_tokens=max(chunk))
 
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for i in range(0, len(lens), BS):
-        chunk = lens[i:i + BS]
-        static_batch_generate(model, tok, [P] * len(chunk), max_tokens=max(chunk))
-    torch.cuda.synchronize()
-    static_ms = (time.perf_counter() - t0) * 1000
+    _, static_ms = elapsed_ms(run_static)
+    _, continuous_ms = elapsed_ms(lambda: run_all(
+        model, tokenizer,
+        [(rid, PROMPT, max_tokens) for rid, max_tokens in enumerate(output_lens)],
+        max_batch_size=batch_size))
 
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    run_all(model, tok, [(i, P, n) for i, n in enumerate(lens)], max_batch_size=BS)
-    torch.cuda.synchronize()
-    cont_ms = (time.perf_counter() - t0) * 1000
-
-    static_steps = sum(max(lens[i:i + BS]) for i in range(0, len(lens), BS))
-    print(f"\n  output lengths: {lens}")
-    print(f"  static  (chunks of {BS}): {static_ms:7.0f} ms   "
-          f"~{static_steps} forward passes")
-    print(f"  continuous:               {cont_ms:7.0f} ms   "
-          f"~{max(lens)}+ forward passes")
-    print(f"\n  \033[1mSpeedup: {static_ms / cont_ms:.2f}x\033[0m")
-
-    assert cont_ms < static_ms / 1.2, (
-        f"expected a clear win; got {static_ms / cont_ms:.2f}x"
-    )
-    print("\n  \033[2mThe theoretical ceiling here is ~2x. You will not reach it,")
-    print("  because every admission re-pads and re-copies the whole batch's KV")
-    print("  cache. That copying is what stages 06-09 replace with a pointer.\033[0m")
+    print(f"\n  output lengths: {output_lens}")
+    print(f"  static  (chunks of {batch_size}): {static_ms:7.0f} ms   about "
+          f"{_static_forward_passes(output_lens, batch_size)} forward passes")
+    print(f"  continuous:               {continuous_ms:7.0f} ms   about "
+          f"{max(output_lens)}+ forward passes")
+    print(f"\n  \033[1mSpeedup: {static_ms / continuous_ms:.2f}x\033[0m")
+    assert continuous_ms < static_ms / 1.2, (
+        f"expected a clear gain. Got {static_ms / continuous_ms:.2f}x.")
+    print("\n  \033[2mThe theoretical limit here is about 2x. You do not get")
+    print("  it, because each admission pads and copies the KV cache of the")
+    print("  whole batch again. Stages 06 to 09 replace that copy with a")
+    print("  pointer.\033[0m")

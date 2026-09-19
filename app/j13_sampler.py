@@ -6,7 +6,7 @@ Each request has its own temperature, top-k, top-p, penalties and seed. ONE
 vectorized pass over the batch must apply all of them. When the kernels become
 fast, a naive Python loop over the requests quietly becomes your bottleneck.
 
-WHAT YOU'RE BUILDING
+WHAT YOU ARE BUILDING
 
     @dataclass SamplingParams(temperature=1.0, top_k=0, top_p=1.0,
                               repetition_penalty=1.0, seed=None)

@@ -1,64 +1,78 @@
 """./vc cliff
 
-Measure the L2-vs-VRAM bandwidth cliff on this GPU, and what it would mean if a
-model were small enough to live in cache. Backs Appendix A of LORE.md.
+Measure the bandwidth cliff between L2 and VRAM on this GPU. Then show what
+it means if a model is small enough to stay in the cache. Appendix A of
+LORE.md uses it.
 """
 
-import torch
+import sys
+from pathlib import Path
 
-B = "\033[1m"
-D = "\033[2m"
-Y = "\033[33m"
-X = "\033[0m"
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-p = torch.cuda.get_device_properties(0)
-l2_mb = getattr(p, "L2_cache_size", 0) / 1e6
+import torch  # noqa: E402
 
+import cudalib  # noqa: E402
+from runner.style import paint  # noqa: E402
 
-def bw(mb, iters=200):
-    # half the working set is source, half is destination
-    n = mb * 1024 * 1024 // 2 // 2
-    a = torch.empty(n, dtype=torch.bfloat16, device="cuda")
-    b = torch.empty_like(a)
-    for _ in range(50):
-        b.copy_(a)
-    torch.cuda.synchronize()
-    s, e = torch.cuda.Event(True), torch.cuda.Event(True)
-    s.record()
-    for _ in range(iters):
-        b.copy_(a)
-    e.record()
-    torch.cuda.synchronize()
-    return (2 * a.numel() * 2) / (s.elapsed_time(e) / iters * 1e-3) / 1e9
+WORKING_SETS_MB = (8, 16, 32, 64, 256, 1024)
+# (format, bytes for each parameter)
+FORMATS = [("bf16", 2), ("int8", 1), ("int4", 0.5), ("1.58-bit", 0.21)]
 
 
-print(f"\n{B}L2 cache on this GPU: {l2_mb:.0f} MB{X}\n")
-print(f"  {'working set':>12}   {'bandwidth':>12}")
+def measure_working_sets(l2_mb):
+    """-> {working set MB: GB/s}, printed as it goes."""
+    print(f"  {'working set':>12}   {'bandwidth':>12}")
+    bandwidths = {}
+    for working_set_mb in WORKING_SETS_MB:
+        gbs = cudalib.copy_bandwidth(working_set_mb, iters=200, warmup=50)
+        bandwidths[working_set_mb] = gbs
+        where = (paint("fits in L2", "dim") if working_set_mb < l2_mb
+                 else paint("spills to VRAM", "yellow"))
+        print(f"  {working_set_mb:>9} MB   {gbs:>8,.0f} GB/s   {where}")
+    return bandwidths
 
-results = {}
-for mb in (8, 16, 32, 64, 256, 1024):
-    g = bw(mb)
-    results[mb] = g
-    fits = mb < l2_mb
-    tag = f"{D}fits in L2{X}" if fits else f"{Y}spills to VRAM{X}"
-    print(f"  {mb:>9} MB   {g:>8,.0f} GB/s   {tag}")
 
-cached = max(g for mb, g in results.items() if mb < l2_mb)
-vram = min(results.values())
-print(f"\n{B}The cliff: {cached / vram:.1f}x{X}  "
-      f"{D}({cached:,.0f} GB/s cached vs {vram:,.0f} GB/s from VRAM){X}")
+def print_cliff(bandwidths, l2_mb):
+    cached = max(gbs for working_set_mb, gbs in bandwidths.items()
+                 if working_set_mb < l2_mb)
+    from_vram = min(bandwidths.values())
+    print("\n" + paint(f"The cliff: {cached / from_vram:.1f}x", "bold") + "  "
+          + paint(f"({cached:,.0f} GB/s cached against {from_vram:,.0f} GB/s "
+                  "from VRAM)", "dim"))
 
-print(f"\n{B}So what would fit in {l2_mb:.0f} MB?{X}")
-for name, bytes_per in [("bf16", 2), ("int8", 1), ("int4", 0.5), ("1.58-bit", 0.21)]:
-    params_m = l2_mb * 1e6 / bytes_per / 1e6
-    print(f"  {name:<9} {params_m:>6,.0f}M parameters")
-print(f"  {D}GPT-2 small was 124M. BERT-base was 110M.")
-print(f"  'Fits in cache' means roughly 2019-era capability.{X}")
 
-print(f"\n{B}And the catch{X}")
-print(f"  {D}The KV cache does not become smaller. The context length and the")
-print(f"  layer count set its size, not the parameter count. Put the weights in")
-print(f"  L2, and KV becomes almost all of your memory traffic. The bottleneck")
-print(f"  moves. It does not disappear. Stages 06-09 matter MORE, not less.")
-print(f"\n  See Appendix A of LORE.md for where this bet is already shipping")
-print(f"  (Groq, Cerebras) and why it is awkward on a GPU.{X}\n")
+def print_what_fits(l2_mb):
+    print("\n" + paint(f"So what fits in {l2_mb:.0f} MB?", "bold"))
+    for name, bytes_per_parameter in FORMATS:
+        print(f"  {name:<9} {l2_mb / bytes_per_parameter:>6,.0f}M parameters")
+    print(paint("  GPT-2 small was 124M. BERT-base was 110M.\n"
+                "  'Fits in cache' means about the capability of 2019.", "dim"))
+
+
+def print_the_catch():
+    print("\n" + paint("And the catch", "bold"))
+    print(paint("  The KV cache does not become smaller. The context length and\n"
+                "  the layer count set its size, not the parameter count. Put\n"
+                "  the weights in L2, and KV becomes almost all of your memory\n"
+                "  traffic. The bottleneck moves. It does not go away. Stages 06\n"
+                "  to 09 are MORE important, not less.\n"
+                "\n  Appendix A of LORE.md tells where this bet already ships\n"
+                "  (Groq, Cerebras), and why it is awkward on a GPU.", "dim")
+          + "\n")
+
+
+def main():
+    properties = torch.cuda.get_device_properties(0)
+    l2_mb = getattr(properties, "L2_cache_size", 0) / 1e6
+    print("\n" + paint(f"L2 cache on this GPU: {l2_mb:.0f} MB", "bold") + "\n")
+    bandwidths = measure_working_sets(l2_mb)
+    print_cliff(bandwidths, l2_mb)
+    print_what_fits(l2_mb)
+    print_the_catch()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

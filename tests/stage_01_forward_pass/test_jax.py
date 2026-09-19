@@ -1,4 +1,4 @@
-"""Stage 01 (JAX) - Greedy decode with no cache.
+"""Stage 01 (JAX) - greedy decode with no cache.
 
 The spec:
 
@@ -6,168 +6,147 @@ The spec:
 
         naive_generate(model, prompt: str, max_tokens: int) -> list[int]
 
-    returning the list of GENERATED token ids (not including the prompt).
+    It returns the list of GENERATED token ids (without the prompt).
 
 Rules:
-  - Greedy: always argmax of the final-position logits.
-  - NO kv cache. Every step re-runs the model over the entire prefix.
+  - Greedy: always the argmax of the logits at the last position.
+  - NO KV cache. Every step runs the model again over the whole prefix.
   - Stop early if you emit an eos token.
 
-Why you must do it the slow way: stage 02's test asserts a speedup over this
-number. Cache here and you cannot pass stage 02.
+Why you must do it the slow way: a check of stage 02 asserts a speedup over
+this number. If you cache here, you cannot pass stage 02.
 """
 
-import time
-
-import jax
 import jax.numpy as jnp
-import pytest
 
 from app.j01_naive import naive_generate
+from tests.helpers import elapsed_ms, record_measurement
+
+CHAT_QUESTION = "What is 2+2? Reply with just the number."
 
 
 def _reference_greedy(model, prompt, max_tokens):
-    """Deliberately a different code path from the expected solution.
+    """A different code path from the expected solution, on purpose.
 
-    This one asks for logits at EVERY position and takes the last, instead of
-    letting the model gather the final position for you. Same tokens, different
-    HLO -- which is also a small demonstration that the two spellings agree.
+    This asks for the logits at EVERY position and takes the last one. It
+    does not let the model gather the last position. The tokens are the
+    same and the HLO is different. That also shows that the two forms agree.
     """
-    ids = [int(t) for t in model.encode(prompt)]
-    out = []
+    token_ids = [int(token) for token in model.encode(prompt)]
+    generated = []
     for _ in range(max_tokens):
-        logits, _ = model.forward(jnp.asarray([ids], jnp.int32), logits_index=None)
-        nxt = int(logits[0, -1].argmax())
-        if nxt in model.eos_ids:
+        logits, _ = model.forward(jnp.asarray([token_ids], jnp.int32),
+                                  logits_index=None)
+        next_token = int(logits[0, -1].argmax())
+        if next_token in model.eos_ids:
             break
-        out.append(nxt)
-        ids.append(nxt)
-    return out
+        generated.append(next_token)
+        token_ids.append(next_token)
+    return generated
 
 
 def test_matches_a_reference_greedy_decode(jmodel_exact, prompts):
-    """Token-identical to a straightforward greedy loop, in fp32."""
+    """The same tokens as a simple greedy loop, in fp32."""
     model = jmodel_exact
-    for p in prompts[:2]:
-        want = _reference_greedy(model, p, 12)
-        got = naive_generate(model, p, max_tokens=12)
-        assert got == want, (
-            f"\nprompt: {p!r}\n"
-            f"want: {model.decode(want)!r}\n"
-            f"got:  {model.decode(got)!r}"
+    for prompt in prompts[:2]:
+        expected = _reference_greedy(model, prompt, 12)
+        generated = naive_generate(model, prompt, max_tokens=12)
+        assert generated == expected, (
+            f"\nprompt:   {prompt!r}\n"
+            f"expected: {model.decode(expected)!r}\n"
+            f"got:      {model.decode(generated)!r}"
         )
 
 
 def test_respects_max_tokens(jmodel_exact):
-    out = naive_generate(jmodel_exact, "Count: 1 2 3 4", max_tokens=7)
-    assert len(out) <= 7, f"emitted {len(out)} tokens, max_tokens was 7"
+    generated = naive_generate(jmodel_exact, "Count: 1 2 3 4", max_tokens=7)
+    assert len(generated) <= 7, (
+        f"emitted {len(generated)} tokens, max_tokens was 7")
 
 
 def test_stops_at_eos(jmodel_exact):
-    """A chat-formatted question must terminate, not ramble to max_tokens.
+    """A question in chat format must stop, and not continue to max_tokens.
 
     Trap: `model.eos_ids` is a SET, because this model has several stop ids
-    (end-of-text vs end-of-turn). Check membership, do not compare to one int.
+    (end of text and end of turn). Test membership. Do not compare with one
+    int.
     """
     model = jmodel_exact
     prompt = model.tokenizer.apply_chat_template(
-        [{"role": "user", "content": "What is 2+2? Reply with just the number."}],
+        [{"role": "user", "content": CHAT_QUESTION}],
         tokenize=False, add_generation_prompt=True, enable_thinking=False,
     )
-    out = naive_generate(model, prompt, max_tokens=40)
-    assert len(out) < 40, (
-        f"never stopped. model.eos_ids is {sorted(model.eos_ids)} -- "
-        "note that it is a set of several ids."
-    )
+    generated = naive_generate(model, prompt, max_tokens=40)
+    assert len(generated) < 40, (
+        f"never stopped. model.eos_ids is {sorted(model.eos_ids)}. Note that "
+        "it is a set of several ids.")
 
 
 def test_prompt_is_not_echoed(jmodel_exact):
     """Return only what you generated. The prompt ids are not output."""
     model = jmodel_exact
-    p = "The capital of France is"
-    n_prompt = len(model.encode(p))
-    out = naive_generate(model, p, max_tokens=8)
-    assert len(out) <= 8, (
-        f"returned {len(out)} ids for max_tokens=8 -- the prompt "
-        f"({n_prompt} ids) looks like it is still in there"
-    )
+    prompt = "The capital of France is"
+    prompt_len = len(model.encode(prompt))
+    generated = naive_generate(model, prompt, max_tokens=8)
+    assert len(generated) <= 8, (
+        f"returned {len(generated)} ids for max_tokens=8. The prompt "
+        f"({prompt_len} ids) is probably still in the output.")
 
 
 def test_every_new_length_costs_a_compile(jmodel):
-    """The JAX-specific tax, measured.
+    """The cost that is special to JAX, measured.
 
-    Each step feeds a prefix one token longer than the last, so each step is a
-    new SHAPE, so each step is a fresh XLA compilation. One per token, seconds
-    each, all of it before any arithmetic happens.
+    Each step gives a prefix one token longer than the step before. So each
+    step is a new SHAPE, and each new shape is a new XLA compilation: one
+    for each token, seconds each, before any arithmetic.
 
-    The prompt here is deliberately an odd length no other check has used, so
-    the compilation cache cannot already be warm for these shapes.
+    The prompt has an odd length that no other check uses, on purpose. So
+    the compilation cache cannot already hold these shapes.
     """
     from jvllm.model import _forward
 
-    model = jmodel
-    prompt = "The history of computing began " * 30      # ~150 tokens
-    n = 6
+    num_tokens = 6
+    prompt = "The history of computing began " * 30      # about 150 tokens
+    compiles_before = _forward._cache_size()
+    _, wall_ms = elapsed_ms(
+        lambda: naive_generate(jmodel, prompt, max_tokens=num_tokens))
+    new_compiles = _forward._cache_size() - compiles_before
 
-    before = _forward._cache_size()
-    t0 = time.perf_counter()
-    naive_generate(model, prompt, max_tokens=n)
-    elapsed = time.perf_counter() - t0
-    grew = _forward._cache_size() - before
-
-    print(f"\n  {grew} new XLA compilations for {n} generated tokens "
-          f"({elapsed:.1f}s wall)")
+    print(f"\n  {new_compiles} new XLA compilations for {num_tokens} generated "
+          f"tokens ({wall_ms / 1000:.1f}s wall)")
     print("  \033[2mA preallocated cache (stage 02) has ONE shape, so it")
-    print("  compiles once and never again. On short prompts that alone is")
-    print("  most of stage 02's speedup -- before a single flop is saved.\033[0m")
-    assert grew >= n, (
-        f"expected ~{n} new compilations, one per prefix length, but the "
-        f"cache grew by {grew}. Are you actually re-running the whole prefix "
-        "each step -- i.e. actually running without a cache?"
-    )
+    print("  compiles one time only. On short prompts, that alone is most of")
+    print("  the speedup of stage 02, before one flop is saved.\033[0m")
+    assert new_compiles >= num_tokens, (
+        f"expected about {num_tokens} new compilations, one for each prefix "
+        f"length, but the cache grew by {new_compiles}. Do you run the whole "
+        "prefix again at each step, with no cache?")
 
 
 def test_baseline_throughput(jmodel):
-    """This is not a pass or a fail. It records your slowest number, two
-    times.
+    """Not a pass or a fail. It records your slowest number, two times.
 
-    COLD includes XLA compiling one program per prefix length. WARM re-runs the
-    identical lengths, so every compile is a cache hit and what is left is the
-    arithmetic. Stage 02 is measured against the WARM number, because a 30x
-    win that is really "I stopped invoking the compiler" would tell you nothing
-    about the KV cache.
+    COLD includes the XLA compile of one program for each prefix length.
+    WARM runs the same lengths again, so each compile is a cache hit, and
+    only the arithmetic remains. Stage 02 compares with the WARM number. A
+    30x gain that is really "I stopped the compiler" tells you nothing about
+    the KV cache.
 
-    Both numbers are real, though, and in a server you would pay the cold one.
+    Both numbers are real, and a server pays the cold one.
     """
-    model = jmodel
     prompt = "The history of computing began"
-    N = 24
+    generated, cold_ms = elapsed_ms(
+        lambda: naive_generate(jmodel, prompt, max_tokens=24))
+    _, warm_ms = elapsed_ms(
+        lambda: naive_generate(jmodel, prompt, max_tokens=24))
 
-    t0 = time.perf_counter()
-    out = naive_generate(model, prompt, max_tokens=N)
-    cold = (time.perf_counter() - t0) * 1000
-
-    t0 = time.perf_counter()
-    naive_generate(model, prompt, max_tokens=N)
-    warm = (time.perf_counter() - t0) * 1000
-
-    print(f"\n  \033[36mj01 cold\033[0m: {cold:8.0f} ms  "
-          f"({len(out) / (cold / 1000):6.1f} tok/s)   compile included")
-    print(f"  \033[36mj01 warm\033[0m: {warm:8.0f} ms  "
-          f"({len(out) / (warm / 1000):6.1f} tok/s)   compile cached")
-    print(f"\n  \033[2mThe compiler cost you {cold / warm:.0f}x on the first run of a")
-    print("  shape it had not seen. That is not the algorithm -- it is the")
-    print("  price of every new sequence length reaching your server.\033[0m")
-    _record_jax("j01_naive_warm_ms", warm)
-    assert out, "generated nothing"
-
-
-def _record_jax(label, ms):
-    """Bank a number so a later stage can compare against it."""
-    import json
-    from pathlib import Path
-
-    f = Path(__file__).resolve().parents[2] / ".measurements.json"
-    d = json.loads(f.read_text()) if f.exists() else {}
-    d[label] = {"ms": round(ms, 2), "tok_s": None}
-    f.write_text(json.dumps(d, indent=2))
+    print(f"\n  \033[36mj01 cold\033[0m: {cold_ms:8.0f} ms  "
+          f"({len(generated) / (cold_ms / 1000):6.1f} tok/s)   compile included")
+    print(f"  \033[36mj01 warm\033[0m: {warm_ms:8.0f} ms  "
+          f"({len(generated) / (warm_ms / 1000):6.1f} tok/s)   compile cached")
+    print(f"\n  \033[2mThe compiler cost you {cold_ms / warm_ms:.0f}x on the "
+          "first run of a")
+    print("  shape that it had not seen. That is not the algorithm. It is the")
+    print("  cost of each new sequence length that reaches your server.\033[0m")
+    record_measurement("j01_naive_warm_ms", warm_ms)
+    assert generated, "generated nothing"

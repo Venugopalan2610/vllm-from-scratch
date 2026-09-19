@@ -1,13 +1,13 @@
-"""Stage 15 - Async engine and OpenAI-compatible API.
+"""Stage 15 - an async engine and an OpenAI-compatible API.
 
-Spec in app/s15_server.py.
+The spec is in app/s15_server.py.
 
-There is no GPU and no model here. A fake step-engine takes the place of the
-real one, so these checks examine the PLUMBING:
+There is no GPU and no model here. A fake step engine replaces the real one,
+so these checks examine the PLUMBING:
 
-  - HTTP never blocks the engine loop,
+  - HTTP never stops the engine loop,
   - the stream works,
-  - a client that disconnects releases its KV blocks.
+  - a client that disconnects frees its KV blocks.
 """
 
 import asyncio
@@ -21,190 +21,186 @@ pytestmark = pytest.mark.asyncio
 
 
 class FakeStepEngine:
-    """Emits one character of the prompt per step. Deterministic and instant."""
+    """Emits one character of the prompt in each step. Deterministic and
+    instant."""
 
     def __init__(self):
-        self.pending = {}
+        self.pending_characters = {}
         self.aborted = []
         self.steps = 0
 
     def add_request(self, rid, prompt, max_tokens):
         text = (prompt or "x")[:max_tokens] or "x"
-        self.pending[rid] = list(text)
+        self.pending_characters[rid] = list(text)
 
     def has_work(self):
-        return bool(self.pending)
+        return bool(self.pending_characters)
 
     def abort(self, rid):
-        if rid in self.pending:
-            del self.pending[rid]
+        self.pending_characters.pop(rid, None)
         self.aborted.append(rid)
 
     def step(self):
         self.steps += 1
-        out = []
-        for rid in list(self.pending):
-            chars = self.pending[rid]
-            ch = chars.pop(0)
-            finished = not chars
+        outputs = []
+        for rid in list(self.pending_characters):
+            characters = self.pending_characters[rid]
+            character = characters.pop(0)
+            finished = not characters
             if finished:
-                del self.pending[rid]
-            out.append((rid, ch, finished))
-        return out
+                del self.pending_characters[rid]
+            outputs.append((rid, character, finished))
+        return outputs
+
+
+async def collect(engine, prompt, max_tokens):
+    return "".join([delta async for delta in engine.generate(prompt,
+                                                             max_tokens)])
+
+
+def completion_text(response_body):
+    return response_body["choices"][0]["text"]
+
+
+async def stream_chunks(client, prompt, max_tokens):
+    """-> the data lines of a streamed completion, without "data: "."""
+    chunks = []
+    async with client.stream("POST", "/v1/completions",
+                             json={"prompt": prompt, "max_tokens": max_tokens,
+                                   "stream": True}) as response:
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+        async for line in response.aiter_lines():
+            if line.startswith("data: "):
+                chunks.append(line[len("data: "):])
+    return chunks
 
 
 @pytest.fixture
 async def engine():
-    e = AsyncLLMEngine(FakeStepEngine())
-    await e.start()
-    yield e
-    await e.stop()
+    async_engine = AsyncLLMEngine(FakeStepEngine())
+    await async_engine.start()
+    yield async_engine
+    await async_engine.stop()
 
 
 @pytest.fixture
 async def client(engine):
     import httpx
-    app = create_app(engine)
-    transport = httpx.ASGITransport(app=app)
+
+    transport = httpx.ASGITransport(app=create_app(engine))
     async with httpx.AsyncClient(transport=transport,
-                                 base_url="http://test") as c:
-        await c.get("/health")     # triggers startup
-        yield c
+                                 base_url="http://test") as http_client:
+        await http_client.get("/health")     # starts the app
+        yield http_client
 
 
 # ---- engine ---------------------------------------------------------
 
 async def test_generate_streams_deltas(engine):
-    out = "".join([d async for d in engine.generate("hello", 5)])
-    assert out == "hello"
+    assert await collect(engine, "hello", 5) == "hello"
 
 
 async def test_concurrent_requests_interleave(engine):
-    """Two generations must make progress together, not one after the other."""
-    async def collect(p):
-        return "".join([d async for d in engine.generate(p, 10)])
-
-    a, b = await asyncio.gather(collect("abcde"), collect("12345"))
-    assert a == "abcde"
-    assert b == "12345"
+    """Two generations must progress together, not one after the other."""
+    first, second = await asyncio.gather(collect(engine, "abcde", 10),
+                                         collect(engine, "12345", 10))
+    assert first == "abcde"
+    assert second == "12345"
 
 
 async def test_many_concurrent_requests(engine):
-    async def collect(i):
-        return "".join([d async for d in engine.generate(f"req{i:03d}", 10)])
-
-    results = await asyncio.gather(*[collect(i) for i in range(25)])
-    assert results == [f"req{i:03d}" for i in range(25)]
+    results = await asyncio.gather(*[collect(engine, f"req{index:03d}", 10)
+                                     for index in range(25)])
+    assert results == [f"req{index:03d}" for index in range(25)]
 
 
 async def test_active_count_returns_to_zero(engine):
-    async for _ in engine.generate("abc", 3):
-        pass
+    await collect(engine, "abc", 3)
     await asyncio.sleep(0.05)
-    assert engine.num_active == 0, "finished requests were not cleaned up"
+    assert engine.num_active == 0, "the finished requests stay in the engine"
 
 
 async def test_abort_releases_the_request(engine):
-    """A client that hangs up must free its KV, not leak it until timeout."""
-    gen = engine.generate("abcdefghij", 10, rid="doomed")
-    await gen.__anext__()             # consume one token, then walk away
-    await gen.aclose()
+    """A client that disconnects must free its KV, not keep it until a
+    timeout."""
+    stream = engine.generate("abcdefghij", 10, rid="doomed")
+    await stream.__anext__()             # read one token, then leave
+    await stream.aclose()
     await asyncio.sleep(0.05)
-
     assert "doomed" in engine.engine.aborted, (
-        "abandoning the stream did not abort the request -- in a real server "
-        "this leaks KV blocks for every disconnected client"
-    )
+        "the abandoned stream did not abort the request. In a real server, "
+        "every client that disconnects then keeps its KV blocks.")
     assert engine.num_active == 0
 
 
 async def test_engine_loop_survives_an_aborted_request(engine):
-    gen = engine.generate("abcdefghij", 10, rid="gone")
-    await gen.__anext__()
-    await gen.aclose()
-    out = "".join([d async for d in engine.generate("still works", 11)])
-    assert out == "still works"
+    stream = engine.generate("abcdefghij", 10, rid="gone")
+    await stream.__anext__()
+    await stream.aclose()
+    assert await collect(engine, "still works", 11) == "still works"
 
 
 # ---- HTTP -----------------------------------------------------------
 
 async def test_health_and_models(client):
-    r = await client.get("/health")
-    assert r.status_code == 200
-    r = await client.get("/v1/models")
-    assert r.status_code == 200
-    assert r.json()["data"][0]["id"]
+    assert (await client.get("/health")).status_code == 200
+    models = await client.get("/v1/models")
+    assert models.status_code == 200
+    assert models.json()["data"][0]["id"]
 
 
 async def test_non_streaming_completion(client):
-    r = await client.post("/v1/completions",
-                          json={"prompt": "hello", "max_tokens": 5})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["choices"][0]["text"] == "hello"
+    response = await client.post("/v1/completions",
+                                 json={"prompt": "hello", "max_tokens": 5})
+    assert response.status_code == 200
+    body = response.json()
+    assert completion_text(body) == "hello"
     assert body["choices"][0]["finish_reason"] == "stop"
     assert body["object"] == "text_completion"
 
 
 async def test_streaming_completion_sse_format(client):
-    chunks = []
-    async with client.stream("POST", "/v1/completions",
-                             json={"prompt": "abcde", "max_tokens": 5,
-                                   "stream": True}) as r:
-        assert r.status_code == 200
-        assert "text/event-stream" in r.headers["content-type"]
-        async for line in r.aiter_lines():
-            if line.startswith("data: "):
-                chunks.append(line[6:])
-
+    chunks = await stream_chunks(client, "abcde", 5)
     assert chunks[-1] == "[DONE]", (
-        "an OpenAI-compatible stream must terminate with 'data: [DONE]'"
-    )
-    text = "".join(
-        json.loads(c)["choices"][0]["text"] for c in chunks[:-1]
-    )
-    assert text == "abcde"
+        "an OpenAI-compatible stream must end with 'data: [DONE]'")
+    assert "".join(completion_text(json.loads(chunk))
+                   for chunk in chunks[:-1]) == "abcde"
 
 
 async def test_streaming_and_non_streaming_agree(client):
-    r = await client.post("/v1/completions",
-                          json={"prompt": "consistent", "max_tokens": 10})
-    batch = r.json()["choices"][0]["text"]
-
-    parts = []
-    async with client.stream("POST", "/v1/completions",
-                             json={"prompt": "consistent", "max_tokens": 10,
-                                   "stream": True}) as resp:
-        async for line in resp.aiter_lines():
-            if line.startswith("data: ") and line[6:] != "[DONE]":
-                parts.append(json.loads(line[6:])["choices"][0]["text"])
-
-    assert "".join(parts) == batch, (
-        "streaming and non-streaming responses must be identical -- this is "
-        "exactly what stage 14's detokenizer invariant protects"
-    )
+    response = await client.post("/v1/completions",
+                                 json={"prompt": "consistent",
+                                       "max_tokens": 10})
+    chunks = await stream_chunks(client, "consistent", 10)
+    streamed = "".join(completion_text(json.loads(chunk))
+                       for chunk in chunks if chunk != "[DONE]")
+    assert streamed == completion_text(response.json()), (
+        "the streamed and whole responses must be the same. The detokenizer "
+        "invariant of stage 14 protects exactly this.")
 
 
 async def test_concurrent_http_requests(client):
-    async def one(i):
-        r = await client.post("/v1/completions",
-                              json={"prompt": f"p{i:02d}", "max_tokens": 5})
-        return r.json()["choices"][0]["text"]
+    async def complete(index):
+        response = await client.post("/v1/completions",
+                                     json={"prompt": f"p{index:02d}",
+                                           "max_tokens": 5})
+        return completion_text(response.json())
 
-    got = await asyncio.gather(*[one(i) for i in range(10)])
-    assert got == [f"p{i:02d}" for i in range(10)]
+    results = await asyncio.gather(*[complete(index) for index in range(10)])
+    assert results == [f"p{index:02d}" for index in range(10)]
 
 
 async def test_http_does_not_block_the_engine_loop(client, engine):
-    """The engine must keep stepping while HTTP work is in flight.
+    """The engine must keep its steps while HTTP work is in progress.
 
-    In vLLM V1 this is why EngineCore moved to its own process: Python overhead
-    on the API side was measurably stalling the GPU between steps.
+    In vLLM V1, that is why EngineCore moved to its own process. The Python
+    overhead on the API side stopped the GPU between steps, by an amount
+    that they could measure.
     """
-    before = engine.engine.steps
+    steps_before = engine.engine.steps
     await asyncio.gather(*[
         client.post("/v1/completions",
                     json={"prompt": "abcdefgh", "max_tokens": 8})
-        for _ in range(5)
-    ])
-    assert engine.engine.steps > before + 5
+        for _ in range(5)])
+    assert engine.engine.steps > steps_before + 5
