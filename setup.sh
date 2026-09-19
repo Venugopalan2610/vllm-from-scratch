@@ -105,3 +105,6 @@ echo "Done.  Start with:   ./vc"
 if [ "$WANT_JAX" = 1 ]; then
   echo "The JAX ladder:      ./vc backend jax"
 fi
+echo "New to ML or GPUs?   course/Part0_FromAProgramToAModel/ first"
+echo
+echo "Do not stop. Continue. Be better than before."

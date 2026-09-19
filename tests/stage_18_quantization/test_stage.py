@@ -1,28 +1,38 @@
 """Stage 18 - weight-only quantization.
 
-The spec is in app/s18_quantization.py. The accuracy guard is a real
-perplexity measurement on the real model, not a tolerance on random tensors.
+The spec is in app/s18_quantization.py. The accuracy guard runs the real
+model on a serving-shaped workload: prompts of ISL tokens, then OSL generated
+tokens. It compares the choices of the int8 model with those of bf16 at each
+output position.
 """
 
 import torch
 import torch.nn as nn
 
+import math
+
 from app.s18_quantization import (
     QuantizedLinear,
+    continuation_logits,
     dequantize_fp8,
     dequantize_int8,
-    perplexity,
+    fidelity,
     quantize_fp8,
     quantize_int8_per_channel,
     quantize_model_,
 )
-from tests.helpers import MODEL
+from tests.helpers import ISL, MODEL, OSL, hf_workload
 
-TEXT = (
-    "The history of computing began with mechanical calculators. "
-    "Charles Babbage designed the Analytical Engine in 1837, and Ada Lovelace "
-    "wrote what is considered the first computer program for it. "
-) * 6
+# Measured on Qwen3-0.6B over the ISL/OSL workload. The reference solution:
+# the same top token at 96.5% of the positions, and 0.004 nats of KL. One
+# scale for each TENSOR, the classic mistake: 92% and 0.037 nats. The
+# top-token rate hardly moves, and KL moves 10x. So KL is the gate.
+#
+# Two bf16 runs can differ only in the order of the additions, for example
+# with and without a KV cache. They already disagree at about 2% of the
+# positions. So a top-1 floor near 100% fails on noise.
+TOP1_FLOOR = 0.90
+KL_CEILING = 0.015
 
 
 def relative_error(approximation, exact):
@@ -125,39 +135,59 @@ def test_fp8_handles_wide_dynamic_range(device):
 
 # ---- the accuracy guard ---------------------------------------------
 
-def test_perplexity_is_sane(hf):
+def test_a_model_agrees_with_itself(device):
+    logits = torch.randn(6, 50, device=device)
+    result = fidelity(logits, logits)
+    assert result.top1_agreement == 1.0
+    assert abs(result.mean_kl) < 1e-6
+
+
+def test_fidelity_counts_choices_and_divergence(device):
+    """Two positions. At the first the choice changes, at the second the
+    distributions are the same. KL((0.5, 0.5) || (0.25, 0.75)) = ln(4/3) / 2."""
+    reference = torch.tensor([[0.0, 0.0], [2.0, 0.0]], device=device)
+    candidate = torch.tensor([[0.0, math.log(3.0)], [2.0, 0.0]], device=device)
+    result = fidelity(reference, candidate)
+    assert result.top1_agreement == 0.5
+    assert abs(result.mean_kl - math.log(4 / 3) / 2 / 2) < 1e-5
+
+
+def test_continuation_logits_predict_the_output_tokens(hf):
     model, tokenizer = hf
-    bf16_perplexity = perplexity(model, tokenizer, TEXT)
-    print(f"\n  bf16 perplexity on the sample text: {bf16_perplexity:.3f}")
-    assert 1.0 < bf16_perplexity < 100.0, (
-        f"a perplexity of {bf16_perplexity} is not plausible")
+    token_ids = tokenizer("The capital of France is Paris, and").input_ids
+    prompt_len = 5
+    logits = continuation_logits(model, token_ids, prompt_len)
+    assert logits.shape == (len(token_ids) - prompt_len, model.config.vocab_size)
+    with torch.no_grad():
+        full = model(torch.tensor([token_ids], device=model.device)).logits[0]
+    torch.testing.assert_close(logits[0], full[prompt_len - 1].float())
 
 
-def test_quantizing_the_whole_model_barely_moves_perplexity(device):
-    """The important check. The real model, real text, real quality."""
+def test_quantizing_the_whole_model_keeps_its_choices(device):
+    """The important check. The real model, a serving-shaped workload, and
+    the choices of the model at each generated position."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL, dtype=torch.bfloat16).to(device).eval()
+    sequences = hf_workload(model, tokenizer)
 
-    before = perplexity(model, tokenizer, TEXT)
+    before = torch.cat([continuation_logits(model, ids, ISL) for ids in sequences])
     num_replaced = quantize_model_(model)
-    after = perplexity(model, tokenizer, TEXT)
-    change = (after - before) / before
+    after = torch.cat([continuation_logits(model, ids, ISL) for ids in sequences])
+    result = fidelity(before, after)
 
     print(f"\n  quantized {num_replaced} Linear layers")
-    print(f"  perplexity  bf16 {before:.4f}  ->  int8 {after:.4f}  "
-          f"({change * 100:+.2f}%)")
+    print(f"  {len(sequences)} prompts, ISL {ISL}, OSL {OSL}: the same top token "
+          f"at {100 * result.top1_agreement:.1f}% of the output positions, "
+          f"mean KL {result.mean_kl:.4f} nats")
     assert num_replaced > 100, (
         f"replaced only {num_replaced} layers. Did the walk find all of them?")
-    assert abs(change) < 0.05, (
-        f"the perplexity moved {change * 100:+.1f}%. Look at the scales for "
+    assert result.top1_agreement >= TOP1_FLOOR and result.mean_kl <= KL_CEILING, (
+        "the int8 model makes different choices. Look at the scales for "
         "each CHANNEL, and make sure that the activations stay in bf16.")
-    print("\n  \033[2mHalf the weight bytes for less than 1% of quality. The")
+    print("\n  \033[2mHalf the weight bytes, and almost the same choices. The")
     print("  decode time is proportional to the weight bytes, so this is")
     print("  almost a free 2x. That is why every production deployment does")
     print("  it.\033[0m")
-
-    del model
-    torch.cuda.empty_cache()

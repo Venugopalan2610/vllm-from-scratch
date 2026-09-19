@@ -36,7 +36,7 @@ integers, and each integer is the id of one token.
 
 **Like:** an interned string. The id is the index into the table.
 
-**Taught in:** Part 0 `model/`. Stage 01.
+**Taught in:** Part 0 `1_model/`. Stage 01.
 
 ### Tokenizer
 
@@ -47,7 +47,7 @@ model has its own tokenizer, and the two must match.
 
 **Like:** a codec with a fixed dictionary.
 
-**Taught in:** Part 0 `model/`. Part 5 `detokenize/`.
+**Taught in:** Part 0 `1_model/`. Part 5 `3_detokenize/`.
 
 ### Vocabulary
 
@@ -58,7 +58,7 @@ tokens. The model gives one score to each of them at each step.
 
 **Like:** the symbol table of the codec.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Model
 
@@ -69,7 +69,7 @@ token. One call of the function is a forward pass.
 
 **Like:** a pure function with a very large constant table: the weights.
 
-**Taught in:** Part 0 `model/`. Stage 01.
+**Taught in:** Part 0 `1_model/`. Stage 01.
 
 ### Weights
 
@@ -80,7 +80,7 @@ them: they are read-only data. A 0.6B model has 0.6 billion of them.
 
 **Like:** a large read-only lookup table that each call reads from start to end.
 
-**Taught in:** Part 0 `model/`. Part 1 `arithmetic/`.
+**Taught in:** Part 0 `1_model/`. Part 1 `1_arithmetic/`.
 
 ### Embedding
 
@@ -91,7 +91,7 @@ numbers from a table: one row for each token in the vocabulary.
 
 **Like:** an array lookup, `table[token_id]`.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Hidden state
 
@@ -102,7 +102,7 @@ hidden size is its length, for example 1024.
 
 **Like:** the state object that each stage of a pipeline reads and updates.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Layer
 
@@ -114,7 +114,7 @@ of layer many times, for example 28.
 **Like:** one stage of a pipeline. The model is the same stage, repeated with
 different weights.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Transformer
 
@@ -123,7 +123,7 @@ different weights.
 The design of almost all current language models: a stack of layers, each with
 attention and an MLP.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Attention
 
@@ -135,7 +135,7 @@ is a lookup that returns a weighted mix of all entries, not one entry.
 **Like:** a dictionary lookup with fuzzy matching. Each key matches a little,
 and the result mixes the values by how well each key matched.
 
-**Taught in:** Part 0 `attention/`. Part 3 `gather/`.
+**Taught in:** Part 0 `2_attention/`. Part 3 `2_gather/`.
 
 ### Query, key and value
 
@@ -146,7 +146,7 @@ key answers how well it matches. Each value is what the token returns.
 
 **Like:** the search term, the index entries, and the stored records.
 
-**Taught in:** Part 0 `attention/`. Stage 02.
+**Taught in:** Part 0 `2_attention/`. Stage 02.
 
 ### Attention head
 
@@ -157,7 +157,7 @@ with its own queries, keys and values. head_dim is the vector length of one head
 
 **Like:** several indexes on the same data, each for a different question.
 
-**Taught in:** Part 0 `attention/`.
+**Taught in:** Part 0 `2_attention/`.
 
 ### Grouped-query attention
 
@@ -168,7 +168,7 @@ makes the KV cache smaller by the size of the group.
 
 **Like:** many readers that share one index, not one index for each reader.
 
-**Taught in:** Part 0 `attention/`. Part 1 `kvCache/`.
+**Taught in:** Part 0 `2_attention/`. Part 1 `3_kvCache/`.
 
 ### MLP
 
@@ -179,7 +179,7 @@ token alone, with no information from other tokens.
 
 **Like:** a `map` over the tokens.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### RoPE
 
@@ -188,7 +188,7 @@ token alone, with no information from other tokens.
 The way the model knows the order of tokens. It rotates each query and key by
 an angle that depends on the position of the token.
 
-**Taught in:** Part 0 `attention/`.
+**Taught in:** Part 0 `2_attention/`.
 
 ### Causal mask
 
@@ -199,7 +199,7 @@ to later tokens.
 
 **Like:** a log that you can read only up to your own entry.
 
-**Taught in:** Part 0 `attention/`.
+**Taught in:** Part 0 `2_attention/`.
 
 ### Context
 
@@ -208,7 +208,7 @@ to later tokens.
 All the tokens that a sequence holds at one time: the prompt and the tokens
 that the model generated so far.
 
-**Taught in:** Part 0 `attention/`. Stage 02.
+**Taught in:** Part 0 `2_attention/`. Stage 02.
 
 ### Prompt
 
@@ -218,7 +218,7 @@ The text that the user sends. The model continues it.
 
 **Check:** no
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Logits
 
@@ -227,7 +227,7 @@ The text that the user sends. The model continues it.
 The raw scores that the model gives to each token of the vocabulary for the
 next position. A higher score means a more likely next token.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Softmax
 
@@ -236,7 +236,7 @@ next position. A higher score means a more likely next token.
 The function that turns logits into probabilities. It makes each score
 positive with `exp`, then divides by the sum, so the results add up to 1.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Autoregressive generation
 
@@ -247,7 +247,7 @@ the model again. Each new token depends on all earlier tokens.
 
 **Like:** a loop where each iteration reads the output of the one before.
 
-**Taught in:** Part 0 `model/`. Stage 01.
+**Taught in:** Part 0 `1_model/`. Stage 01.
 
 ### Greedy decoding
 
@@ -255,7 +255,7 @@ the model again. Each new token depends on all earlier tokens.
 
 Always choose the token with the highest logit. The output is deterministic.
 
-**Taught in:** Part 0 `model/`. Stage 01.
+**Taught in:** Part 0 `1_model/`. Stage 01.
 
 ### Sampling
 
@@ -265,7 +265,7 @@ Choose the next token at random, with the probabilities that softmax gives.
 
 **Like:** a weighted random choice, `random.choices(tokens, weights=probs)`.
 
-**Taught in:** Part 0 `model/`. Part 5 `sampling/`. Stage 13.
+**Taught in:** Part 0 `1_model/`. Part 5 `2_sampling/`. Stage 13.
 
 ### Temperature
 
@@ -274,7 +274,7 @@ Choose the next token at random, with the probabilities that softmax gives.
 A number that divides the logits before softmax. Below 1 it makes the choice
 safer. Above 1 it makes the choice more random.
 
-**Taught in:** Part 0 `model/`. Part 5 `sampling/`. Stage 13.
+**Taught in:** Part 0 `1_model/`. Part 5 `2_sampling/`. Stage 13.
 
 ### Top-k
 
@@ -282,7 +282,7 @@ safer. Above 1 it makes the choice more random.
 
 Keep only the k tokens with the highest logits, and sample from them.
 
-**Taught in:** Part 5 `sampling/`. Stage 13.
+**Taught in:** Part 5 `2_sampling/`. Stage 13.
 
 ### Top-p
 
@@ -292,7 +292,7 @@ Keep the smallest set of top tokens whose probabilities add up to p, and
 sample from them. The set is small when the model is sure, and large when it
 is not.
 
-**Taught in:** Part 5 `sampling/`. Stage 13.
+**Taught in:** Part 5 `2_sampling/`. Stage 13.
 
 ### Repetition penalty
 
@@ -301,7 +301,7 @@ is not.
 A change to the logits of tokens that already appeared, so the model repeats
 itself less.
 
-**Taught in:** Part 5 `sampling/`. Stage 13.
+**Taught in:** Part 5 `2_sampling/`. Stage 13.
 
 ### EOS
 
@@ -312,7 +312,7 @@ model makes it.
 
 **Like:** a null terminator.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Detokenization
 
@@ -321,7 +321,7 @@ model makes it.
 The conversion of token ids back into text while the model streams them. One character
 can need two tokens, so you cannot always decode one token alone.
 
-**Taught in:** Part 5 `detokenize/`. Stage 14.
+**Taught in:** Part 5 `3_detokenize/`. Stage 14.
 
 ### Stop string
 
@@ -330,7 +330,7 @@ can need two tokens, so you cannot always decode one token alone.
 Text that ends the reply when it appears, for example `"\n\n"`. It can start in
 one token and end in the next.
 
-**Taught in:** Part 5 `detokenize/`. Stage 14.
+**Taught in:** Part 5 `3_detokenize/`. Stage 14.
 
 ### dtype
 
@@ -339,7 +339,7 @@ one token and end in the next.
 The number format of a tensor. bf16 uses 2 bytes for each number, and fp32
 uses 4. Fewer bytes means less memory traffic.
 
-**Taught in:** Part 0 `model/`. Part 1 `arithmetic/`.
+**Taught in:** Part 0 `1_model/`. Part 1 `1_arithmetic/`.
 
 ### Tensor
 
@@ -352,7 +352,7 @@ use tensors for all data.
 
 **Like:** a NumPy array that can live in GPU memory.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ---
 
@@ -365,7 +365,7 @@ use tensors for all data.
 Use of a trained model to make outputs. This course builds an inference
 engine: the server that runs the model for many users.
 
-**Taught in:** Part 0 `model/`.
+**Taught in:** Part 0 `1_model/`.
 
 ### Prefill
 
@@ -374,7 +374,7 @@ engine: the server that runs the model for many users.
 The first forward pass of a request. It processes all the prompt tokens in one
 call. Its speed depends on arithmetic.
 
-**Taught in:** Part 0 `model/`. Part 1 `roofline/`. Stage 03.
+**Taught in:** Part 0 `1_model/`. Part 1 `2_roofline/`. Stage 03.
 
 ### Decode
 
@@ -384,7 +384,7 @@ Each forward pass after prefill. It processes one new token for each sequence.
 Its speed depends on memory bandwidth, because it reads all the weights for
 little arithmetic.
 
-**Taught in:** Part 0 `model/`. Part 1 `roofline/`. Stage 03.
+**Taught in:** Part 0 `1_model/`. Part 1 `2_roofline/`. Stage 03.
 
 ### Step
 
@@ -395,7 +395,7 @@ time. The engine is a loop of steps.
 
 **Check:** no
 
-**Taught in:** Part 2 `continuous/`. Stage 05.
+**Taught in:** Part 2 `2_continuous/`. Stage 05.
 
 ### KV cache
 
@@ -406,7 +406,7 @@ then computes only its own key and value.
 
 **Like:** memoization of the attention inputs.
 
-**Taught in:** Part 0 `attention/`. Part 1 `kvCache/`. Stage 02.
+**Taught in:** Part 0 `2_attention/`. Part 1 `3_kvCache/`. Stage 02.
 
 ### Sequence
 
@@ -416,7 +416,7 @@ One reply that the engine generates: a prompt and its output tokens.
 
 **Like:** one in-flight request, with its state.
 
-**Taught in:** Part 2 `padding/`. Stage 05.
+**Taught in:** Part 2 `1_padding/`. Stage 05.
 
 ### Request
 
@@ -426,7 +426,7 @@ A call from a client that asks for one reply.
 
 **Check:** no
 
-**Taught in:** Part 2 `continuous/`. Part 6 `async/`. Stage 15.
+**Taught in:** Part 2 `2_continuous/`. Part 6 `1_async/`. Stage 15.
 
 ### Batch
 
@@ -437,7 +437,7 @@ weights once, and all sequences in the batch share that read.
 
 **Like:** a bulk operation: one round trip for many items.
 
-**Taught in:** Part 1 `arithmetic/`. Part 2 `padding/`. Stage 04.
+**Taught in:** Part 1 `1_arithmetic/`. Part 2 `1_padding/`. Stage 04.
 
 ### Static batching
 
@@ -448,7 +448,7 @@ sequence keeps its slot and does no useful work.
 
 **Like:** a barrier after each batch.
 
-**Taught in:** Part 2 `padding/`. Stage 04.
+**Taught in:** Part 2 `1_padding/`. Stage 04.
 
 ### Continuous batching
 
@@ -459,7 +459,7 @@ waiting sequence takes its slot.
 
 **Like:** a work queue with a thread pool, not a barrier.
 
-**Taught in:** Part 2 `continuous/`. Stage 05.
+**Taught in:** Part 2 `2_continuous/`. Stage 05.
 
 ### Padding
 
@@ -468,7 +468,7 @@ waiting sequence takes its slot.
 Extra dummy tokens that make all rows of a batch the same length. The GPU does
 real work on them and throws the results away.
 
-**Taught in:** Part 2 `padding/`. Part 8 `engine/`. Stage 04. Stage 21.
+**Taught in:** Part 2 `1_padding/`. Part 8 `1_engine/`. Stage 04. Stage 21.
 
 ### Flat batch
 
@@ -479,7 +479,7 @@ often named `cu_seqlens`, tells where each sequence starts.
 
 **Like:** a packed array with an offsets array, as in a CSR matrix.
 
-**Taught in:** Part 8 `engine/`. Stage 21.
+**Taught in:** Part 8 `1_engine/`. Stage 21.
 
 ### Scheduler
 
@@ -490,7 +490,7 @@ each one processes.
 
 **Check:** no
 
-**Taught in:** Part 2 `continuous/`. Part 4. Stage 10. Stage 22.
+**Taught in:** Part 2 `2_continuous/`. Part 4. Stage 10. Stage 22.
 
 ### Admission
 
@@ -501,7 +501,7 @@ has memory for the request.
 
 **Like:** admission control in a server.
 
-**Taught in:** Part 4 `admission/`. Stage 10.
+**Taught in:** Part 4 `1_admission/`. Stage 10.
 
 ### Preemption
 
@@ -513,7 +513,7 @@ sequence restarts later.
 
 **Like:** the OS evicting a process under memory pressure.
 
-**Taught in:** Part 4 `admission/`. Stage 10. Stage 22.
+**Taught in:** Part 4 `1_admission/`. Stage 10. Stage 22.
 
 ### Recompute
 
@@ -522,7 +522,7 @@ sequence restarts later.
 A way to restart a preempted sequence: drop its KV cache, and run prefill
 again later.
 
-**Taught in:** Part 4 `admission/`. Stage 10.
+**Taught in:** Part 4 `1_admission/`. Stage 10.
 
 ### Swap
 
@@ -535,7 +535,7 @@ later.
 
 **Check:** no
 
-**Taught in:** Part 4 `admission/`. Stage 10.
+**Taught in:** Part 4 `1_admission/`. Stage 10.
 
 ### Chunked prefill
 
@@ -546,7 +546,7 @@ the decodes of other sequences. One long prompt then cannot stop the server.
 
 **Like:** cooperative multitasking: yield after each slice of work.
 
-**Taught in:** Part 4 `chunked/`. Stage 11. Stage 22.
+**Taught in:** Part 4 `2_chunked/`. Stage 11. Stage 22.
 
 ### Token budget
 
@@ -555,14 +555,14 @@ the decodes of other sequences. One long prompt then cannot stop the server.
 The maximum number of tokens that one step processes. Decodes and prompt
 chunks share it.
 
-**Taught in:** Part 4 `chunked/`. Stage 11. Stage 22.
+**Taught in:** Part 4 `2_chunked/`. Stage 11. Stage 22.
 
 ### Watermark
 
 A fraction of the KV blocks that the engine keeps free when it admits new
 requests. The running sequences then have space to grow.
 
-**Taught in:** Part 4 `admission/`. Stage 10.
+**Taught in:** Part 4 `1_admission/`. Stage 10.
 
 ### KV block
 
@@ -573,7 +573,7 @@ number of tokens, for example 16.
 
 **Like:** a memory page.
 
-**Taught in:** Part 3 `blocks/`. Stage 06.
+**Taught in:** Part 3 `1_blocks/`. Stage 06.
 
 ### Block table
 
@@ -584,7 +584,7 @@ order.
 
 **Like:** the page table of a process.
 
-**Taught in:** Part 3 `blocks/`. Stage 06.
+**Taught in:** Part 3 `1_blocks/`. Stage 06.
 
 ### Slot mapping
 
@@ -593,7 +593,7 @@ order.
 For each token of a step, the physical place in the KV cache where the engine
 writes its key and value.
 
-**Taught in:** Part 3 `gather/`. Stage 07.
+**Taught in:** Part 3 `2_gather/`. Stage 07.
 
 ### Block allocator
 
@@ -603,7 +603,7 @@ The code that gives out free KV blocks and takes them back.
 
 **Like:** a fixed-size memory allocator with a free list.
 
-**Taught in:** Part 3 `blocks/`. Stage 06.
+**Taught in:** Part 3 `1_blocks/`. Stage 06.
 
 ### Fragmentation
 
@@ -614,7 +614,7 @@ sequence wastes most of its reservation.
 
 **Like:** internal fragmentation in a memory allocator.
 
-**Taught in:** Part 3 `blocks/`. Stage 06.
+**Taught in:** Part 3 `1_blocks/`. Stage 06.
 
 ### PagedAttention
 
@@ -636,7 +636,7 @@ computed, for example a shared system prompt.
 
 **Like:** a content-addressed cache: the hash of the tokens is the key.
 
-**Taught in:** Part 3 `sharing/`. Stage 09.
+**Taught in:** Part 3 `4_sharing/`. Stage 09.
 
 ### Reference count
 
@@ -647,7 +647,7 @@ when the count reaches 0.
 
 **Like:** reference counting in a garbage collector.
 
-**Taught in:** Part 3 `sharing/`. Stage 09.
+**Taught in:** Part 3 `4_sharing/`. Stage 09.
 
 ### Copy-on-write
 
@@ -658,7 +658,43 @@ gets its own copy.
 
 **Like:** `fork()` and copy-on-write pages.
 
-**Taught in:** Part 3 `sharing/`. Stage 09.
+**Taught in:** Part 3 `4_sharing/`. Stage 09.
+
+### ISL and OSL
+
+*Also:* ISL, OSL, input sequence length, output sequence length
+
+The input sequence length is the tokens of the prompt. The output sequence
+length is the tokens that the engine generates. A serving benchmark states
+both, because prefill cost follows ISL and decode cost follows OSL.
+
+**Like:** the request size and the response size of an API benchmark.
+
+**Taught in:** Stage 18. Stage 28.
+
+### KL divergence
+
+*Also:* KL, KLD, mean KL, nats
+
+A measure of how far one probability distribution is from another. It is 0
+when the two are the same. The course uses it to compare a quantized model
+with bf16 at each generated token.
+
+**Like:** a diff score between two outputs, where 0 means no difference.
+
+**Taught in:** Part 7 `2_quantization/`. Stage 18. Stage 24. Stage 24b.
+
+### Top-1 agreement
+
+*Also:* fidelity
+
+The fraction of positions where two models choose the same most likely token.
+Two bf16 runs with a different order of additions already disagree at about
+2% of positions, so it cannot be 100%.
+
+**Like:** the match rate of two implementations on the same inputs.
+
+**Taught in:** Stage 18. Stage 24.
 
 ### Speculative decoding
 
@@ -669,7 +705,7 @@ one forward pass. The output is exactly the same as without the guesses.
 
 **Like:** branch prediction.
 
-**Taught in:** Part 7 `speculative/`. Stage 17. Stage 25.
+**Taught in:** Part 7 `1_speculative/`. Stage 17. Stage 25.
 
 ### Draft
 
@@ -678,7 +714,7 @@ one forward pass. The output is exactly the same as without the guesses.
 The guessed tokens in speculative decoding, and the cheap method that makes
 them.
 
-**Taught in:** Part 7 `speculative/`. Stage 17. Stage 25.
+**Taught in:** Part 7 `1_speculative/`. Stage 17. Stage 25.
 
 ### Acceptance rate
 
@@ -688,7 +724,7 @@ The fraction of draft tokens that the check keeps.
 
 **Like:** the hit rate of a branch predictor.
 
-**Taught in:** Part 7 `speculative/`. Stage 17. Stage 25.
+**Taught in:** Part 7 `1_speculative/`. Stage 17. Stage 25.
 
 ### Rejection sampling
 
@@ -697,7 +733,7 @@ The fraction of draft tokens that the check keeps.
 The rule that accepts or rejects each draft token so that the output has the
 exact distribution of the large model.
 
-**Taught in:** Part 7 `speculative/`. Stage 17. Stage 25.
+**Taught in:** Part 7 `1_speculative/`. Stage 17. Stage 25.
 
 ### Quantization
 
@@ -708,7 +744,7 @@ scale to get the value back. Fewer bytes to read makes decode faster.
 
 **Like:** lossy compression.
 
-**Taught in:** Part 7 `quantization/`. Stage 18. Stage 24.
+**Taught in:** Part 7 `2_quantization/`. Stage 18. Stage 24.
 
 ### int8
 
@@ -717,7 +753,7 @@ scale to get the value back. Fewer bytes to read makes decode faster.
 An 8-bit integer format. With one scale for each row, it stores weights in 1
 byte, not 2.
 
-**Taught in:** Part 7 `quantization/`. Stage 18. Stage 24.
+**Taught in:** Part 7 `2_quantization/`. Stage 18. Stage 24.
 
 ### fp8
 
@@ -726,7 +762,7 @@ byte, not 2.
 An 8-bit floating-point format. It has an exponent, so it keeps small and
 large values in the same tensor better than int8.
 
-**Taught in:** Part 7 `quantization/`. Stage 24b.
+**Taught in:** Part 7 `2_quantization/`. Stage 24b.
 
 ### Per-channel scale
 
@@ -737,7 +773,7 @@ integer times the scale of its row.
 
 **Check:** no
 
-**Taught in:** Part 7 `quantization/`. Stage 18. Stage 24.
+**Taught in:** Part 7 `2_quantization/`. Stage 18. Stage 24.
 
 ### Guided decoding
 
@@ -748,7 +784,7 @@ removes the tokens that break the grammar before it samples.
 
 **Like:** input validation, but on each token before the model commits it.
 
-**Taught in:** Part 7 `guided/`. Stage 19. Stage 26.
+**Taught in:** Part 7 `3_guided/`. Stage 19. Stage 26.
 
 ### Logit mask
 
@@ -757,7 +793,7 @@ removes the tokens that break the grammar before it samples.
 Set the logits of forbidden tokens to minus infinity, so softmax gives them
 probability 0.
 
-**Taught in:** Part 7 `guided/`. Stage 19. Stage 26.
+**Taught in:** Part 7 `3_guided/`. Stage 19. Stage 26.
 
 ### FSM
 
@@ -768,7 +804,7 @@ know which tokens are legal next.
 
 **Like:** the state machine in a parser or a regex engine.
 
-**Taught in:** Part 7 `guided/`. Stage 19. Stage 26.
+**Taught in:** Part 7 `3_guided/`. Stage 19. Stage 26.
 
 ### Tensor parallelism
 
@@ -779,7 +815,7 @@ only a part of the model.
 
 **Like:** sharding a table across servers.
 
-**Taught in:** Part 7 `tensorParallel/`. Stage 20.
+**Taught in:** Part 7 `4_tensorParallel/`. Stage 20.
 
 ### Rank
 
@@ -789,7 +825,7 @@ One GPU, or one process, in a group of GPUs that work together.
 
 **Like:** one node of a cluster, with a numeric id.
 
-**Taught in:** Part 7 `tensorParallel/`. Stage 20.
+**Taught in:** Part 7 `4_tensorParallel/`. Stage 20.
 
 ### All-reduce
 
@@ -800,7 +836,7 @@ of all of them.
 
 **Like:** a distributed sum, where each node gets the result.
 
-**Taught in:** Part 7 `tensorParallel/`. Stage 20.
+**Taught in:** Part 7 `4_tensorParallel/`. Stage 20.
 
 ### Collective
 
@@ -808,7 +844,7 @@ of all of them.
 
 A communication step that all ranks do together, for example an all-reduce.
 
-**Taught in:** Part 7 `tensorParallel/`. Stage 20.
+**Taught in:** Part 7 `4_tensorParallel/`. Stage 20.
 
 ### Shard
 
@@ -816,7 +852,7 @@ A communication step that all ranks do together, for example an all-reduce.
 
 The part of a weight matrix that one rank holds.
 
-**Taught in:** Part 7 `tensorParallel/`. Stage 20.
+**Taught in:** Part 7 `4_tensorParallel/`. Stage 20.
 
 ### CUDA graph
 
@@ -827,7 +863,7 @@ them with one call, not one launch for each kernel.
 
 **Like:** a prepared statement: plan one time, run many times.
 
-**Taught in:** Part 5 `cudaGraphs/`. Stage 12. Stage 23.
+**Taught in:** Part 5 `1_cudaGraphs/`. Stage 12. Stage 23.
 
 ### Bucket
 
@@ -838,7 +874,7 @@ A step runs the smallest bucket that holds its batch, with padding.
 
 **Like:** size classes in a memory allocator.
 
-**Taught in:** Part 5 `cudaGraphs/`. Stage 12. Stage 23.
+**Taught in:** Part 5 `1_cudaGraphs/`. Stage 12. Stage 23.
 
 ---
 
@@ -853,7 +889,7 @@ operation on a large amount of data at the same time.
 
 **Like:** a very wide SIMD machine.
 
-**Taught in:** Part 0 `gpu/`.
+**Taught in:** Part 0 `3_gpu/`.
 
 ### Host and device
 
@@ -864,7 +900,7 @@ Data must move from host to device before the GPU can use it.
 
 **Check:** no
 
-**Taught in:** Part 0 `gpu/`.
+**Taught in:** Part 0 `3_gpu/`.
 
 ### HBM
 
@@ -875,7 +911,7 @@ arithmetic units, so each read costs time.
 
 **Like:** RAM, compared with the CPU caches.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `roofline/`. Stage 03.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `2_roofline/`. Stage 03.
 
 ### Bandwidth
 
@@ -886,7 +922,7 @@ arithmetic units. Decode speed depends on it.
 
 **Like:** the throughput of a network link.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `roofline/`. Stage 03.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `2_roofline/`. Stage 03.
 
 ### FLOP
 
@@ -895,7 +931,7 @@ arithmetic units. Decode speed depends on it.
 One floating-point operation, for example a multiply or an add. FLOP/s is the
 number of them for each second.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `arithmetic/`.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `1_arithmetic/`.
 
 ### Arithmetic intensity
 
@@ -905,7 +941,7 @@ The FLOPs that a piece of work does for each byte that it reads.
 
 **Like:** the ratio of CPU work to I/O in a job.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `arithmetic/`. Stage 03.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `1_arithmetic/`. Stage 03.
 
 ### Ridge point
 
@@ -914,7 +950,7 @@ The FLOPs that a piece of work does for each byte that it reads.
 FLOP/s divided by bytes/s for one GPU. Work with a lower arithmetic intensity
 waits for memory. Work with a higher intensity waits for arithmetic.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `arithmetic/`. Stage 03.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `1_arithmetic/`. Stage 03.
 
 ### Roofline
 
@@ -923,7 +959,7 @@ waits for memory. Work with a higher intensity waits for arithmetic.
 A plot of the maximum speed of a GPU against arithmetic intensity. It shows if
 a piece of work waits for memory or for arithmetic.
 
-**Taught in:** Part 1 `roofline/`. Stage 03. Stage 28.
+**Taught in:** Part 1 `2_roofline/`. Stage 03. Stage 28.
 
 ### Memory-bound
 
@@ -934,7 +970,7 @@ units do not.
 
 **Like:** an I/O-bound job.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `arithmetic/`. Stage 03.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `1_arithmetic/`. Stage 03.
 
 ### Compute-bound
 
@@ -945,7 +981,7 @@ does not.
 
 **Like:** a CPU-bound job.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `arithmetic/`. Stage 03.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `1_arithmetic/`. Stage 03.
 
 ### Matmul
 
@@ -953,7 +989,7 @@ does not.
 
 A matrix multiplication. Most of the arithmetic in a model is matmuls.
 
-**Taught in:** Part 0 `gpu/`. Part 1 `roofline/`.
+**Taught in:** Part 0 `3_gpu/`. Part 1 `2_roofline/`.
 
 ### GEMV
 
@@ -962,7 +998,7 @@ A matrix multiplication. Most of the arithmetic in a model is matmuls.
 A matrix times a vector. Decode at batch 1 is a chain of GEMVs, and a GEMV has
 a very low arithmetic intensity.
 
-**Taught in:** Part 0 `gpu/`. Stage 18b.
+**Taught in:** Part 0 `3_gpu/`. Stage 18b.
 
 ### cuBLAS
 
@@ -981,7 +1017,7 @@ and much smaller.
 
 **Like:** the CPU last-level cache.
 
-**Taught in:** Part 3 `kernels/`.
+**Taught in:** Part 3 `3_kernels/`.
 
 ### SM
 
@@ -992,14 +1028,14 @@ SM runs many threads at the same time.
 
 **Like:** a CPU core with very wide SIMD and many hardware threads.
 
-**Taught in:** Part 0 `gpu/`. Part 3 `kernels/`.
+**Taught in:** Part 0 `3_gpu/`. Part 3 `3_kernels/`.
 
 ### CUDA
 
 The programming model and the toolkit that NVIDIA gives to write code for its
 GPUs.
 
-**Taught in:** Part 0 `gpu/`. Stage 08.
+**Taught in:** Part 0 `3_gpu/`. Stage 08.
 
 ### nvcc
 
@@ -1007,7 +1043,7 @@ The CUDA compiler.
 
 **Like:** gcc for GPU code.
 
-**Taught in:** Part 0 `gpu/`. Stage 08.
+**Taught in:** Part 0 `3_gpu/`. Stage 08.
 
 ### Kernel
 
@@ -1018,7 +1054,7 @@ threads at the same time, each with its own index.
 
 **Like:** the body of a parallel for loop, where the loop index is the thread id.
 
-**Taught in:** Part 0 `gpu/`. Stage 08.
+**Taught in:** Part 0 `3_gpu/`. Stage 08.
 
 ### Launch
 
@@ -1029,7 +1065,7 @@ time, even when the kernel does almost nothing.
 
 **Like:** the fixed cost of a system call or an RPC.
 
-**Taught in:** Part 0 `gpu/`. Part 5 `cudaGraphs/`. Stage 12.
+**Taught in:** Part 0 `3_gpu/`. Part 5 `1_cudaGraphs/`. Stage 12.
 
 ### Thread
 
@@ -1040,7 +1076,7 @@ cheaper than a CPU thread.
 
 **Check:** no
 
-**Taught in:** Part 0 `gpu/`.
+**Taught in:** Part 0 `3_gpu/`.
 
 ### Warp
 
@@ -1050,7 +1086,7 @@ A group of 32 GPU threads that run the same instruction at the same time.
 
 **Like:** one SIMD instruction with 32 lanes.
 
-**Taught in:** Part 0 `gpu/`. Part 3 `kernels/`. Stage 08c.
+**Taught in:** Part 0 `3_gpu/`. Part 3 `3_kernels/`. Stage 08c.
 
 ### Lane
 
@@ -1060,7 +1096,7 @@ The index of one thread in its warp, from 0 to 31.
 
 **Like:** a SIMD lane.
 
-**Taught in:** Part 3 `kernels/`.
+**Taught in:** Part 3 `3_kernels/`.
 
 ### Thread block
 
@@ -1069,7 +1105,7 @@ The index of one thread in its warp, from 0 to 31.
 A group of threads that run on the same SM and can share memory. A launch runs
 many blocks.
 
-**Taught in:** Part 0 `gpu/`. Stage 08.
+**Taught in:** Part 0 `3_gpu/`. Stage 08.
 
 ### Grid
 
@@ -1077,7 +1113,7 @@ many blocks.
 
 All the thread blocks of one launch.
 
-**Taught in:** Part 0 `gpu/`. Stage 08.
+**Taught in:** Part 0 `3_gpu/`. Stage 08.
 
 ### Shared memory
 
@@ -1107,7 +1143,7 @@ much latency the SM can hide. It does not tell you how busy the SM is.
 **Like:** the number of requests in flight that keep a server busy while each
 one waits on I/O.
 
-**Taught in:** Part 3 `kernels/`. Stage 08c.
+**Taught in:** Part 3 `3_kernels/`. Stage 08c.
 
 ### Coalescing
 
@@ -1118,7 +1154,7 @@ into a small number of large memory transactions.
 
 **Like:** reads that stay in the same cache lines.
 
-**Taught in:** Part 3 `kernels/`. Stage 08b.
+**Taught in:** Part 3 `3_kernels/`. Stage 08b.
 
 ### Sector
 
@@ -1129,7 +1165,7 @@ fetches the whole sector.
 
 **Like:** a cache line, but 32 bytes.
 
-**Taught in:** Part 3 `kernels/`.
+**Taught in:** Part 3 `3_kernels/`.
 
 ### Spill
 
@@ -1148,7 +1184,7 @@ An instruction that moves values between the registers of threads in one warp,
 with no shared memory and no barrier. Each lane in the mask must reach the
 instruction. If one lane does not, the instruction never returns.
 
-**Taught in:** Part 3 `kernels/`. Stage 08c.
+**Taught in:** Part 3 `3_kernels/`. Stage 08c.
 
 ### Split-K
 
@@ -1181,7 +1217,7 @@ stays in registers and never goes to memory.
 **Like:** a query plan that pipelines two operators, not one that writes a
 temporary table.
 
-**Taught in:** Part 7 `quantization/`. Stage 18b.
+**Taught in:** Part 7 `2_quantization/`. Stage 18b.
 
 ### Interconnect
 
@@ -1192,7 +1228,7 @@ HBM.
 
 **Like:** the network between servers.
 
-**Taught in:** Part 4 `admission/`. Part 7 `tensorParallel/`.
+**Taught in:** Part 4 `1_admission/`. Part 7 `4_tensorParallel/`.
 
 ### Nsight Compute
 
@@ -1240,7 +1276,7 @@ The time from the request to the complete reply.
 
 **Check:** no
 
-**Taught in:** Part 2 `continuous/`. Part 6 `metrics/`. Stage 16.
+**Taught in:** Part 2 `2_continuous/`. Part 6 `2_metrics/`. Stage 16.
 
 ### Throughput
 
@@ -1248,7 +1284,7 @@ The work that the engine completes for each second, in tokens or requests.
 
 **Check:** no
 
-**Taught in:** Part 6 `metrics/`. Stage 16. Stage 28.
+**Taught in:** Part 6 `2_metrics/`. Stage 16. Stage 28.
 
 ### TTFT
 
@@ -1257,7 +1293,7 @@ The work that the engine completes for each second, in tokens or requests.
 The time from the request to the first output token. The queue wait and the
 prefill set it.
 
-**Taught in:** Part 6 `metrics/`. Stage 16.
+**Taught in:** Part 6 `2_metrics/`. Stage 16.
 
 ### TPOT
 
@@ -1266,7 +1302,7 @@ prefill set it.
 The time between two output tokens of one reply. It decides how smooth the
 stream looks.
 
-**Taught in:** Part 6 `metrics/`. Stage 16.
+**Taught in:** Part 6 `2_metrics/`. Stage 16.
 
 ### Percentile
 
@@ -1277,7 +1313,7 @@ that 99% of requests beat.
 
 **Like:** the same percentiles that you use for a web service.
 
-**Taught in:** Part 6 `metrics/`. Stage 16. Stage 28.
+**Taught in:** Part 6 `2_metrics/`. Stage 16. Stage 28.
 
 ### SLO
 
@@ -1285,7 +1321,7 @@ that 99% of requests beat.
 
 The latency promise to the users, for example "TTFT under 1 second".
 
-**Taught in:** Part 6 `metrics/`. Stage 16.
+**Taught in:** Part 6 `2_metrics/`. Stage 16.
 
 ### Goodput
 
@@ -1294,7 +1330,7 @@ matters.
 
 **Like:** throughput that counts only the successful responses.
 
-**Taught in:** Part 6 `metrics/`. Stage 16. Stage 28.
+**Taught in:** Part 6 `2_metrics/`. Stage 16. Stage 28.
 
 ### Pareto frontier
 
@@ -1303,7 +1339,7 @@ matters.
 The set of settings where you cannot improve one metric without a loss in
 another.
 
-**Taught in:** Part 6 `metrics/`.
+**Taught in:** Part 6 `2_metrics/`.
 
 ### OpenAI API
 
@@ -1326,4 +1362,4 @@ the end.
 
 **Check:** no
 
-**Taught in:** Part 5 `detokenize/`. Part 6 `async/`. Stage 15. Stage 27.
+**Taught in:** Part 5 `3_detokenize/`. Part 6 `1_async/`. Stage 15. Stage 27.

@@ -19,7 +19,7 @@ WHAT YOU ARE BUILDING
         nbytes()               the bytes that a small-batch step reads
     quantize_model(model, max_rows=MAX_ROWS) -> number of weights replaced
         every qkv, o, gate_up and down weight, and the lm_head
-    perplexity(model, token_ids) -> float
+    continuation_logits(model, token_ids, prompt_len) -> (OSL, vocab) fp32
 
 DISPATCH ON THE BATCH, BECAUSE YOUR KERNEL HAS A CROSSOVER
 
@@ -46,12 +46,10 @@ TRAPS
   - quantize_int8_per_channel (stage 18) gives one scale for each OUTPUT row.
     Quantize in float32, and keep the scales in float32.
   - The lm_head is a quarter of the bytes of a small model. Measure its effect
-    on perplexity, then decide. Per-channel int8 barely moves it.
+    on the fidelity of stage 18, then decide. Per-channel int8 barely moves it.
   - The dispatch happens inside a captured graph. Each bucket has one row
     count, so each bucket takes one path, always. That is correct.
 """
-
-import math
 
 import torch
 import torch.nn.functional as F
@@ -92,6 +90,10 @@ def quantize_model(model, max_rows=MAX_ROWS):
 
 
 @torch.no_grad()
-def perplexity(model, token_ids):
-    """exp(mean cross-entropy) of a tvllm model on one sequence."""
-    raise NotImplementedError("stage 24: implement perplexity")
+def continuation_logits(model, token_ids, prompt_len):
+    """The float32 logits that predict each output token of a tvllm model.
+    -> (OSL, vocab). The same contract as stage 18, on the capstone model:
+    row i predicts token_ids[prompt_len + i]. Use DenseReference as the
+    attention, and ask model.forward for the logits of the output rows only.
+    Stage 18 gives you fidelity() to compare two of these."""
+    raise NotImplementedError("stage 24: implement continuation_logits")

@@ -25,6 +25,8 @@ quantization, and this method never quantizes an activation.
 Then do the same to the KV cache, which is the other large reader.
 """
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
@@ -85,12 +87,38 @@ def quantize_model_(model, skip=("lm_head",)):
 
 
 @torch.inference_mode()
-def perplexity(model, tokenizer, text, max_len=512):
-    """exp(the mean cross-entropy of the next-token prediction).
+def continuation_logits(model, token_ids, prompt_len):
+    """The float32 logits that predict each output token. -> (OSL, vocab).
 
-    This number guards the accuracy. Compute the logits, shift them by one,
-    get the cross-entropy against the true next tokens, and take the exp. A
-    quantization must change this number only a little. If not, you gave
-    correctness for speed.
+    token_ids is a prompt of prompt_len tokens, then its continuation of OSL
+    tokens. Row i of the result is the prediction of token_ids[prompt_len + i].
+    It comes from the position before that token, so the rows start at
+    prompt_len - 1.
+
+    This is the quality that a user sees: the tokens that the engine makes
+    after the prompt, not a score over the prompt.
     """
-    raise NotImplementedError("stage 18: implement perplexity")
+    raise NotImplementedError("stage 18: implement continuation_logits")
+
+
+@dataclass
+class Fidelity:
+    top1_agreement: float       # the fraction of positions with the same top token
+    mean_kl: float              # the mean KL(reference || candidate), in nats
+
+
+def fidelity(reference_logits, candidate_logits):
+    """How close the candidate model stays to the reference, position by
+    position. Both arguments are (positions, vocab). -> Fidelity.
+
+    top1_agreement: the fraction of positions where the two models choose the
+        same most likely token. A quantized engine must make the same choices.
+    mean_kl: the mean of KL(P || Q), with P from the reference and Q from the
+        candidate. It also finds a change that does not change the top token
+        yet. Compute it from log_softmax in float32, not from probabilities:
+        a probability of 1e-30 is 0 in bf16, and log(0) is -inf.
+
+    Both models read the SAME tokens, so the difficulty of the text and its
+    length cancel. That is why this metric is stable, and perplexity is not.
+    """
+    raise NotImplementedError("stage 18: implement fidelity")

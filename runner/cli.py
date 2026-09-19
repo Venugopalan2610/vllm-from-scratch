@@ -34,6 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from runner import momentum  # noqa: E402
 from runner.glossary import terms_for_stage  # noqa: E402
 from runner.style import paint  # noqa: E402  (needs ROOT on the path)
 
@@ -61,6 +62,7 @@ def load_stages(backend="torch"):
             if backend not in stage.get("tracks", BACKENDS):
                 continue
             stage["arc"], stage["arc_id"] = arc["name"], arc["id"]
+            stage["arc_blurb"] = arc.get("blurb", "")
             ladder.append(stage)
     return data, ladder
 
@@ -206,8 +208,11 @@ def set_backend(progress, name, persist=False):
 
 def save_progress(progress):
     backend = progress.get("_persist", progress["backend"])
-    PROGRESS_FILE.write_text(json.dumps(
-        {"backend": backend, "tracks": progress["tracks"]}, indent=2))
+    saved = {"backend": backend, "tracks": progress["tracks"]}
+    for key in ("history", "last_seen"):          # runner/momentum.py keeps these
+        if key in progress:
+            saved[key] = progress[key]
+    PROGRESS_FILE.write_text(json.dumps(saved, indent=2))
 
 
 # ---------------------------------------------------------------- checks
@@ -296,6 +301,16 @@ def progress_bar(done, total, width=28):
 
 def heading(text):
     print("\n" + paint(text, "bold"))
+
+
+def say(lines):
+    """Print the (text, styles) lines that runner/momentum.py returns."""
+    for text, styles in lines:
+        if not text.startswith(momentum.PREFORMATTED):
+            text = wrap(text)
+        else:
+            text = "  " + text
+        print(paint(text, *styles) if styles else text)
 
 
 def print_stage_banner(stage, progress, total):
@@ -394,15 +409,36 @@ def print_run_header(title, stage, progress):
     print(paint("running checks...", "dim") + "\n")
 
 
+def run_and_record(stage, progress):
+    """Run the checks, and add the run to the history of the stage.
+    -> (return code, passed, failed, output, RunResult or None)."""
+    return_code, passed, failed, output = run_checks(stage, progress)
+    result = None
+    if passed + failed:          # 0 and 0 means that pytest did not start
+        result = momentum.record_run(progress, stage["id"], passed, passed + failed)
+        save_progress(progress)
+    return return_code, passed, failed, output, result
+
+
+def report_failure(stage, progress, passed, failed, output, result):
+    show_failures(output, passed, failed, " and ".join(stage_files(stage, progress)))
+    if result is None:
+        return
+    say(momentum.after_run(result))
+    if result.is_stuck:
+        print()
+        say(momentum.when_stuck(result, stage_label(stage), stage["arc_id"]))
+    print()
+
+
 def cmd_test(ladder, progress, stage_id=None):
     stage = resolve_or_report(ladder, progress, stage_id)
     if not stage:
         return 1
     print_run_header("Stage", stage, progress)
-    return_code, passed, failed, output = run_checks(stage, progress)
+    return_code, passed, failed, output, result = run_and_record(stage, progress)
     if return_code != 0:
-        show_failures(output, passed, failed,
-                      " and ".join(stage_files(stage, progress)))
+        report_failure(stage, progress, passed, failed, output, result)
         return return_code
     print(paint(f"  ALL {passed} CHECKS PASSED", "green", "bold"))
     print("\n  " + paint("./vc submit", "cyan") + " to bank it and open the "
@@ -432,10 +468,9 @@ def cmd_submit(ladder, progress):
         print("\n" + paint("All stages complete. You built vLLM.", "bold") + "\n")
         return 0
     print_run_header("Submission: stage", stage, progress)
-    return_code, passed, failed, output = run_checks(stage, progress)
+    return_code, passed, failed, output, result = run_and_record(stage, progress)
     if return_code != 0:
-        show_failures(output, passed, failed,
-                      " and ".join(stage_files(stage, progress)))
+        report_failure(stage, progress, passed, failed, output, result)
         print(paint("  NOT SUBMITTED", "red", "bold") + "  "
               + paint("fix them and run ./vc submit again", "dim") + "\n")
         return 1
@@ -446,11 +481,34 @@ def cmd_submit(ladder, progress):
     save_progress(progress)
     done, total = len(progress["completed"]), len(ladder)
     print(f"\n  {progress_bar(done, total)}  {done}/{total} stages\n")
-
-    if current_stage(ladder, progress):
+    say(momentum.after_submit(momentum.stage_record(progress, stage["id"]),
+                              stage_label(stage)))
+    following = current_stage(ladder, progress)
+    if following is None or following["arc_id"] != stage["arc_id"]:
+        print()
+        say(momentum.after_arc(stage["arc_id"], stage["arc"], stage["arc_blurb"]))
+    if following:
         return cmd_guide(ladder, progress)
-    print(paint("  You built vLLM. Every stage passes.", "bold", "green") + "\n")
+    print()
+    say(momentum.finished(progress))
+    print()
     return 0
+
+
+def print_momentum(stage, progress):
+    """On the status screen: a welcome on the first visit, a welcome back
+    after a break, or your best result on the current stage."""
+    record = momentum.stage_record(progress, stage["id"])
+    days = momentum.days_away(progress)
+    if days is None and not progress["completed"]:
+        print()
+        say(momentum.first_visit())
+    elif days is not None and days >= momentum.AWAY_DAYS:
+        print()
+        say(momentum.welcome_back(days, stage_label(stage), record))
+    elif record.best >= 0:
+        print("  " + paint(f"Your best: {record.best}/{record.total} checks, "
+                           f"in {record.runs} runs.", "dim"))
 
 
 def cmd_status(ladder, progress):
@@ -463,15 +521,19 @@ def cmd_status(ladder, progress):
     print("  " + paint(f"{other}: {len(progress['tracks'][other])}"
                        f"/{other_total}   (./vc backend {other})", "dim"))
     if not stage:
-        print("\n  " + paint("All done. You built vLLM.", "bold") + "\n")
+        print()
+        say(momentum.finished(progress))
+        print()
         return 0
     print("\n  " + paint(f"Current: stage {stage_label(stage)}  "
                          f"{stage_name(stage, progress)}", "bold"))
     for path in stage_files(stage, progress):
         print("  " + paint(path, "dim"))
+    print_momentum(stage, progress)
     print("\n  " + paint("./vc guide", "cyan") + "   what to build and why")
     print("  " + paint("./vc test", "cyan") + "    run the checks")
-    print("  " + paint("./vc submit", "cyan") + "  bank it, open the next stage\n")
+    print("  " + paint("./vc submit", "cyan") + "  bank it, open the next stage")
+    print("\n  " + paint(momentum.MOTTO, "dim") + "\n")
     return 0
 
 
@@ -608,6 +670,8 @@ def cmd_peek(ladder, progress, stage_id=None):
         print("\n" + paint(f"--- {path} {'-' * max(0, 60 - len(path))}",
                            "bold", "cyan") + "\n")
         print(text)
+    say(momentum.after_peek())
+    print()
     return 0
 
 
@@ -622,6 +686,7 @@ def cmd_peek_apply(ladder, progress, stage_id=None):
         target.write_text(text)
         print(paint(f"Wrote the reference solution into {path}.", "yellow"))
     print(paint("Read it before you submit. The reading was the point.", "dim"))
+    say(momentum.after_peek())
     return 0
 
 

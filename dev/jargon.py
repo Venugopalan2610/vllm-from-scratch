@@ -6,8 +6,10 @@ The course defines a term at its first use, in one of three ways:
   - as a link to the glossary:  [KV cache](../../GLOSSARY.md#kv-cache)
   - in a markdown heading:  ### Top-k: keep the k best
 
-The script reads the notebooks in the order of course/READING_ORDER.md, and
-reads only the markdown cells. It ignores code blocks, and text in backticks.
+The script reads the notebooks in the reading order, which is in their
+names: Part3_PagedAttention/2_gather/part3_gat_1_attentionFromScratch.ipynb
+is Part 3, section 2, notebook 1. It reads only the markdown cells, and it
+ignores code blocks and text in backticks.
 
     .venv/bin/python dev/jargon.py          report, exit 1 if a term is early
     .venv/bin/python dev/jargon.py --fix    link each early use to the glossary
@@ -26,8 +28,8 @@ sys.path.insert(0, str(ROOT))
 from runner.glossary import GLOSSARY, load_glossary  # noqa: E402
 
 COURSE = ROOT / "course"
-READING_ORDER = COURSE / "READING_ORDER.md"
-NOTEBOOK_PATH = re.compile(r"`(Part\d[^`]+\.ipynb)`")
+# Part<number>_<name>/<number>_<section>/part<number>_<abbreviation>_<number>_<name>.ipynb
+NOTEBOOK_PATH = re.compile(r"Part(\d+)_[^/]+/(\d+)_[^/]+/part\d+_[a-z]+_(\d+)_[^/]+\.ipynb$")
 CODE = re.compile(r"```.*?```|`[^`\n]*`|^ {4,}\S.*$", re.DOTALL | re.MULTILINE)
 BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 GLOSSARY_LINK = re.compile(r"\[([^\]]+)\]\([^)]*GLOSSARY\.md[^)]*\)")
@@ -49,9 +51,22 @@ class EarlyUse:
         return " ".join(snippet.split())
 
 
+def notebooks():
+    """-> each notebook that a student reads: all of them but the solutions."""
+    return [path for path in COURSE.rglob("*.ipynb")
+            if "solutions" not in path.parts and ".ipynb_checkpoints" not in path.parts]
+
+
+def order_key(path):
+    """(part, section, notebook), from the numbers in the path. None if the
+    path does not have the numbers."""
+    match = NOTEBOOK_PATH.search(path.relative_to(COURSE).as_posix())
+    return tuple(int(number) for number in match.groups()) if match else None
+
+
 def reading_order():
     """-> the notebook paths, in the order that a student reads them."""
-    return [COURSE / path for path in NOTEBOOK_PATH.findall(READING_ORDER.read_text())]
+    return sorted(notebooks(), key=order_key)
 
 
 def masked(source):
@@ -156,20 +171,21 @@ def report(early):
 
 def main(argv):
     terms = [term for term in load_glossary().values() if term.checked]
-    notebooks = reading_order()
-    missing = [notebook for notebook in notebooks if not notebook.exists()]
-    if missing:
-        print("READING_ORDER.md lists notebooks that do not exist:")
-        for notebook in missing:
-            print(f"  {notebook.relative_to(COURSE)}")
+    unnumbered = [path for path in notebooks() if order_key(path) is None]
+    if unnumbered:
+        print("These notebooks have no numbers in their path, so they have no "
+              "place in the reading order:")
+        for path in unnumbered:
+            print(f"  {path.relative_to(COURSE)}")
         return 1
-    early = early_uses(terms, notebooks)
+    ordered = reading_order()
+    early = early_uses(terms, ordered)
     if "--fix" in argv:
         add_links(early)
         return 0
     report(early)
     print(f"\n{len(early)} terms used before a definition, "
-          f"{len(terms)} terms checked, {len(notebooks)} notebooks.")
+          f"{len(terms)} terms checked, {len(ordered)} notebooks.")
     return 1 if early else 0
 
 

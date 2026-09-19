@@ -363,8 +363,8 @@ arcs:
           gives almost half the decode time. Use INT8 or FP8 on the weights
           only, with a scale for each channel, and dequantize in the kernel
           epilogue. Quantize the KV cache too. It is the other big reader.
-        deliver: "INT8 weight-only linear + FP8 KV cache, with a perplexity guard."
-        measure: "tokens/sec and VRAM vs perplexity delta on a fixed text sample."
+        deliver: "INT8 weight-only linear + FP8 KV cache, with a fidelity guard: top-1 agreement and KL against bf16."
+        measure: "tokens/sec and VRAM, against the KL from bf16 at the generated tokens of an ISL/OSL workload."
         jax_file: "app/j18_quantization.py"
         jax_insight: >
           The arithmetic is the same. But the model is a pytree, and not a
@@ -372,7 +372,7 @@ arcs:
           over named_modules. Watch that the dequantize stays FUSED into the
           matmul. If XLA materialises the bf16 weight first, you added a
           full-size write and a full-size read, and decode became slower.
-        jax_deliver: "int8 per-channel and fp8 e4m3 over the params pytree, with a perplexity guard."
+        jax_deliver: "int8 per-channel and fp8 e4m3 over the params pytree, with a fidelity guard against bf16."
 
       - id: "18b-int8-gemv-cuda"
         tracks: ["torch"]
@@ -481,7 +481,7 @@ arcs:
           Measure the crossover in the real graphed step, not on one matrix:
           one matrix of a small model fits in L2, and the result is wrong.
         deliver: "Int8 weights in every matmul, with a dispatch to bf16 above a measured crossover."
-        measure: "At least 1.3x at batch 1, no loss at batch 32, perplexity within 3%."
+        measure: "At least 1.3x at batch 1, no loss at batch 32, KL from bf16 at most 0.015 nats."
 
       - id: "24b-fp8-kv-cache"
         tracks: ["torch"]
@@ -496,7 +496,7 @@ arcs:
           the key scale into the query and the value scale into the output.
           Half the bytes to read, and twice the tokens in the pool.
         deliver: "FP8 write and attention kernels, calibrated scales, and an FP8 runner."
-        measure: "At least 1.2x at 16 x 2048 tokens, perplexity through the decode kernel within 3%."
+        measure: "At least 1.2x at 16 x 2048 tokens, KL from bf16 through the decode kernel at most 0.03 nats."
 
       - id: "25-speculative"
         tracks: ["torch"]

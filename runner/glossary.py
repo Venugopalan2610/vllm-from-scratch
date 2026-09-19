@@ -13,7 +13,7 @@ The format of one entry:
 
     **Check:** no                  (optional: the checker ignores the term)
 
-    **Taught in:** Part 1 `kvCache/`. Stage 02.
+    **Taught in:** Part 1 `3_kvCache/`. Stage 02.
 """
 
 import re

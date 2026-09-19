@@ -15,7 +15,7 @@ So you need preemption, and you have two choices:
              sequence comes back. It costs one prefill.
 
 This stage uses recompute. It is not always the cheaper choice. The notebook
-part4_adm_swapVsRecompute measures both, and on a small model a swap can be
+part4_adm_2_swapVsRecompute measures both, and on a small model a swap can be
 faster. Recompute has a different advantage: you can cut it into chunks and
 schedule it (stage 11). A swap-in stops the sequence until its bytes arrive.
 """

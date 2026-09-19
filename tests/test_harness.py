@@ -160,16 +160,16 @@ def test_every_stage_teaches_a_glossary_term(stage):
         f"no glossary entry names stage {label} in its **Taught in:** field")
 
 
-def test_reading_order_lists_each_notebook_once():
-    from dev.jargon import COURSE, reading_order
+def test_each_notebook_has_its_place_in_the_reading_order():
+    """The order is in the names: Part, section and notebook numbers. Each
+    notebook needs them, and no two notebooks can share a place."""
+    from dev.jargon import notebooks, order_key
 
-    listed = reading_order()
-    on_disk = {path for path in COURSE.rglob("*.ipynb")
-               if "solutions" not in path.parts and ".ipynb_checkpoints" not in path.parts}
-    assert len(listed) == len(set(listed)), "READING_ORDER.md lists a notebook twice"
-    assert set(listed) == on_disk, (
-        f"missing from READING_ORDER.md: {sorted(on_disk - set(listed))}; "
-        f"listed but absent: {sorted(set(listed) - on_disk)}")
+    keys = {path: order_key(path) for path in notebooks()}
+    unnumbered = sorted(str(path) for path, key in keys.items() if key is None)
+    assert not unnumbered, f"no numbers in the name: {unnumbered}"
+    places = list(keys.values())
+    assert len(places) == len(set(places)), "two notebooks have the same number"
 
 
 def test_course_defines_each_term_before_it_uses_it():

@@ -1,8 +1,9 @@
 """Stage 24 - quantized weights in the engine.
 
-The spec is in app/s24_quantized.py. The accuracy is a perplexity ratio. The
-speed is the graphed decode step, int8 against bf16, on your card, one after
-the other.
+The spec is in app/s24_quantized.py. The accuracy is the fidelity of stage 18
+on an ISL/OSL workload: the int8 engine against the bf16 engine, at each
+output position. The speed is the graphed decode step, int8 against bf16, on
+your card, one after the other.
 """
 
 from contextlib import contextmanager
@@ -13,8 +14,9 @@ import torch
 import cudalib
 from app.s21_paged_runner import SeqChunk
 from app.s23_graphs import GraphedModelRunner
-from app.s24_quantized import MAX_ROWS, Int8Linear, perplexity, quantize_model
-from tests.helpers import CAPSTONE_PROMPTS, MODEL, PROSE_SAMPLE
+from app.s18_quantization import fidelity
+from app.s24_quantized import MAX_ROWS, Int8Linear, continuation_logits, quantize_model
+from tests.helpers import CAPSTONE_PROMPTS, ISL, MODEL, OSL, hf_workload
 from tvllm import LayerWeights, Model
 
 
@@ -85,14 +87,22 @@ def dequantized_weights(model):
             setattr(owner, name, weight)
 
 
-def test_perplexity_barely_moves(nvcc, tmodel, qmodel):
-    token_ids = tmodel.tokenizer(PROSE_SAMPLE).input_ids[:512]
-    bf16 = perplexity(tmodel, token_ids)
+# Stage 18 measured the gate. The lm_head is int8 here too, so the engine
+# moves a little more than the model of stage 18.
+TOP1_FLOOR = 0.90
+KL_CEILING = 0.015
+
+
+def test_int8_keeps_the_choices_of_the_engine(nvcc, hf, tmodel, qmodel):
+    sequences = hf_workload(*hf)
+    before = torch.cat([continuation_logits(tmodel, ids, ISL) for ids in sequences])
     with dequantized_weights(qmodel):
-        int8 = perplexity(qmodel, token_ids)
-    print(f"\n  perplexity bf16 {bf16:.3f}, int8 {int8:.3f} "
-          f"({100 * (int8 / bf16 - 1):+.2f}%)")
-    assert int8 / bf16 < 1.03
+        after = torch.cat([continuation_logits(qmodel, ids, ISL) for ids in sequences])
+    result = fidelity(before, after)
+    print(f"\n  ISL {ISL}, OSL {OSL}: the same top token at "
+          f"{100 * result.top1_agreement:.1f}% of the output positions, "
+          f"mean KL {result.mean_kl:.4f} nats")
+    assert result.top1_agreement >= TOP1_FLOOR and result.mean_kl <= KL_CEILING
 
 
 def _step_ms(model, batch_size):

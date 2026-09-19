@@ -13,7 +13,8 @@ from app.j18_quantization import (
     dequantize_fp8,
     dequantize_int8,
     dequantize_tree,
-    perplexity,
+    continuation_logits,
+    fidelity,
     quantize_fp8,
     quantize_int8_per_channel,
     quantize_tree,
@@ -21,11 +22,12 @@ from app.j18_quantization import (
     tree_bytes,
 )
 
-TEXT = (
-    "The history of computing began with mechanical calculators, and every "
-    "step since has been a fight against the cost of moving data rather than "
-    "the cost of arithmetic. "
-) * 8
+from tests.helpers import ISL, OSL, prose_prompts
+from tests.jhelpers import greedy_workload
+
+# The same gates as the torch track. See tests/stage_18_quantization/test_stage.py.
+TOP1_FLOOR = 0.90
+KL_CEILING = 0.015
 
 
 def _random(seed, shape, scale=1.0):
@@ -158,21 +160,29 @@ def test_norms_are_left_alone(jmodel):
             f"{name} must not be quantized")
 
 
-def test_perplexity_barely_moves(jmodel):
-    """The guard. int8 weights must not cost you the model."""
+def test_a_model_agrees_with_itself(jax_device):
+    logits = _random(0, (6, 50))
+    result = fidelity(logits, logits)
+    assert result.top1_agreement == 1.0
+    assert abs(result.mean_kl) < 1e-6
+
+
+def test_int8_keeps_the_choices_of_the_model(jmodel):
+    """The guard. int8 weights must not cost you the model. It compares the
+    two models at each generated position of an ISL/OSL workload."""
     from jvllm import Qwen3
 
-    bf16_perplexity = perplexity(jmodel, TEXT)
-    restored_params = dequantize_tree(quantize_tree(jmodel.params),
-                                      jmodel.dtype)
+    sequences = greedy_workload(jmodel, prose_prompts(jmodel.tokenizer), OSL)
+    restored_params = dequantize_tree(quantize_tree(jmodel.params), jmodel.dtype)
     int8_model = Qwen3(restored_params, jmodel.config, jmodel.tokenizer,
                        jmodel.eos_ids)
-    int8_perplexity = perplexity(int8_model, TEXT)
-    change = (int8_perplexity - bf16_perplexity) / bf16_perplexity
+    before = jnp.concatenate([continuation_logits(jmodel, ids, ISL) for ids in sequences])
+    after = jnp.concatenate([continuation_logits(int8_model, ids, ISL) for ids in sequences])
+    result = fidelity(before, after)
 
-    print(f"\n  bf16 perplexity: {bf16_perplexity:8.3f}")
-    print(f"  int8 perplexity: {int8_perplexity:8.3f}   ({change * 100:+.1f}%)")
-    assert np.isfinite(bf16_perplexity) and np.isfinite(int8_perplexity)
-    assert change < 0.15, (
-        f"the perplexity moved {change * 100:.1f}%. Do you quantize the norms, "
+    print(f"\n  ISL {ISL}, OSL {OSL}: the same top token at "
+          f"{100 * result.top1_agreement:.1f}% of the output positions, "
+          f"mean KL {result.mean_kl:.4f} nats")
+    assert result.top1_agreement >= TOP1_FLOOR and result.mean_kl <= KL_CEILING, (
+        "the int8 model makes different choices. Do you quantize the norms, "
         "or use one scale for the tensor, not one for each channel?")

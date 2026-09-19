@@ -1,7 +1,31 @@
 # Build Your Own vLLM
 
-32 stages on the torch track. You start with a naive greedy loop. You finish
-with one inference server that you built from your own parts:
+> **Do not stop. Continue. Be better than before.**
+
+Stage 01 is the slowest inference engine that you will ever write. It is slow
+on purpose. For each new token, it computes all the earlier tokens again.
+
+31 stages later, the same GPU runs a server that you built from your own
+parts. Each stage between the two must be better than the stage before it:
+faster, or more correct. A measurement on your own GPU proves it. Nobody
+tells you that your code is good. The machine tells you.
+
+## The questions that you will answer
+
+- Your GPU can do tens of trillions of operations each second. Why does it
+  spend most of a chat reply in a wait?
+- Why do 32 users cost almost the same as 1 user?
+- Why did vLLM take its central idea from the virtual memory of an operating
+  system?
+- How can a guess make a model faster, with no change to one word of its
+  output?
+- Why can a faster kernel give you no speedup at all?
+
+You will not read these answers. You will measure them.
+
+## What you build
+
+One inference server, from your own parts:
 
 - a paged KV cache, with your block allocator and your CUDA kernels,
 - continuous batching with a token budget, chunked prefill and preemption,
@@ -14,14 +38,7 @@ with one inference server that you built from your own parts:
 - an OpenAI-compatible HTTP API: chat, sampling fields, stop strings,
   streaming, usage, and Prometheus metrics.
 
-Tensor parallelism is the one part that stays a separate stage. It needs two
-GPUs to be real, and the course runs on one.
-
-Checks gate every stage. A **measurement** gates most of them. You do not
-advance because your code runs. You advance because it became faster in the way
-that the stage predicted.
-
-Five of those stages are **CUDA that you write yourself**:
+Five stages are **CUDA that you write yourself**:
 
 - a paged attention kernel,
 - the same kernel, made to coalesce,
@@ -29,23 +46,51 @@ Five of those stages are **CUDA that you write yourself**:
 - a quantized GEMV with a fused epilogue,
 - the attention kernel again, on an FP8 cache.
 
-This is not Triton. These are real `.cu` files, real `nvcc`, and real register
-counts.
+These are real `.cu` files, real `nvcc`, and real register counts. This is not
+Triton.
 
-The course runs on one consumer GPU. You can use **PyTorch or JAX**. It is the
-same ladder on two backends. Approximately half of the stages serve both
-tracks, because they are pure logic and no framework appears in them.
-
-**New to machine learning or to GPUs?** Start with Part 0 of the notebooks,
-`course/Part0_FromAProgramToAModel/`. It explains a model, attention and the
-GPU to a software engineer, and it needs no ML background. Each term of the
-course is in [`course/GLOSSARY.md`](course/GLOSSARY.md), with an analogy from
-software, and `./vc guide` prints the new terms of each stage.
+Tensor parallelism is the one part that stays a separate stage. It needs two
+GPUs to be real, and the course runs on one consumer GPU. You can use
+**PyTorch or JAX**: the same ladder on two backends.
 
 The derivations behind these stages are at
 [derivingsystems.com](https://derivingsystems.com).
 [The Course](https://derivingsystems.com/course.html) puts the whole ladder on
-one page. Read it before you build, if you want to.
+one page.
+
+## Start here
+
+1. **Read this page to the end of "The philosophy".** Then stop reading and
+   start.
+2. **Set up.** Run `./setup.sh`, then `./vc info` to see what your GPU can do.
+   If you have no GPU, use [Colab](#start-with-no-installation).
+3. **Is ML or GPU work new to you?** Then do Part 0 first:
+   `course/Part0_FromAProgramToAModel/`. It explains a model, attention and a
+   GPU to a software engineer. [`course/GLOSSARY.md`](course/GLOSSARY.md)
+   defines each term of the course, with an analogy from software.
+4. **Run `./vc`.** It shows where you are. `./vc guide` shows the new words of
+   the stage, why the stage exists, and what to build.
+5. **Do the loop.** Edit the file in `app/`, run `./vc test`, and run
+   `./vc submit` when all the checks pass. Read the notebooks of a stage before
+   you build it.
+
+## The philosophy
+
+**Do not stop. Continue. Be better than before.** Each of the rules below comes
+from that one sentence.
+
+- **Be better than before.** Each stage must beat the stage before it, and a
+  measurement decides. `./vc test` compares each run with your best run, so
+  you always know if you went forward.
+- **Build the slow version first, and measure it.** Then each improvement is
+  a number, not an opinion.
+- **Predict, then measure, then explain the difference.** A prediction that is
+  wrong teaches you the most. The difference is where the hardware lesson is.
+- **The checks are the spec.** You edit `app/`. You never edit `tests/`.
+- **Do not stop when you are stuck. Change the approach.** After 5 runs with
+  no new pass, `./vc` gives you three ways forward. One of them is to read the
+  answer. A stage that you read the answer to is better than a repo that you
+  stopped.
 
 ## What you have at the end, measured
 
@@ -60,7 +105,8 @@ minute. All of these are ratios, so they hold on any card:
 | CUDA graphs against eager, at batch 1 | 1.3x to 1.5x | 1.2x |
 | int8 weights against bf16, batch-1 step | 1.47x to 1.55x | 1.3x |
 | FP8 KV against bf16 KV, 16 x 2048 tokens | 1.33x to 1.46x | 1.2x |
-| perplexity with int8 weights, with an FP8 KV cache | within 1% | within 3% |
+| int8 weights: KL from bf16 at the generated tokens (ISL 256, OSL 64) | 0.004 nats | 0.015 nats |
+| FP8 KV cache: KL from bf16, through the decode kernel | 0.009 nats | 0.03 nats |
 | speculative decoding: greedy tokens against no speculation | identical | identical |
 | speculative decoding on a copy task, batch 1 | 1.5x to 3.1x | 1.5x |
 | JSON mode: answers that parse | all | all |
@@ -121,14 +167,16 @@ still run. The allocator, the scheduler, the prefix cache, the metrics, the
 speculative sampling, the guided decoding and the tensor-parallel stages are
 pure logic.
 
-Do you have a GPU but no `nvcc`? Everything runs except the four CUDA stages.
+Do you have a GPU but no `nvcc`? Everything runs except the five CUDA stages.
 Those stages skip. They do not fail.
 
 ## Two ways in
 
 The notebooks in [`course/`](course/) build the intuition. The ladder in `app/`
 makes you build the engine. They have an order. Read the notebooks for a stage,
-then build the stage.
+then build the stage. The numbers in the names give the order of the
+notebooks, from Part 0 to Part 8. [`course/README.md`](course/README.md#the-order)
+explains it.
 
 ```bash
 .venv/bin/jupyter lab course/     # the lecture half
@@ -274,8 +322,12 @@ and nothing else.
 ```
 
 The command fetches the branch on first use. Use it when you are stuck. Do not
-stall. A stage that you read the answer to is better than a repo that you
-abandoned. You can also browse the solutions directly:
+stop. A stage that you read the answer to is better than a repo that you
+abandoned.
+
+Read the answer, close it, and write the code yourself. Then continue.
+
+You can also browse the solutions directly:
 
 ```bash
 git show solutions:.solutions/s07_paged_attn.py
@@ -287,7 +339,7 @@ git show solutions:.solutions/s07_paged_attn.py
 - Progress lives in `.progress.json`, which git ignores. Delete it to start
   again.
 
-**All 600 torch checks and all 414 JAX checks pass against the reference
+**All 776 torch checks and all 589 JAX checks pass against the reference
 solutions.** Nothing here is aspirational. If a check fails, the cause is your
 code and not the harness.
 
@@ -325,7 +377,7 @@ physical fact about memory bandwidth, and the moves that the fact forces.
 Section 1 answers the question "is this IO-bound or CPU-bound?" It uses no
 jargon and writes out every division. Section 3b is the CUDA argument: why the
 same kernel is worth three versions, and which constraint each version fights.
-Section 9 is the vocabulary. It includes warps, coalescing and occupancy.
+The vocabulary is in [`course/GLOSSARY.md`](course/GLOSSARY.md).
 
 ## The ladder
 

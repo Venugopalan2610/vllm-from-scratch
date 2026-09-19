@@ -26,7 +26,8 @@ WHAT YOU ARE BUILDING
     quantize_tree(params, skip=("embed", "lm_head", "norm")) -> quantized pytree
     dequantize_tree(quantized_tree, dtype=bfloat16) -> params pytree
     tree_bytes(tree) -> int
-    perplexity(model, text, max_len=512) -> float
+    continuation_logits(model, token_ids, prompt_len) -> (OSL, vocab) fp32
+    fidelity(reference_logits, candidate_logits) -> Fidelity
 
 A quantized leaf is `{"int8_weight": ..., "scales": ...}` in place of the
 array. That
@@ -65,7 +66,7 @@ WHAT NOT TO QUANTIZE
     is one vector for each layer. It saves nothing, and the model is most
     sensitive there.
   - The embedding and lm_head, by default. They are a big fraction of a 0.6B
-    model's parameters, and they are also where int8 hurts perplexity most.
+    model's parameters, and they are also where int8 hurts the accuracy most.
     Skip them by name, and notice how much of the "halved the model" claim
     quietly depends on that choice.
 
@@ -76,6 +77,8 @@ amax / 448, and you clip to that range. Use one scale for each tensor, and not
 for each channel. fp8 has enough exponent range, so a scale for each channel
 buys much less than it does for int8.
 """
+
+from dataclasses import dataclass
 
 
 def quantize_int8_per_channel(weight):
@@ -116,6 +119,33 @@ def tree_bytes(tree):
     raise NotImplementedError("stage 18 (jax): implement tree_bytes")
 
 
-def perplexity(model, text, max_len=512):
-    """The perplexity of `text` under `model`, for each token."""
-    raise NotImplementedError("stage 18 (jax): implement perplexity")
+def continuation_logits(model, token_ids, prompt_len):
+    """The float32 logits that predict each output token. -> (OSL, vocab).
+
+    token_ids is a prompt of prompt_len tokens, then its continuation of OSL
+    tokens. Row i predicts token_ids[prompt_len + i], so it comes from the
+    position before that token. One forward pass with logits_index=None gives
+    the logits of every position.
+    """
+    raise NotImplementedError("stage 18 (jax): implement continuation_logits")
+
+
+@dataclass
+class Fidelity:
+    top1_agreement: float       # the fraction of positions with the same top token
+    mean_kl: float              # the mean KL(reference || candidate), in nats
+
+
+def fidelity(reference_logits, candidate_logits):
+    """How close the candidate model stays to the reference, position by
+    position. Both arguments are (positions, vocab). -> Fidelity.
+
+    top1_agreement: the fraction of positions where the two models choose the
+        same most likely token.
+    mean_kl: the mean of KL(P || Q), with P from the reference and Q from the
+        candidate. Compute it from log_softmax in float32.
+
+    Both models read the SAME tokens, so the difficulty of the text and its
+    length cancel. That is why this metric is stable, and perplexity is not.
+    """
+    raise NotImplementedError("stage 18 (jax): implement fidelity")

@@ -102,3 +102,20 @@ def poisoned_past_context(key_cache, value_cache, block_tables, context_len,
             key_host[int(block_id), :, first_dead:] = poison
             value_host[int(block_id), :, first_dead:] = poison
     return jnp.asarray(key_host), jnp.asarray(value_host)
+
+
+def greedy_workload(model, prompts, osl):
+    """-> one token list for each prompt: the prompt, then osl greedy tokens
+    from `model`. All the steps use one shape, so XLA compiles one time. The
+    padding after the current position cannot change its logits, because the
+    mask is causal."""
+    sequences = []
+    for prompt in prompts:
+        length = len(prompt) + osl
+        tokens = jnp.zeros((1, length), jnp.int32).at[0, :len(prompt)].set(
+            jnp.asarray(prompt, jnp.int32))
+        for position in range(len(prompt), length):
+            logits, _ = model.forward(tokens, logits_index=jnp.asarray([position - 1]))
+            tokens = tokens.at[0, position].set(jnp.argmax(logits[0]))
+        sequences.append([int(token) for token in tokens[0]])
+    return sequences

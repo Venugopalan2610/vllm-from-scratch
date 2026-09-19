@@ -346,21 +346,48 @@ def json_prefix_state(text):
 # ---- the capstone (stages 21 to 28) ----------------------------------
 
 
+def hf_greedy_ids(model, prompt_ids, num_tokens):
+    """Exactly num_tokens greedy tokens from HF after a list of token ids,
+    with EOS ignored."""
+    prompt = torch.tensor([prompt_ids], device=model.device)
+    with torch.no_grad():
+        output = model.generate(prompt, attention_mask=torch.ones_like(prompt),
+                                max_new_tokens=num_tokens,
+                                min_new_tokens=num_tokens, do_sample=False)
+    return output[0, len(prompt_ids):].tolist()
+
+
 def hf_greedy(model, tokenizer, prompt, num_tokens):
     """Exactly num_tokens greedy tokens from HF, with EOS ignored. The oracle
     of every capstone check that compares tokens."""
-    prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
-        model.device)
-    with torch.no_grad():
-        output = model.generate(prompt_ids, max_new_tokens=num_tokens,
-                                min_new_tokens=num_tokens, do_sample=False)
-    return output[0, prompt_ids.shape[1]:].tolist()
+    return hf_greedy_ids(model, tokenizer(prompt).input_ids, num_tokens)
 
 
-# Real prose, for the perplexity checks. A text that repeats itself is too
+# Real prose, for the accuracy checks. A text that repeats itself is too
 # easy: the model predicts it almost perfectly, and the check proves nothing.
 PROSE_SAMPLE = (Path(__file__).resolve().parent.parent
                 / "LORE.md").read_text()[2000:9000]
+
+# The workload of the accuracy checks has the shape of serving: a prompt of
+# ISL tokens, then OSL tokens that the model generates. The checks compare two
+# models on the OSL positions only, because those are what a user reads.
+ISL, OSL, NUM_PROMPTS = 256, 64, 4
+
+
+def prose_prompts(tokenizer, num_prompts=NUM_PROMPTS, isl=ISL):
+    """-> num_prompts token lists of isl tokens, from different parts of the
+    prose sample."""
+    token_ids = tokenizer(PROSE_SAMPLE).input_ids
+    stride = (len(token_ids) - isl) // max(1, num_prompts - 1)
+    return [token_ids[index * stride:index * stride + isl]
+            for index in range(num_prompts)]
+
+
+def hf_workload(model, tokenizer, osl=OSL):
+    """-> one token list for each prose prompt: the prompt, then the greedy
+    continuation of the bf16 HF model."""
+    return [prompt + hf_greedy_ids(model, prompt, osl)
+            for prompt in prose_prompts(tokenizer)]
 
 CAPSTONE_PROMPTS = [
     "The capital of France is",

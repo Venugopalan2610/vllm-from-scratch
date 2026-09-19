@@ -15,6 +15,23 @@ The two halves ask different questions:
 Read the notebooks for a stage first. Then build the stage. The notebook is
 where you write a prediction down. The stage is where you pay for it.
 
+## The order
+
+The order is in the names. Open the Parts from `Part0` to `Part8`. In each
+Part, open the sections in the order of their numbers. In each section, open
+the notebooks in the order of their numbers:
+
+```
+Part0_FromAProgramToAModel/          Part 0, first
+  1_model/                           section 1
+    part0_mdl_1_aModelIsAFunction    notebook 1: a demo
+    part0_mdl_2_theGenerationLoop    notebook 2: a demo
+    part0_mdl_3_CCwriteTheLoop_helper  notebook 3: the challenge, always last
+  2_attention/                       section 2
+```
+
+Read the notebooks of a Part before you build its stages.
+
 ## The rule about numbers
 
 **No notebook ends with a number that is true only on one machine.**
@@ -54,12 +71,12 @@ how the ratio responds to different hardware.
 Each section holds three kinds of file. The name tells you which kind:
 
 ```
-Part3_PagedAttention/kernels/
-  part3_kern_memoryTransactions.ipynb            demo: run it, read it
-  part3_kern_fillingTheMachine.ipynb             demo
-  part3_kern_CCcoalesceTheGather_helper.ipynb    challenge: fill the blanks
+Part3_PagedAttention/3_kernels/
+  part3_kern_1_memoryTransactions.ipynb            demo: run it, read it
+  part3_kern_2_fillingTheMachine.ipynb             demo
+  part3_kern_3_CCcoalesceTheGather_helper.ipynb    challenge: fill the blanks
   solutions/
-    part3_kern_CCcoalesceTheGather.ipynb         the same notebook, complete
+    part3_kern_3_CCcoalesceTheGather.ipynb         the same notebook, complete
 ```
 
 - **A demo is small.** It teaches one idea. It does the arithmetic by hand
@@ -91,88 +108,40 @@ machine learning and GPU programming. Three things help you with them:
 - **[GLOSSARY.md](GLOSSARY.md)** defines each term, gives an analogy from
   software, and names the notebook and the stage that teach it.
 - **The first use of a term** in a notebook is in bold with a definition, or
-  it is a link to the glossary. `dev/jargon.py` checks this, in the order of
-  [READING_ORDER.md](READING_ORDER.md).
+  it is a link to the glossary. `dev/jargon.py` checks this, in the reading
+  order.
+
+## When it gets hard
+
+**Do not stop. Continue. Be better than before.**
+
+A notebook that confuses you is not a sign that you are slow. It is the part
+of the work where you learn. Try these, in this order:
+
+1. **Find the word.** Most confusion is one term that you do not know yet.
+   Look for it in [GLOSSARY.md](GLOSSARY.md).
+2. **Go back one notebook.** Each notebook uses the result of the one before
+   it. The number in its name shows which one that is.
+3. **Change one number, and run the cell again.** Watch what moves. A
+   prediction that is wrong teaches you more than a correct one.
+4. **Open the solution of the challenge.** Read it, close it, and write the
+   code yourself. Then continue.
 
 ## What exists
 
 Part 0 comes before the ladder. Then the ladder has eight arcs, and the
-notebooks follow them. [READING_ORDER.md](READING_ORDER.md) gives the order of
-the notebooks in each section.
+notebooks follow them. The README of each Part lists its sections, with one
+line on each.
 
-**Part 0, From a Program to a Model** (before stage 01)
-
-| | |
-|---|---|
-| `model/` | A model is a function: tokens in, logits out, and a large read-only table of weights. Then the generation loop, and what it costs. Then write the loop. |
-| `attention/` | Attention as a lookup that returns a mix. Heads, and the fact that makes a KV cache possible. Then memoize the lookup. **This section needs no GPU.** |
-| `gpu/` | A machine built for one kind of work: bandwidth, FLOPs and the ridge point. A kernel is the body of a loop. Then predict the time of four workloads, and measure them. |
-
-**Part 1, The Naive Loop** (stages 01-03)
-
-| | |
-|---|---|
-| `arithmetic/` | Read against compute, and the ridge point. The KV cache in bytes per token. **This section needs no GPU.** |
-| `roofline/` | Measure your own card. Watch a matmul cross the ridge. Then put the real model on the plot. Prefill and decode sit on opposite sides. |
-| `kvCache/` | What the quadratic cost really is. What the cache costs in bytes, and a 2x error the config invites. Then write both loops and make them agree. |
-
-**Part 2, Batching** (stages 04-05)
-
-| | |
-|---|---|
-| `padding/` | Extra users are almost free, until they are not. What a static batch throws away. Then find the batch size that is fastest. |
-| `continuous/` | Schedule once per iteration. Twenty lines, and the largest win in the course. Then write the scheduler. **No GPU.** |
-
-**Part 3, PagedAttention** (stages 06-09, 08b, 08c)
-
-| | |
-|---|---|
-| `blocks/` | Where the KV memory goes, and why most of it is empty. A page table for tokens. Then build the allocator. **No GPU.** |
-| `gather/` | Decode attention on numbers you can check by hand. The same arithmetic with the keys scattered. Then write the oracle. |
-| `kernels/` | Sectors, strides, and a cliff you can predict. Why blocks must outnumber SMs. Then make a gather coalesce. |
-| `sharing/` | Refcounts and copy-on-write. Prefix caching, measured. Then build it, and find the hashing bug that gives fluent wrong output. |
-
-**Part 4, The Scheduler** (stages 10-11)
-
-| | |
-|---|---|
-| `admission/` | A sequence grows while it runs, so admission promises memory you do not have. Swap against recompute, as a ratio. Then build the scheduler. |
-| `chunked/` | One long prompt stops the whole server. Then the token budget that fixes it, and a p99 that hides the damage. |
-
-**Part 5, Making It Fast** (stages 12-14)
-
-| | |
-|---|---|
-| `cudaGraphs/` | The CPU as the bottleneck. A graph refuses to change shape, and a server changes shape every step. Then capture one. |
-| `sampling/` | Temperature, top-k, top-p and penalties on eight words. Then the sampler as the bottleneck, and one you can prove is correct. |
-| `detokenize/` | Why you cannot decode one token at a time. Then write the streaming detokenizer. **No GPU.** |
-
-**Part 6, The Server** (stages 15-16)
-
-| | |
-|---|---|
-| `async/` | One loop, two clocks, and what happens when a client disconnects. Then build the engine loop. **No GPU.** |
-| `metrics/` | Six numbers, a Pareto frontier, and why throughput is not the answer. Then find which of three projects your p99 asks for. **No GPU.** |
-
-**Part 7, Modern vLLM** (stages 17-20, 18b)
-
-| | |
-|---|---|
-| `speculative/` | Thirty-two guesses for the price of one. Then verify, reject, and prove the distribution did not move. |
-| `quantization/` | Fewer bytes per weight, and the trap that cancels the win. Then quantize, and find the speed you lost. |
-| `guided/` | Mask the logits that cannot come next. Then make invalid output impossible, and find what the mask does not promise. **No GPU.** |
-| `tensorParallel/` | Where to cut, and how few times the ranks must talk. Then count the collectives. **No GPU.** |
-
-**Part 8, The Capstone** (stages 21-28, 24b)
-
-Stages 24 to 27 put quantization, speculative decoding and guided decoding
-into the engine. The Part 7 notebooks teach those features.
-
-| | |
-|---|---|
-| `engine/` | Why the parts never met, and the flat batch that lets them. One scheduler rule for every case. Then build that scheduler. **The challenge needs no GPU.** |
-| `graphs/` | A thousand small kernels in each step, against the weight-read floor. The padding row that overwrites block 0. |
-| `roof/` | The floor of a step, in tokens for each GB/s, and why a larger model can serve more tokens. Then measure a real step against it. |
+- [Part 0, From a Program to a Model](Part0_FromAProgramToAModel/): before stage 01
+- [Part 1, The Naive Loop](Part1_TheNaiveLoop/): stages 01-03
+- [Part 2, Batching](Part2_Batching/): stages 04-05
+- [Part 3, PagedAttention](Part3_PagedAttention/): stages 06-09, 08b, 08c
+- [Part 4, The Scheduler](Part4_TheScheduler/): stages 10-11
+- [Part 5, Making It Fast](Part5_MakingItFast/): stages 12-14
+- [Part 6, The Server](Part6_TheServer/): stages 15-16
+- [Part 7, Modern vLLM](Part7_ModernVLLM/): stages 17-20, 18b
+- [Part 8, The Capstone](Part8_TheCapstone/): stages 21-28, 24b
 
 ## The method
 
@@ -194,7 +163,7 @@ Each notebook obeys five steps:
    Every notebook has one.
 
 You will be wrong in public a few times. This is deliberate. In
-`part3_kern_CCcoalesceTheGather` the sector model predicts 8x and the
+`part3_kern_3_CCcoalesceTheGather` the sector model predicts 8x and the
 measurement gives 3x. The gap is the lesson. That kernel wastes requests, not
 bytes. No amount of code reading tells you which.
 

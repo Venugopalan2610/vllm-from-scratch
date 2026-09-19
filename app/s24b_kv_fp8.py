@@ -46,7 +46,7 @@ TRAPS
 
   - A prefill chunk still attends with SDPA over gathered blocks. So
     load_context converts the FP8 blocks and multiplies them by the scale.
-  - Measure perplexity through the DECODE kernel, one token at a time. A
+  - Measure the accuracy through the DECODE kernel, one token at a time. A
     prefill through SDPA in bf16 does not test your FP8 kernel at all.
 """
 

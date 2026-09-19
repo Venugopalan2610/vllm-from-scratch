@@ -1,9 +1,9 @@
 """Stage 24b - the KV cache in FP8.
 
 The spec is in app/s24b_kv_fp8.py and app/cuda/s24b_kv_fp8.cu. Dense
-attention on the same FP8 values is the oracle of the kernel. The
-perplexity through the decode kernel and the speed at long context check the
-engine.
+attention on the same FP8 values is the oracle of the kernel. Two checks test
+the engine: the fidelity of stage 18 through the decode kernel, and the speed
+at long context.
 """
 
 import math
@@ -23,7 +23,8 @@ from app.s24b_kv_fp8 import (
     paged_attention_fp8,
     write_kv_fp8,
 )
-from tests.helpers import PROSE_SAMPLE
+from app.s18_quantization import fidelity
+from tests.helpers import ISL, OSL, PROSE_SAMPLE, hf_workload
 
 BLOCK_SIZE = 16
 NEXT_TOKEN = 11
@@ -115,18 +116,19 @@ def test_the_cache_is_one_byte(nvcc, tmodel):
     assert kv_bytes_per_token_fp8(tmodel) * 2 == tmodel.kv_bytes_per_token()
 
 
-def _decode_perplexity(runner, token_ids, prefill_len=16):
-    """Prefill a few tokens, then give one token at a time, so that every
-    logit comes through the decode kernel."""
+def _decode_logits(runner, token_ids, prompt_len):
+    """Prefill the prompt. Then give the output tokens one at a time. So each
+    output logit comes through the decode kernel, with the whole prompt in the
+    cache. -> (OSL, vocab) float32."""
     block_ids = list(range(math.ceil(len(token_ids) / BLOCK_SIZE) + 1))
-    logits = runner.execute([SeqChunk(token_ids[:prefill_len], 0, block_ids)])
-    losses = []
-    for position in range(prefill_len, len(token_ids)):
-        target = torch.tensor([token_ids[position]], device=logits.device)
-        losses.append(F.cross_entropy(logits, target).item())
-        logits = runner.execute([SeqChunk([token_ids[position]], position,
-                                          block_ids)])
-    return math.exp(sum(losses) / len(losses))
+    logits = runner.execute([SeqChunk(token_ids[:prompt_len], 0, block_ids)])
+    output_logits = []
+    for position in range(prompt_len, len(token_ids)):
+        output_logits.append(logits.float())
+        if position + 1 < len(token_ids):
+            logits = runner.execute([SeqChunk([token_ids[position]], position,
+                                              block_ids)])
+    return torch.cat(output_logits)
 
 
 def _bf16_runner(model, num_blocks, max_model_len, bucket):
@@ -144,17 +146,27 @@ def _fp8_runner(model, num_blocks, max_model_len, bucket, scales):
     return runner
 
 
-def test_perplexity_barely_moves(nvcc, tmodel):
-    token_ids = _prose_ids(tmodel, 300)
-    scales = calibrate_kv_scales(tmodel, token_ids[:128])
-    bf16_perplexity = _decode_perplexity(_bf16_runner(tmodel, 32, 512, 1),
-                                         token_ids)
-    fp8_perplexity = _decode_perplexity(
-        _fp8_runner(tmodel, 32, 512, 1, scales), token_ids)
-    print(f"\n  perplexity bf16 KV {bf16_perplexity:.3f}, FP8 KV "
-          f"{fp8_perplexity:.3f} "
-          f"({100 * (fp8_perplexity / bf16_perplexity - 1):+.2f}%)")
-    assert fp8_perplexity / bf16_perplexity < 1.03
+# Measured on Qwen3-0.6B through the decode kernel: calibrated scales give
+# 0.009 nats of KL, and a scale of 1 with no calibration gives 0.012. FP8 has
+# an exponent, so it keeps small and large values without help, and the
+# calibration matters little. This gate catches a large fault, for example a
+# scale that multiplies where it must divide.
+TOP1_FLOOR = 0.90
+KL_CEILING = 0.03
+
+
+def test_fp8_keeps_the_choices_of_the_engine(nvcc, hf, tmodel):
+    sequences = hf_workload(*hf)
+    scales = calibrate_kv_scales(tmodel, sequences[0][:128])
+    bf16_runner = _bf16_runner(tmodel, 32, 512, 1)
+    fp8_runner = _fp8_runner(tmodel, 32, 512, 1, scales)
+    before = torch.cat([_decode_logits(bf16_runner, ids, ISL) for ids in sequences])
+    after = torch.cat([_decode_logits(fp8_runner, ids, ISL) for ids in sequences])
+    result = fidelity(before, after)
+    print(f"\n  ISL {ISL}, OSL {OSL}, through the decode kernel: the same top "
+          f"token at {100 * result.top1_agreement:.1f}% of the output positions, "
+          f"mean KL {result.mean_kl:.4f} nats")
+    assert result.top1_agreement >= TOP1_FLOOR and result.mean_kl <= KL_CEILING
 
 
 def _long_context_step_ms(runner, num_seqs, context_len):
