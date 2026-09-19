@@ -1,7 +1,5 @@
 """Reference solution, stage 24 - quantized weights in the engine."""
 
-import math
-
 import torch
 import torch.nn.functional as F
 
@@ -52,10 +50,11 @@ def quantize_model(model, max_rows=MAX_ROWS):
 
 
 @torch.no_grad()
-def perplexity(model, token_ids):
-    """exp(mean cross-entropy) of a tvllm model on one sequence."""
+def continuation_logits(model, token_ids, prompt_len):
+    """The float32 logits that predict each output token of a tvllm model."""
     tokens = torch.tensor(token_ids, device=model.device)
-    all_rows = torch.arange(len(token_ids), device=model.device)
-    logits = model.forward(tokens, all_rows,
-                           DenseReference(model.config.num_layers), all_rows)
-    return math.exp(F.cross_entropy(logits[:-1], tokens[1:]).item())
+    positions = torch.arange(len(token_ids), device=model.device)
+    output_rows = torch.arange(prompt_len - 1, len(token_ids) - 1, device=model.device)
+    logits = model.forward(tokens, positions,
+                           DenseReference(model.config.num_layers), output_rows)
+    return logits.float()

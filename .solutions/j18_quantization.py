@@ -1,5 +1,7 @@
 """Reference solution, stage 18 (jax) - weight-only quantization."""
 
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 
@@ -97,10 +99,21 @@ def tree_bytes(tree):
     return int(sum(array_bytes(array) for array in jax.tree.leaves(tree)))
 
 
-def perplexity(model, text, max_len=512):
-    token_ids = model.encode(text)[:max_len]
-    logits, _ = model.forward(token_ids[None], logits_index=None)  # (1, T, V)
-    log_probs = jax.nn.log_softmax(logits[0, :-1].astype(jnp.float32), axis=-1)
-    targets = token_ids[1:]
-    mean_nll = -jnp.take_along_axis(log_probs, targets[:, None], axis=1).mean()
-    return float(jnp.exp(mean_nll))
+def continuation_logits(model, token_ids, prompt_len):
+    tokens = jnp.asarray([token_ids], dtype=jnp.int32)
+    logits, _ = model.forward(tokens, logits_index=None)        # (1, T, V)
+    return logits[0, prompt_len - 1:-1].astype(jnp.float32)
+
+
+@dataclass
+class Fidelity:
+    top1_agreement: float       # the fraction of positions with the same top token
+    mean_kl: float              # the mean KL(reference || candidate), in nats
+
+
+def fidelity(reference_logits, candidate_logits):
+    reference = jax.nn.log_softmax(reference_logits.astype(jnp.float32), axis=-1)
+    candidate = jax.nn.log_softmax(candidate_logits.astype(jnp.float32), axis=-1)
+    same_choice = jnp.argmax(reference, axis=-1) == jnp.argmax(candidate, axis=-1)
+    kl = (jnp.exp(reference) * (reference - candidate)).sum(axis=-1)
+    return Fidelity(float(same_choice.mean()), float(kl.mean()))

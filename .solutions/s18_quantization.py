@@ -1,5 +1,7 @@
 """Reference solution, stage 18 - weight-only quantization."""
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,11 +84,20 @@ def quantize_model_(model, skip=("lm_head",)):
 
 
 @torch.inference_mode()
-def perplexity(model, tokenizer, text, max_len=512):
-    token_ids = tokenizer(text, return_tensors="pt").input_ids[:, :max_len]
-    token_ids = token_ids.to(next(model.parameters()).device)
-    logits = model(token_ids).logits[:, :-1].float()
-    targets = token_ids[:, 1:]
-    loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]),
-                           targets.reshape(-1))
-    return float(torch.exp(loss))
+def continuation_logits(model, token_ids, prompt_len):
+    token_ids = torch.tensor([token_ids], device=next(model.parameters()).device)
+    return model(token_ids).logits[0, prompt_len - 1:-1].float()
+
+
+@dataclass
+class Fidelity:
+    top1_agreement: float       # the fraction of positions with the same top token
+    mean_kl: float              # the mean KL(reference || candidate), in nats
+
+
+def fidelity(reference_logits, candidate_logits):
+    reference = F.log_softmax(reference_logits.float(), dim=-1)
+    candidate = F.log_softmax(candidate_logits.float(), dim=-1)
+    same_choice = reference.argmax(dim=-1) == candidate.argmax(dim=-1)
+    kl = (reference.exp() * (reference - candidate)).sum(dim=-1)
+    return Fidelity(same_choice.float().mean().item(), kl.mean().item())
