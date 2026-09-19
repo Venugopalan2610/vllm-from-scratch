@@ -3,8 +3,8 @@
 Spec in app/cuda/s08_paged_attn.cu and app/s08_paged_cuda.py.
 
 Every correctness check here compares against stage 07, which is your oracle.
-The last two matter most: it has to be faster than the PyTorch version, and
-the bandwidth it reports is the number stage 08b exists to move.
+The last two checks matter most. The kernel must be faster than the PyTorch
+version. And the bandwidth that it reports is the number that stage 08b moves.
 """
 
 import pytest

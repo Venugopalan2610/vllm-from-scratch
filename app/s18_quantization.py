@@ -15,10 +15,11 @@ Weight-only, per-output-channel, symmetric INT8:
 Per-CHANNEL rather than per-tensor matters: one outlier row would otherwise
 crush the resolution of every other row.
 
-Activations stay in bf16. Only the weights are stored small, and they are
-dequantized in the kernel epilogue. That is what "weight-only" means, and it is
-why accuracy holds up so well -- activation outliers, which are what actually
-break naive quantization, never get quantized at all.
+The activations stay in bf16. Only the weights become small, and the kernel
+dequantizes them in its epilogue. That is what "weight-only" means.
+
+It is also why the accuracy stays good. An activation outlier is what breaks
+naive quantization, and this method never quantizes an activation.
 
 Then do the same to the KV cache, which is the other big reader.
 """

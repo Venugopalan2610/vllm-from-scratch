@@ -2,9 +2,9 @@
 
 Spec in app/cuda/s08c_paged_attn_split.cu.
 
-The correctness checks are the same as the last two stages, plus one that
-matters only here: the merge across splits has to be exact for EVERY split
-count, not just the one your heuristic picks.
+The correctness checks are the same as the last two stages, with one more. The
+merge across splits must be exact for EVERY split count, and not only for the
+count that your heuristic picks.
 
 The gate is small-batch throughput. That is the case a bandwidth-perfect
 kernel still loses, and the case every interactive request lives in.
@@ -255,9 +255,9 @@ def test_what_split_k_costs_at_a_full_grid(nvcc, dev):
     by = kv_bytes(ctx, KVH, D, q.element_size())
 
     peak = cudalib.peak_bandwidth(fresh=True)
-    # best_of, because both kernels sit at the memory roof here and the
-    # difference between them is smaller than the drift from one throttling
-    # down while the other is measured.
+    # Use best_of. Both kernels sit at the memory roof here. The difference
+    # between them is smaller than the drift, because one kernel throttles
+    # down while the clock runs on the other.
     a = cudalib.bench_ms(lambda: paged_attention_vec(q, kc, vc, bt, ctx),
                          best_of=3)
     b = cudalib.bench_ms(lambda: paged_attention_split(q, kc, vc, bt, ctx),

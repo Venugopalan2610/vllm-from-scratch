@@ -8,9 +8,11 @@ The spec:
             -> list[list[int]]                 # generated ids, one list per prompt
         padding_waste(output_lens: list[int]) -> float
 
-Batching is where throughput comes from (stage 03 told you why: the weights get
-read once for the whole batch). This stage gets the win AND shows you the bill
-that comes with it -- padding, and waiting on the slowest member.
+A batch is where the throughput comes from. Stage 03 told you why: the GPU
+reads the weights one time for the whole batch.
+
+This stage takes that win. It also shows you the bill: the padding, and the
+wait for the slowest member.
 """
 
 import time
@@ -24,7 +26,7 @@ from app.s04_static_batch import padding_waste, static_batch_generate
 
 def test_padding_waste_math():
     assert padding_waste([10, 10, 10]) == pytest.approx(0.0)
-    # 3 slots x 100 steps = 300 slot-steps; only 120 useful
+    # 3 slots x 100 steps = 300 slot-steps, and only 120 of them are useful.
     assert padding_waste([100, 10, 10]) == pytest.approx(1 - 120 / 300)
     assert padding_waste([]) == 0.0
     assert padding_waste([0, 0]) == 0.0

@@ -2,9 +2,9 @@
 
 Spec in app/j20_tensor_parallel.py.
 
-The mesh here is CPU devices, because one GPU is one device. Everything else --
-the shardings, the psum, the partial sums -- is exactly what runs on eight
-accelerators.
+The mesh here holds CPU devices, because one GPU is one device. Everything else
+is exactly what runs on eight accelerators: the shardings, the psum and the
+partial sums.
 """
 
 import re
@@ -48,7 +48,8 @@ def test_shard_column_and_row(cpu):
 
 
 def test_shard_heads_splits_on_head_boundaries(cpu):
-    """Whole heads, not raw rows. Splitting mid-head is silently wrong."""
+    """Shard whole heads, and not raw rows. A shard in the middle of a head is
+    wrong, and it gives no error."""
     nh, hd, ws = 4, 8, 2
     W = jnp.arange(nh * hd * 3, dtype=jnp.float32).reshape(nh * hd, 3)
     got = shard_heads(W, 1, ws, nh, hd)
@@ -110,7 +111,7 @@ def test_exactly_one_all_reduce_per_block(cpu):
     x, W1, W2 = _rand((6, HID), 0), _rand((INTER, HID), 1), _rand((HID, INTER), 2)
     hlo = jax.jit(lambda a, b, c: tp_mlp_forward(a, b, c, mesh)) \
         .lower(x, W1, W2).as_text()
-    # StableHLO spells it all_reduce; the compiled HLO spells it all-reduce.
+    # StableHLO writes all_reduce. The compiled HLO writes all-reduce.
     n = len(re.findall(r"\ball[_-]reduce\b", hlo))
     print(f"\n  collectives in the sharded MLP: {n}")
     assert n == 1, (

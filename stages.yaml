@@ -15,16 +15,16 @@ arcs:
         difficulty: 1
         insight: >
           A transformer forward pass is a pure function of the whole prefix.
-          Generating N tokens naively costs O(N^2) attention work because you
-          recompute every previous token's K and V on every single step.
-        deliver: "generate() that emits tokens one at a time from a HF model."
+          The naive loop makes N tokens at a cost of O(N^2) attention work.
+          It computes the K and V of every earlier token at every step.
+        deliver: "generate() that emits one token at a time from a HF model."
         measure: "tokens/sec at 128 output tokens. This is your rock bottom."
         jax_file: "app/j01_naive.py"
         jax_insight: >
-          Same quadratic recompute, but you feel the OTHER cost immediately:
-          every new prompt length is a new shape, and every new shape is an
-          XLA compile. The naive loop in JAX is slow twice over, and only one
-          of those two is the algorithm's fault.
+          The same quadratic recompute, and you also feel the OTHER cost at
+          once. Each new prompt length is a new shape. Each new shape is an
+          XLA compile. The naive loop in JAX is slow two times over, and the
+          algorithm causes only one of the two.
         jax_deliver: "naive_generate() over jvllm's Qwen3, no cache, one token at a time."
 
       - id: "02-kv-cache"
@@ -32,18 +32,18 @@ arcs:
         name: "The KV cache"
         difficulty: 2
         insight: >
-          K and V for a token never change once computed. Cache them and each
-          decode step becomes a single-token forward pass: O(N) total.
-          This is also the moment memory becomes your enemy instead of compute.
-        deliver: "Per-sequence contiguous KV cache; decode attends over cache+new token."
+          The K and V of a token never change after you compute them. Cache
+          them, and each decode step becomes a forward pass over one token.
+          The total cost is O(N). Memory now becomes your enemy, not compute.
+        deliver: "A contiguous KV cache for each sequence. Decode attends over the cache and the new token."
         measure: "tokens/sec (expect a large multiple of stage 1) and bytes of KV per token."
         jax_file: "app/j02_cache.py"
         jax_insight: >
-          torch hands you a cache that grows by concatenation. XLA compiles for
-          exact shapes, so a growing cache means a recompile per token. The JAX
-          cache is PREALLOCATED to max_len and written into with a dynamic
-          slice: shapes never change, one compile serves the whole decode.
-          You now own the bookkeeping torch was doing for you.
+          torch gives you a cache that grows by concatenation. XLA compiles
+          for exact shapes, so a cache that grows costs one recompile for each
+          token. So you PREALLOCATE the JAX cache to max_len and write into it
+          with a dynamic slice. The shapes never change, and one compile serves
+          the whole decode. You now own the bookkeeping that torch did for you.
         jax_deliver: "Preallocated (layers, B, max_len, kv_heads, head_dim) cache, written at cache_len."
 
       - id: "03-roofline"
@@ -51,18 +51,19 @@ arcs:
         name: "Prefill vs decode: two different machines"
         difficulty: 2
         insight: >
-          Prefill is compute-bound (big GEMMs, high arithmetic intensity).
-          Decode is memory-bandwidth-bound (batch size 1 means every weight is
-          read from HBM to produce one token). They want opposite optimizations.
-          This is THE fact that explains every design decision downstream.
+          Prefill waits on compute. It runs big GEMMs at a high arithmetic
+          intensity. Decode waits on memory bandwidth. At batch size 1 the GPU
+          reads every weight from HBM to make one token. The two want opposite
+          optimizations. This is THE fact behind every later design decision.
         deliver: "A microbenchmark separating prefill ms/token from decode ms/token."
         measure: "Achieved GB/s during decode vs your GPU's peak. You'll be near peak."
         jax_file: "app/j03_roofline.py"
         jax_insight: >
-          Same roofline, one new trap: JAX dispatch is ASYNCHRONOUS. A timing
-          loop without block_until_ready() measures how fast Python can enqueue
-          work, which on a small model looks like a 50x speedup that isn't
-          there. Warm up separately too, or you time the XLA compiler.
+          The same roofline, with one new trap. JAX dispatch is ASYNCHRONOUS.
+          A timing loop with no block_until_ready() measures how fast Python
+          enqueues work. On a small model that looks like a 50x speedup, and
+          the speedup is not there. Warm up separately, or you time the XLA
+          compiler.
         jax_deliver: "Prefill vs decode ms/token, with compile excluded and the device actually waited on."
 
   - id: A1
@@ -74,18 +75,19 @@ arcs:
         name: "Static batching with padding"
         difficulty: 2
         insight: >
-          Batching amortizes the weight read across sequences: 8x the tokens for
-          almost 1x the time. But a static batch runs until its SLOWEST member
-          finishes, and short sequences sit padded and idle, burning the slot.
+          A batch spreads the weight read across the sequences. You get 8x the
+          tokens for almost 1x the time. But a static batch runs until its
+          SLOWEST member finishes. A short sequence then sits padded and idle,
+          and it wastes the slot.
         deliver: "Left-padded batch of N prompts, shared decode loop, attention mask."
         measure: "Throughput vs batch size, AND the % of decoded token-slots wasted on padding."
         jax_file: "app/j04_static_batch.py"
         jax_insight: >
-          torch left-pads so the last index is everyone's last real token. With
-          a written-into cache you RIGHT-pad instead: each row's prompt starts
-          at slot 0, and you read logits from a per-row index. Padding still
-          costs you the same wasted compute -- that part is not a layout
-          problem, it is the batch shape itself.
+          torch pads on the left, so the last index holds the last real token
+          of every row. With a cache that you write into, you pad on the RIGHT.
+          The prompt of each row starts at slot 0, and you read the logits from
+          an index for each row. The padding still wastes the same compute.
+          That part is not a layout problem. It is the batch shape itself.
         jax_deliver: "Right-padded batch, per-row cache_len and logits_index, shared decode loop."
 
       - id: "05-continuous-batching"
@@ -93,35 +95,38 @@ arcs:
         name: "Continuous batching (iteration-level scheduling)"
         difficulty: 3
         insight: >
-          Schedule per ITERATION, not per request. When a sequence emits EOS,
-          evict it that same step and admit a waiting one into its slot.
-          From Orca (OSDI '22). Typically 2-4x over static batching on real traffic,
-          and it is the single largest throughput win in this entire repo.
-        deliver: "A step() loop over a mutable running-set; requests join and leave mid-flight."
+          Schedule for each ITERATION, and not for each request. When a
+          sequence emits EOS, remove it in that same step and admit a waiting
+          sequence into its slot. The idea comes from Orca (OSDI '22). On real
+          traffic it gives 2x to 4x over a static batch. It is the largest
+          throughput win in this repo.
+        deliver: "A step() loop over a mutable running set. A request joins or leaves in mid-flight."
         measure: "Throughput on a Poisson arrival trace + p50/p99 latency vs stage 4."
         jax_file: "app/j05_continuous.py"
         jax_insight: >
-          Eviction is where the two tracks really part. torch re-indexes the
-          cache tensor and gets a new shape; you cannot, because the shape is
-          the compilation. So a finished row's SLOT is reused in place: the
-          batch dimension is fixed and rows are occupied or free. That is
-          already half of the block allocator you build in stage 06.
+          Eviction is where the two tracks separate. torch indexes the cache
+          tensor again and gets a new shape. You cannot do that, because the
+          shape is the compilation. So the SLOT of a finished row serves a new
+          sequence in place. Each row of the fixed batch dimension then holds a
+          sequence, or it is free. That is half of the block allocator in
+          stage 06.
         jax_deliver: "Fixed-width slot table, admit into a free slot, evict by marking free."
 
   - id: A2
     name: "PagedAttention"
-    blurb: "The idea vLLM is named after. Virtual memory, applied to the KV cache."
+    blurb: "The idea behind the name vLLM. Virtual memory, applied to the KV cache."
     stages:
       - id: "06-block-allocator"
         file: "app/s06_blocks.py"
         name: "Blocks, block tables, free list"
         difficulty: 3
         insight: >
-          Contiguous per-sequence caches force you to pre-allocate for max_len,
-          so real serving wastes 60-80% of KV memory to internal fragmentation
-          and reservation. Chop the cache into fixed 16-token blocks, hand them
-          out on demand, and keep a per-sequence block table (a page table).
-          Waste drops to under one block per sequence.
+          A contiguous cache for each sequence forces you to allocate for
+          max_len. So a real server wastes 60% to 80% of its KV memory on
+          internal fragmentation and reservation. Cut the cache into fixed
+          16-token blocks. Hand them out on demand. Keep one block table, which
+          is a page table, for each sequence. The waste falls to less than one
+          block for each sequence.
         deliver: "BlockAllocator + BlockTable. No attention changes yet."
         measure: "Sequences resident in 12GB, paged vs contiguous. Expect a big jump."
 
@@ -130,18 +135,20 @@ arcs:
         name: "Attention that reads through the page table"
         difficulty: 4
         insight: >
-          The kernel must gather K/V from scattered blocks instead of striding a
-          contiguous tensor. Do it in PyTorch first (index_select + SDPA) to get
-          it CORRECT, then keep that as the reference oracle forever.
+          The kernel must gather K and V from scattered blocks. It can no
+          longer stride through a contiguous tensor. Do it in PyTorch first,
+          with index_select and SDPA, to make it CORRECT. Then keep that
+          version as the reference oracle forever.
         deliver: "paged_attn() in pure PyTorch, bit-comparable to stage 2's output."
         measure: "Correctness vs the contiguous implementation, then the slowdown you just ate."
         jax_file: "app/j07_paged_attn.py"
         jax_insight: >
-          No Python loop over sequences this time -- jnp.take on the block
-          table gathers every sequence's blocks at once, and vmap handles the
-          batch. It is still the slow reference implementation, because it
-          materialises the whole gathered K/V, but it is the oracle.
-        jax_deliver: "paged_attention() in jnp: gather by block table, mask, softmax."
+          There is no Python loop over the sequences this time. jnp.take on
+          the block table gathers the blocks of every sequence at one time, and
+          vmap handles the batch. This is still the slow reference version,
+          because it materialises all of the gathered K and V. It is the
+          oracle.
+        jax_deliver: "paged_attention() in jnp. Gather by block table, then mask, then softmax."
 
       - id: "08-paged-attention-cuda"
         file: "app/s08_paged_cuda.py"
@@ -149,37 +156,39 @@ arcs:
         name: "The same thing, in CUDA"
         difficulty: 5
         insight: >
-          One block per (sequence, query head); walk the block table; stream
-          K/V tiles and fold them into a running softmax so the score row
-          never reaches HBM. The decision that matters is not the arithmetic,
-          it is what one block owns, because that fixes everything else:
-          blocks that own one output vector never need to talk to each other.
+          Give one block to each (sequence, query head) pair. Walk the block
+          table. Stream the K and V tiles, and fold them into a running
+          softmax, so that the score row never reaches HBM. The decision that
+          matters is not the arithmetic. It is what one block owns, because
+          that fixes everything else. A block that owns one output vector
+          never needs to talk to another block.
         deliver: "A CUDA paged decode kernel, plus the KV scatter kernel, that beats stage 07."
-        measure: "Correctness vs stage 07, then us/token, then the fraction of this card's bandwidth you got."
+        measure: "Correctness against stage 07, then us/token, then the fraction of this card's bandwidth that you reached."
         jax_file: "app/j08_paged_pallas.py"
         jax_name: "The same thing, fast (Pallas)"
         jax_insight: >
-          Pallas is the same idea as Triton with a different surface: you get
-          Refs and BlockSpecs instead of raw pointers and strides, and an
-          index_map decides which tile each program sees. The online softmax is
-          identical. What changes is that the block table lookup has to happen
-          INSIDE the kernel, so you read the cache with a computed index rather
-          than letting a BlockSpec do it for you.
+          Pallas is the same idea as Triton with a different surface. You get
+          Refs and BlockSpecs in the place of raw pointers and strides, and an
+          index_map chooses the tile that each program sees. The online softmax
+          is the same. One thing changes: the block table lookup must happen
+          INSIDE the kernel. So you read the cache with a computed index, and a
+          BlockSpec does not do it for you.
         jax_deliver: "A Pallas paged decode kernel that beats the jnp version."
 
       - id: "08b-cuda-memory"
         tracks: ["torch"]
         file: "app/s08b_cuda_memory.py"
         files: ["app/cuda/s08b_paged_attn_vec.cu", "app/s08b_cuda_memory.py"]
-        name: "Feeding the memory system"
+        name: "How to feed the memory system"
         difficulty: 4
         insight: >
-          Your stage 08 kernel gave one thread one position and walked
-          head_dim serially, so the 32 threads of a warp asked for 32
-          scattered rows at once. Turn the mapping sideways: threads cooperate
-          ALONG head_dim, 16 bytes each, and the warp's requests merge into
-          whole 128-byte transactions. Same arithmetic, same answers, roughly
-          twice the bandwidth. This is the single highest-value habit in CUDA.
+          Your stage 08 kernel gave one thread to one position, and each
+          thread walked head_dim alone. So the 32 threads of a warp asked for
+          32 scattered rows at one time. Turn the mapping sideways. The threads
+          then cooperate ALONG head_dim, at 16 bytes each, and the requests of
+          the warp merge into whole 128-byte transactions. The arithmetic and
+          the answers do not change, and the bandwidth approximately doubles.
+          This is the most valuable habit in CUDA.
         deliver: "The same kernel with coalesced, 128-bit vectorized loads and the accumulator in registers."
         measure: "At least 1.5x over stage 08, and a real fraction of this card's measured streaming bandwidth."
 
@@ -190,13 +199,13 @@ arcs:
         name: "Warps, occupancy and split-K"
         difficulty: 5
         insight: >
-          At batch 1 the grid is (1, num_heads) and most of the SMs have
-          nothing to do, so a kernel that is perfect on bandwidth still runs
-          at a few percent of the card. Two fixes: __shfl_xor_sync to reduce
-          inside a warp with no shared memory and no barrier, then split-K,
-          which cuts the CONTEXT into chunks to manufacture blocks and merges
-          the partial softmax states exactly. Batch 1 is every interactive
-          request.
+          At batch 1 the grid is (1, num_heads), and most of the SMs have
+          nothing to do. So a kernel that is perfect on bandwidth still uses a
+          few percent of the card. There are two fixes. Use __shfl_xor_sync to
+          reduce inside a warp, with no shared memory and no barrier. Then use
+          split-K, which cuts the CONTEXT into chunks to make more blocks and
+          merges the partial softmax states exactly. Batch 1 is every
+          interactive request.
         deliver: "Warp-shuffle reductions, then a split-K kernel and an exact merge pass."
         measure: "At least 1.5x over stage 08b at 1, 2 and 4 sequences, and no more than a few percent given back at 64."
 
@@ -205,10 +214,11 @@ arcs:
         name: "Copy-on-write and automatic prefix caching"
         difficulty: 4
         insight: >
-          Block tables make sharing trivial: two sequences can point at the same
-          physical block. Refcount them, copy-on-write when one diverges. Then
-          hash block contents and reuse across REQUESTS: a shared system prompt
-          gets prefilled once for everybody. This is why APC feels like cheating.
+          A block table makes sharing simple. Two sequences can point at the
+          same physical block. Count the references, and copy a block when one
+          sequence diverges. Then hash the contents of a block and share it
+          across REQUESTS. One prefill of a shared system prompt then serves
+          everybody. This is why APC looks like cheating.
         deliver: "Refcounted blocks, CoW on write, content-hash prefix cache with LRU eviction."
         measure: "TTFT for a 2000-token shared system prompt, cold vs warm."
 
@@ -241,7 +251,7 @@ arcs:
         measure: "p99 inter-token latency with a long prompt in flight. Before vs after."
 
   - id: A4
-    name: "Making It Actually Fast"
+    name: "How To Make It Fast"
     blurb: "Everything left is overhead removal."
     stages:
       - id: "12-cuda-graphs"
@@ -249,21 +259,21 @@ arcs:
         name: "CUDA graphs for the decode step"
         difficulty: 4
         insight: >
-          At batch 1 a decode step is ~1ms of GPU work and can be ~1ms of Python
-          and kernel-launch overhead. Capture the whole step as a graph and replay
-          it. Requires static shapes, so you capture at bucketed batch sizes and
-          pad up to the nearest bucket.
+          At batch 1 a decode step is approximately 1 ms of GPU work. Python
+          and the kernel launches can cost another 1 ms. Capture the whole step
+          as a graph, and replay it. A graph needs static shapes, so capture at
+          bucketed batch sizes and pad up to the nearest bucket.
         deliver: "Graph capture per bucket, replay path, eager fallback."
         measure: "us/step at batch 1, 2, 4, 8. Watch the Python tax vanish."
         jax_file: "app/j12_compiled.py"
-        jax_name: "Killing recompilation with shape buckets"
+        jax_name: "Shape buckets, to stop the recompiles"
         jax_insight: >
-          JAX has no launch overhead to remove -- XLA already fused the step
-          into one graph. Its equivalent tax is RECOMPILATION: every distinct
-          batch size traces and compiles from scratch, seconds each, on the
-          critical path. Same fix as CUDA graphs for a different reason: pad to
-          bucketed shapes so the compilation cache hits. Then donate the
-          buffers, so the cache is updated in place instead of copied.
+          JAX has no launch overhead to remove. XLA already fused the step
+          into one graph. Its equivalent tax is RECOMPILATION. Each new batch
+          size traces and compiles again, at seconds each, on the critical
+          path. The fix is the same as a CUDA graph, for a different reason.
+          Pad to bucketed shapes, so that the compilation cache hits, and
+          donate the buffers, so that the engine writes the cache in place.
         jax_deliver: "Bucketed AOT compile + donate_argnums, with a compile counter proving cache hits."
 
       - id: "13-sampling"
@@ -271,18 +281,18 @@ arcs:
         name: "A real batched sampler"
         difficulty: 3
         insight: >
-          Every request has its own temperature, top-k, top-p, penalties, and seed,
-          and they all must be applied in ONE vectorized pass over the batch. The
-          naive per-request Python loop silently becomes your bottleneck once the
-          kernels are fast.
+          Each request has its own temperature, top-k, top-p, penalties and
+          seed. ONE vectorized pass over the batch must apply all of them. When
+          the kernels become fast, a Python loop over the requests quietly
+          becomes your bottleneck.
         deliver: "Vectorized temp/top-k/top-p/repetition penalty, per-request seeded RNG."
         measure: "Sampler ms/step at batch 64, plus a distributional test that top-p is exact."
         jax_file: "app/j13_sampler.py"
         jax_insight: >
-          JAX has no global RNG, and that turns out to be the right shape for a
-          server: per-request seeds are just per-row PRNG keys, split and
-          carried with the request. Gumbel-max then samples the whole batch in
-          one vectorized pass, with each row's draw reproducible on its own.
+          JAX has no global RNG, and that is the correct shape for a server. A
+          per-request seed is a PRNG key for one row. You split it and carry it
+          with the request. Gumbel-max then samples the whole batch in one
+          vectorized pass, and each row reproduces its own draw.
         jax_deliver: "Vectorized temp/top-k/top-p/penalty, one PRNG key per request."
 
       - id: "14-detokenization"
@@ -290,10 +300,11 @@ arcs:
         name: "Incremental detokenization and stop conditions"
         difficulty: 3
         insight: >
-          You cannot decode tokens independently: BPE pieces, multi-byte UTF-8, and
-          leading-space rules mean naive streaming emits mojibake and doubled spaces.
-          Stop STRINGS can also straddle a token boundary, so you must buffer.
-          Boring, and the source of most user-visible bugs in real servers.
+          You cannot decode tokens one by one. BPE pieces, multi-byte UTF-8 and
+          the leading-space rules make a naive stream emit mojibake and double
+          spaces. A stop STRING can also cross a token boundary, so you must
+          buffer. This stage is dull, and it causes most of the bugs that users
+          see in a real server.
         deliver: "Streaming detokenizer with a lookback window + straddling stop-string check."
         measure: "Fuzz test: streamed output must equal batch-decoded output, always."
 
@@ -306,21 +317,23 @@ arcs:
         name: "Async engine + OpenAI-compatible API"
         difficulty: 3
         insight: >
-          The engine loop must never block on HTTP, and HTTP must never block on
-          the GPU. One process runs step() forever; requests are futures/queues
-          fed into it. Real vLLM V1 pushes this further, into a separate EngineCore
-          process, so Python overhead on the API side cannot stall the GPU.
+          The engine loop must never block on HTTP, and HTTP must never block
+          on the GPU. One process runs step() forever. Requests reach it as
+          futures and queues. Real vLLM V1 goes further and uses a separate
+          EngineCore process, so that Python overhead on the API side cannot
+          stall the GPU.
         deliver: "/v1/chat/completions with SSE streaming, cancellation, backpressure."
-        measure: "TTFT under concurrent load; verify a client disconnect frees KV blocks."
+        measure: "TTFT under concurrent load. Verify that a client disconnect frees the KV blocks."
 
       - id: "16-observability"
         file: "app/s16_metrics.py"
         name: "The metrics that matter"
         difficulty: 2
         insight: >
-          TTFT, TPOT/ITL, throughput, queue wait, KV utilization, preemption rate.
-          If you cannot see KV utilization and preemption count, you cannot tune
-          anything, and you will misdiagnose every performance problem you hit.
+          Export TTFT, TPOT and ITL, throughput, queue wait, KV utilization
+          and the preemption rate. Without the KV utilization and the
+          preemption count you can tune nothing, and you diagnose every
+          performance problem incorrectly.
         deliver: "Prometheus-style metrics + a load generator with a Poisson arrival trace."
         measure: "A throughput/latency Pareto curve as you sweep max_num_seqs."
 
@@ -333,30 +346,32 @@ arcs:
         name: "Draft, verify, reject"
         difficulty: 5
         insight: >
-          Decode is bandwidth-bound, so verifying K tokens costs about the same as
-          generating 1. Propose K with something cheap (n-gram lookup or a tiny
-          model), verify in one pass, accept the longest correct prefix. Modified
-          rejection sampling keeps the output distribution EXACTLY unchanged.
+          Decode waits on bandwidth, so a check on K tokens costs about as
+          much as one new token. Propose K tokens with something cheap, such as
+          an n-gram lookup or a very small model. Check them in one pass, and
+          accept the longest correct prefix. Modified rejection sampling keeps
+          the output distribution EXACTLY the same.
         deliver: "N-gram speculator + rejection sampler + acceptance-rate telemetry."
-        measure: "Speedup vs acceptance rate. Prove the output distribution is unbiased."
+        measure: "Speedup against acceptance rate. Prove that the output distribution does not move."
 
       - id: "18-quantization"
         file: "app/s18_quantization.py"
         name: "Weight-only quantization"
         difficulty: 4
         insight: >
-          Decode reads every weight per token, so halving weight bytes nearly halves
-          decode time. INT8/FP8 weight-only with per-channel scales, dequantized in
-          the kernel epilogue. Also quantize the KV cache: it is the other big reader.
+          Decode reads every weight for every token. So half the weight bytes
+          gives almost half the decode time. Use INT8 or FP8 on the weights
+          only, with a scale for each channel, and dequantize in the kernel
+          epilogue. Quantize the KV cache too. It is the other big reader.
         deliver: "INT8 weight-only linear + FP8 KV cache, with a perplexity guard."
         measure: "tokens/sec and VRAM vs perplexity delta on a fixed text sample."
         jax_file: "app/j18_quantization.py"
         jax_insight: >
-          Same arithmetic, but the model is a pytree, not a module tree, so
-          quantizing it is a tree_map instead of a walk over named_modules.
-          Watch that the dequantize stays FUSED into the matmul -- if XLA
-          materialises the bf16 weight first you have added a full-size write
-          and read, and made decode slower rather than faster.
+          The arithmetic is the same. But the model is a pytree, and not a
+          module tree. So you quantize it with a tree_map, and not with a walk
+          over named_modules. Watch that the dequantize stays FUSED into the
+          matmul. If XLA materialises the bf16 weight first, you added a
+          full-size write and a full-size read, and decode became slower.
         jax_deliver: "int8 per-channel and fp8 e4m3 over the params pytree, with a perplexity guard."
 
       - id: "18b-int8-gemv-cuda"
@@ -366,14 +381,13 @@ arcs:
         name: "The dequantize belongs in the epilogue"
         difficulty: 4
         insight: >
-          Stage 18 halved the weight bytes and then handed the multiply to
-          PyTorch, which builds a bf16 copy of the weight before it can use
-          it. Time that honestly and the quantization is a LOSS. Weight-only
-          quantization only pays when the scale is applied to a value already
-          in a register, at the end of the dot product. Then measure against
-          cuBLAS and find the batch size where your kernel stops winning:
-          that number is the boundary between decode and prefill, in
-          milliseconds.
+          Stage 18 made the weight bytes half as many, and then gave the
+          multiply to PyTorch. PyTorch builds a bf16 copy of the weight before
+          it can use it. Time that honestly, and the quantization is a LOSS.
+          Weight-only quantization pays only when the kernel applies the scale
+          at the end of the dot product, to a register value. Then measure against cuBLAS, and find the batch size where
+          your kernel stops to win. That number is the boundary between decode
+          and prefill, in milliseconds.
         deliver: "An int8 GEMV with a fused dequantize epilogue, and a Linear that dispatches on batch size."
         measure: "At least 3x over dequantize-then-matmul, at least 1.5x over bf16 cuBLAS at one row, and the crossover where that stops."
 
@@ -382,9 +396,10 @@ arcs:
         name: "Constrained output via logit masking"
         difficulty: 4
         insight: >
-          Compile a grammar/JSON schema to an FSM over token ids, and mask illegal
-          logits each step. The hard parts are tokenizer alignment and doing the
-          mask build off the critical path so it does not stall the GPU.
+          Compile a grammar or a JSON schema to an FSM over token ids. Mask
+          the illegal logits at each step. Two parts are hard: the tokenizer
+          alignment, and the mask build. Keep the mask build off the critical
+          path, so that it does not stall the GPU.
         deliver: "JSON-schema-constrained sampling with a precomputed token mask cache."
         measure: "100% schema-valid outputs, and the ms/step the mask costs you."
 
@@ -393,16 +408,16 @@ arcs:
         name: "Tensor parallelism (simulated on one GPU)"
         difficulty: 5
         insight: >
-          Shard attention heads and MLP columns across ranks; one all-reduce per
-          layer. You have one GPU, so run 2 ranks on it with NCCL to get the
-          collectives and the sharding logic right. The lesson is where the
-          communication lands, not the speedup.
+          Shard the attention heads and the MLP columns across the ranks, with
+          one all-reduce for each layer. You have one GPU, so run 2 ranks on it
+          with NCCL, and make the collectives and the sharding logic correct.
+          The lesson is where the communication lands. It is not the speedup.
         deliver: "Column/row-parallel Linear, 2-rank sharded model, output matches 1-rank."
         measure: "Correctness first. Then all-reduce bytes per token per layer."
         jax_file: "app/j20_tensor_parallel.py"
         jax_insight: >
-          This is the stage JAX makes honest. shard_map gives you real devices,
-          real shardings and a real psum -- not a Python loop pretending to be
-          ranks. Column-parallel then row-parallel with exactly one psum
-          between blocks, expressed as a mesh and two PartitionSpecs.
+          JAX makes this stage honest. shard_map gives you real devices, real
+          shardings and a real psum. It is not a Python loop that imitates the
+          ranks. You write column-parallel, then row-parallel, with exactly one
+          psum between blocks. It is a mesh and two PartitionSpecs.
         jax_deliver: "shard_map MLP and attention over a multi-device CPU mesh, one psum per block."

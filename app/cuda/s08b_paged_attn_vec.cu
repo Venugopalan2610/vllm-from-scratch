@@ -32,36 +32,37 @@
 //
 //     thread (row, lane) reads k[pos_row][lane*VEC ... lane*VEC+VEC)
 //
-// Now consecutive lanes read consecutive 16-byte chunks of the same row, and
-// the warp's requests merge into whole 128-byte transactions. 16 bytes is
-// the widest load one thread can issue; anything narrower leaves the memory
-// system's width on the table.
+// Consecutive lanes now read consecutive 16-byte chunks of the same row, and
+// the requests of the warp merge into whole 128-byte transactions. 16 bytes
+// is the widest load that one thread can issue. A narrower load wastes some
+// of the width of the memory system.
 //
 // Two consequences to work through:
 //
-//   1. The dot product is now SPLIT across LPR threads. Each holds a partial
-//      sum and they have to be added up. In this stage that reduction goes
-//      through shared memory, as in stage 08. Stage 08c deletes it.
+//   1. LPR threads now SHARE the dot product. Each one holds a partial sum,
+//      and the kernel must add them. In this stage that reduction goes
+//      through shared memory, as in stage 08. Stage 08c removes it.
 //
 //   2. The accumulator can stay in REGISTERS. Thread (row, lane) owns VEC
-//      elements of the output for the positions its group walks. The online
-//      softmax rescale alpha is the same for every thread in the block, so
-//      partial sums can be rescaled independently and added up once, at the
-//      very end. One shared-memory reduction per block instead of one per
-//      tile.
+//      elements of the output, for the positions that its group walks.
+//      The online softmax rescale alpha is the same for every thread in the
+//      block. So each thread rescales its own partial sum, and the kernel
+//      adds them one time, at the end. That is one shared-memory reduction
+//      for each block, and not one for each tile.
 //
 // ---------------------------------------------------------------------------
 // ALIGNMENT IS A PRECONDITION, NOT A HOPE
 // ---------------------------------------------------------------------------
 //
-// A 16-byte load needs a 16-byte aligned address. Rows start at multiples of
-// head_dim * sizeof(scalar_t) from an allocation torch aligned for you, so
-// the wide path is legal exactly when that product divides by 16. When it
-// does not, fall back to scalar loads. Do not read past the end of a row and
-// hope the mask catches it: a misaligned 16-byte load is a fault, not a
-// wrong number.
+// A 16-byte load needs a 16-byte aligned address. A row starts at a multiple
+// of head_dim * sizeof(scalar_t), from an allocation that torch aligned for
+// you. So the wide path is legal exactly when that product divides by 16.
+// When it does not divide by 16, use scalar loads.
 //
-// Check your register count when you are done:
+// Do not read past the end of a row and hope that the mask catches it. A
+// misaligned 16-byte load is a fault. It is not a wrong number.
+//
+// Then check your register count:
 //     VC_CUDA_VERBOSE=1 ./vc test 8b
 // If ptxas reports spill stores, you asked for more registers than exist and
 // the "registers" you added are really local memory, which is DRAM.

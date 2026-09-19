@@ -34,8 +34,8 @@ Two steps. Time them separately.
 
 ### Step 2: do the math
 
-Each weight is used in exactly one multiply-and-add. That's 2 operations
-per weight:
+The model uses each weight in exactly one multiply-and-add. That is 2
+operations for each weight:
 
 ```
 7e9 weights  x  2 ops  =  14e9 operations  =  14 GFLOP
@@ -64,8 +64,8 @@ physics. Just an op, the way a request is a request.)
 **The GPU is idle over 99% of the time, waiting for memory.** It is not
 short of arithmetic. It is short of *bytes arriving*.
 
-This is the N+1 query problem. Generating one token at a time is doing a full
-table scan to answer a single question.
+This is the N+1 query problem. To make one token at a time, you do a full table
+scan to answer one question.
 
 ### The fix, and where the batch size comes from
 
@@ -81,14 +81,15 @@ waiting, run them in the *same* pass:
 | Tokens out | 1 | **128** |
 | Wall clock | ~37 ms | ~40 ms |
 
-**128x the output for the same wall-clock time**, because the expensive part
-(dragging 14 GB across the memory bus) got shared by all 128.
+**128 times the output in the same wall-clock time.** All 128 requests share the
+expensive part, which is the 14 GB that must cross the memory bus.
 
-Said the other way round: one weight is fetched from VRAM **once**, and while it
-sits in registers it gets multiplied against request 1's activation, then
-request 2's, then request 3's... up to B. Same byte, B multiply-adds. Bytes are
-what's expensive, so the game is squeezing more work out of every byte you
-already paid to drag in.
+Say it the other way. The GPU reads one weight from VRAM **one time**. That
+weight then sits in a register. The GPU multiplies it by the activation of
+request 1, then request 2, then request 3, up to B. One byte, B multiply-adds.
+
+The bytes are the expensive part. So the game is to get more work out of every
+byte that you already paid to bring in.
 
 In linear-algebra terms, batching changes *which operation you are running*:
 
@@ -97,13 +98,13 @@ batch 1:   y = W @ x     matrix x vector  (GEMV)  -> each weight used once
 batch B:   Y = W @ X     matrix x matrix  (GEMM)  -> each weight used B times
 ```
 
-Batching turns a GEMV into a GEMM. GEMMs are what GPUs are built for; GEMVs
-waste them. If you have ever done cache blocking or loop tiling on a CPU, it is
-the identical instinct: load the line once, extract every bit of work from it
-before it is evicted.
+A batch turns a GEMV into a GEMM. A GPU exists to run a GEMM. A GEMV wastes it.
 
-Notice the two time columns just became equal — 37 ms reading, 36 ms computing.
-That's not a coincidence, it's where the batch size came from:
+This is the same instinct as cache blocking or loop tiling on a CPU. Load the
+line one time. Take all of the work out of it before the cache drops it.
+
+Look at the two time columns. They are now equal: 37 ms to read, 36 ms to
+compute. That is not a coincidence. That is where the batch size comes from:
 
 ```
    37 ms of reading
@@ -117,14 +118,14 @@ That's not a coincidence, it's where the batch size came from:
 That is the entire argument for continuous batching, and why production servers
 set `max_num_seqs` (the batch size knob) in the hundreds.
 
-You won't quite reach it, because each concurrent request also needs its own KV
-cache in VRAM, and you run out of memory before you run out of arithmetic.
-Relaxing *that* constraint is what PagedAttention is for.
+You do not quite reach that batch size. Each concurrent request also needs its
+own KV cache in VRAM. You run out of memory before you run out of arithmetic.
+PagedAttention exists to relax *that* constraint.
 
 ### "Why not batch to infinity, then?"
 
-Being compute-bound is the *goal* — it means the silicon you paid for is finally
-busy instead of idling on memory. So why stop at ~150?
+To be compute-bound is the *goal*. The silicon that you paid for is finally
+busy, and it no longer waits on memory. So why stop at approximately 150?
 
 Because past the ridge you gain nothing. 7B on this card, read = 37 ms,
 compute = 0.25 ms per request:
@@ -137,9 +138,10 @@ compute = 0.25 ms per request:
 | 300 | 37 ms | 75 ms | 75 ms | `300/0.075` = 4,000 tok/s | 75 ms |
 | 600 | 37 ms | 150 ms | 150 ms | `600/0.150` = 4,000 tok/s | 150 ms |
 
-Look at the last two rows. **Throughput is flat.** Double the batch, double the
-step time, produce twice the tokens in twice the time — net zero. Meanwhile
-every user's inter-token latency doubled.
+Look at the last two rows. **The throughput is flat.** Double the batch, and
+you double the step time. You make two times the tokens in two times the time.
+The gain is zero. At the same time, the inter-token latency of every user
+doubled.
 
 The reason is mechanical. Past the ridge, step time is `0.25ms x B`, so:
 
@@ -154,8 +156,8 @@ peak you sit on, not a wall you push through.
 
 ### "But the weights never change — can't they just stay in cache?"
 
-They never change, true. The only thing that alters them is retraining. But
-read-only does not mean free to read, and they are far too large to cache:
+That is true. Only a retraining run changes them. But read-only does not mean
+free to read, and the weights are much too large for the cache:
 
 ```
 L2 cache on this GPU       50 MB
@@ -164,24 +166,26 @@ Qwen3-0.6B in bf16      1,200 MB   ->   24x too big
 ```
 
 So the weights live in **VRAM**, and "read 14 GB from VRAM" *is* the 37 ms.
-Residency in VRAM is not a saving, it is the cost. Every forward pass drags the
+Residency in VRAM is not a saving. It is the cost. Every forward pass pulls the
 full 14 GB across the bus again, token after token, forever.
 
-Immutability *is* exploited — just never by caching:
+The engine does use the fact that the weights never change. It does not use a
+cache to do it:
 
-- **Batching** — the same unchanging weights serve all B requests (stages 04-05)
-- **Quantization** — shrink them offline to fp8/int4, so 14 GB becomes 7 or 3.5,
-  and read time falls proportionally (stage 18)
-- **Tensor parallelism** — shard them so each GPU reads only its slice (stage 20)
+- **A batch.** The same unchanging weights serve all B requests (stages 04-05).
+- **Quantization.** Make them smaller offline, to fp8 or int4. 14 GB becomes 7
+  or 3.5, and the read time falls by the same factor (stage 18).
+- **Tensor parallelism.** Shard them, so each GPU reads only its slice
+  (stage 20).
 
-All three attack the same denominator. None makes the read free, because 14 GB
-does not fit in 50 MB.
+All three attack the same denominator. None of them makes the read free,
+because 14 GB does not fit in 50 MB.
 
 ### The compressed form you'll see everywhere else
 
-Papers and blog posts don't write out both timings. They divide them away into a
-single number and compare it against the hardware. This is the "roofline model",
-and it trips everyone up, so here it is slowly.
+A paper or a blog post does not write out both timings. It divides them into one
+number and compares that number against the hardware. This is the "roofline
+model". It confuses everybody, so here it is, slowly.
 
 **Two different quantities that happen to share the same units.**
 
@@ -190,8 +194,9 @@ and it trips everyone up, so here it is slowly.
 | **~138 FLOP/byte** | a property of your **hardware** | you buy a different GPU |
 | **B FLOP/byte** | a property of your **workload** | you change the batch size |
 
-Neither one is something you observe by probing a running GPU. Both are computed
-on paper, in advance, and then compared. That comparison is the entire model.
+You cannot observe either number with a probe on a running GPU. You compute both
+on paper, in advance, and then you compare them. That comparison is the whole
+model.
 
 **Why they share units.** The hardware number is a rate divided by a rate, so
 the seconds cancel out:
@@ -202,12 +207,13 @@ the seconds cancel out:
      380 GB/s               GB       /s
 ```
 
-That leaves a plain count ratio -- FLOP per byte, no time in it -- which is
-exactly the same shape as the workload's ratio. That is the *only* reason anyone
-performs this division: to get hardware and workload onto comparable footing.
+A plain count ratio remains. It is FLOP for each byte, and it holds no time. It
+has exactly the same shape as the ratio of the workload. That is the *only*
+reason to do this division: to put the hardware and the workload on the same
+footing.
 
-(This number bounces between ~124 and ~150 run to run on a laptop GPU as clocks
-throttle. Don't chase the exact value.)
+On a laptop GPU this number moves between approximately 124 and approximately
+150 from run to run, because the clocks throttle. Do not chase the exact value.
 
 **Why the workload's ratio is exactly B.** Let `N` = number of weights, bf16:
 
@@ -220,15 +226,17 @@ Operations   = 2 ops/weight x N x B requests  = 2NB
     2N
 ```
 
-At batch 8 you do 8 FLOP per byte fetched; at batch 128, 128. It is not a
-measurement, it is a description of the work you asked for.
+At batch 8 you do 8 FLOP for each byte that you fetch. At batch 128 you do 128.
+This is not a measurement. It describes the work that you asked for.
 
-That clean `= B` is an accident of bf16, where 2 bytes/weight cancels
-2 ops/weight. In fp8 (1 byte/weight) it becomes `2NB / N` = **2B** -- twice the
-intensity at the same batch size. That is a second, independent reason
-quantization helps, separate from the halved read time.
+That clean `= B` is an accident of bf16. There, 2 bytes for each weight cancels
+2 ops for each weight. In fp8, at 1 byte for each weight, it becomes
+`2NB / N` = **2B**. That is two times the intensity at the same batch size.
 
-**It is your two timings, rearranged.** Nothing new is being said:
+This is a second reason that quantization helps. It is separate from the read
+time, which also becomes half as large.
+
+**It is your two timings, in a different order.** It says nothing new:
 
 ```
 memory-bound  means   time_reading   >   time_computing
@@ -246,8 +254,9 @@ memory-bound  means   time_reading   >   time_computing
                     138 (hardware)   >   B (workload)
 ```
 
-Identical inequality, terms shuffled. The intensity form is preferred only
-because the model size drops out, so one number covers every model.
+It is the same inequality with the terms in a different order. The intensity
+form is better for one reason only. The model size drops out, so one number
+covers every model.
 
 **What a profiler actually shows you.** Neither ratio. It shows achieved *rates*.
 Batch 1 on a 7B model:
@@ -257,20 +266,20 @@ memory:   14 GB     / 0.037 s  =    378 GB/s      vs    380 peak  ->  ~100% busy
 compute:  14 GFLOP  / 0.037 s  =    378 GFLOP/s   vs 57,000 peak  ->   ~0.7% busy
 ```
 
-The 138 never appears in any profiler output. It is what you compute beforehand
-to predict *which of those two lines will be pegged*.
+The 138 never appears in the output of a profiler. You compute it in advance, to
+predict *which of those two lines reaches its limit*.
 
 ### Everything else follows
 
-That single fact — *decode waits on memory, so extra requests are nearly free* —
-generates the entire system:
+One fact makes the whole system: *decode waits on memory, so an extra request
+costs almost nothing*. It gives you all of this:
 
 - Batch as hard as possible → **continuous batching** (stage 5)
 - What limits the batch? KV cache memory → **PagedAttention** (stages 6-9)
 - Who gets memory when it runs out? → **the scheduler** (stage 10)
 - Prefill is the opposite (compute-bound) and disrupts decode → **chunked prefill** (11)
 - 1 ms of GPU work shouldn't cost 1 ms of Python → **CUDA graphs** (12)
-- Verifying K tokens costs the same as making 1 → **speculative decoding** (17)
+- A check on K tokens costs the same as one new token → **speculative decoding** (17)
 - Fewer weight bytes = proportionally faster decode → **quantization** (18)
 
 Every stage in this repo is a consequence of the roofline. Stage 3 makes you measure
@@ -309,10 +318,12 @@ The waste came in three flavors:
 Measured waste in the vLLM paper: **60-80%** of KV memory. Meaning ~4x fewer
 concurrent sequences than the hardware could hold. Meaning ~4x less throughput.
 
-**Grouped-Query Attention (GQA)** is the other half of this story. Llama-3-8B uses 32
-query heads but only **8** KV heads, cutting KV bytes 4x. Modern models are designed
-around KV cache pressure. When you compute cache size in stage 2, use `num_kv_heads`
-or you'll be off by the GQA factor.
+**Grouped-Query Attention (GQA)** is the other half of this story. Llama-3-8B has
+32 query heads and only **8** KV heads. That cuts the KV bytes by 4. The
+designers of a modern model think about KV cache pressure.
+
+When you compute the cache size in stage 2, use `num_kv_heads`. If you do not,
+your answer is wrong by the GQA factor.
 
 ---
 
@@ -332,52 +343,64 @@ The insight is that this is **virtual memory**, a solved problem from 1961.
 | Page cache | Automatic prefix caching |
 | Swapping | Swap blocks to CPU under pressure |
 
-The cost: attention can no longer stride a contiguous tensor. The kernel must
-**gather K/V through the block table**. That's why PagedAttention needed a custom
-kernel and couldn't just call FlashAttention. Stage 7 makes you feel the slowdown in
-PyTorch; stages 8, 8b and 8c make you win it back in CUDA.
+There is a cost. Attention can no longer stride through a contiguous tensor. The
+kernel must **gather K and V through the block table**. That is why
+PagedAttention needed a custom kernel, and why it could not call
+FlashAttention.
+
+Stage 7 makes you feel the slowdown in PyTorch. Stages 8, 8b and 8c make you win
+it back in CUDA.
 
 The payoff beyond memory: **sharing becomes a pointer operation**.
 
-- `n=4` parallel samples share the prompt's blocks, refcounted, CoW on divergence
-- Beam search shares the common prefix across all beams
-- **Automatic prefix caching**: hash block contents, and a shared 2000-token system
-  prompt is prefilled once for *all* users, forever. Warm TTFT collapses.
+- `n=4` parallel samples share the blocks of the prompt. The engine counts the
+  references and copies a block when the samples diverge.
+- Beam search shares the common prefix across all beams.
+- **Automatic prefix caching**: hash the contents of a block. One prefill of a
+  shared 2000-token system prompt then serves *all* users, forever. The warm
+  TTFT collapses.
 
-That last one is why APC feels like cheating in production. It's just a page cache.
+The last one looks like cheating in production. It is a page cache.
 
 ---
 
 ## 3b. Three stages inside one kernel
 
-Stages 08, 08b and 08c write the same function three times. The arithmetic
-never changes. What changes is which part of the GPU is the constraint, and
-the three stages are ordered so that fixing one exposes the next.
+Stages 08, 08b and 08c write the same function three times. The arithmetic never
+changes. Only the constraint changes: a different part of the GPU limits each
+version. The three stages have an order, so that a fix to one exposes the next.
 
-**08 is about the decomposition.** A kernel's first decision is what one block
-owns, because everything else follows from it. Here a block owns one (sequence,
-query head) pair and produces one `head_dim` output vector. Blocks never need
-each other's results, so there is no global synchronisation in the kernel at
-all — and that fact, not the arithmetic, is what makes the decomposition right.
+**08 is about the decomposition.** The first decision in a kernel is what one
+block owns. Everything else follows from it. Here a block owns one (sequence,
+query head) pair, and it makes one `head_dim` output vector.
 
-Inside the block, stage 08 does the obvious thing: one thread per context
-position, each walking `head_dim` on its own. Correct. About 5x faster than the
-PyTorch loop, because a Python loop over sequences was never the competition.
+No block needs the result of another block. So the kernel has no global
+synchronisation. That fact makes the decomposition correct, and not the
+arithmetic.
 
-**08b is about the memory system.** The obvious mapping has a specific flaw.
-At any instruction, the 32 threads of a warp are reading 32 addresses that are
-`head_dim` elements apart. The memory system serves a warp in 128-byte
-transactions, so it issues 32 of them where 2 would do. Every byte you asked
-for arrives; you spent an order of magnitude too many requests getting them.
+Inside the block, stage 08 does the obvious thing. It gives one thread to each
+context position, and each thread walks `head_dim` alone. It is correct. It is
+approximately 5 times faster than the PyTorch loop, because a Python loop over
+sequences was never real competition.
 
-Turn the mapping sideways — threads cooperate *along* `head_dim`, 16 bytes
-each — and the requests merge. Same arithmetic, same answers, about **2x**, and
-the kernel goes from roughly half of the card's streaming bandwidth to
-essentially all of it.
+**08b is about the memory system.** The obvious mapping has one specific defect.
+At one instruction, the 32 threads of a warp read 32 addresses that sit
+`head_dim` elements apart.
 
-Sixteen bytes is not arbitrary. It is the widest load a single thread can
-issue, and 8 lanes at 16 bytes is exactly one 128-byte transaction. Coalescing
-is the highest-value habit in CUDA, and this is the cheapest place to learn it.
+The memory system serves a warp in 128-byte transactions. So it issues 32
+transactions where 2 are sufficient. Every byte that you asked for arrives. You
+spent ten times too many requests to get them.
+
+Turn the mapping sideways. The threads then cooperate *along* `head_dim`, at 16
+bytes each, and the requests merge. The arithmetic is the same and the answers
+are the same. The kernel gains approximately **2x**. It moves from half of the
+streaming bandwidth of the card to almost all of it.
+
+Sixteen bytes is not an arbitrary number. It is the widest load that one thread
+can issue. And 8 lanes at 16 bytes is exactly one 128-byte transaction.
+
+Coalescing is the most valuable habit in CUDA. This is the cheapest place to
+learn it.
 
 **08c is about the execution resources.** Now the kernel is perfect on
 bandwidth and still terrible at batch 1:
@@ -387,54 +410,67 @@ grid = (num_seqs, num_heads) = (1, 16) = 16 blocks
 this laptop GPU has 58 SMs
 ```
 
-Three quarters of the machine is idle, and no memory optimisation can help,
-because memory was never the problem. Two fixes:
+Three quarters of the machine is idle. No memory optimisation helps, because
+memory was never the problem. There are two fixes:
 
 - **Warp shuffles.** The lanes that share a K row are in one warp, so
   `__shfl_xor_sync` can reduce their partial dot products by exchanging
-  registers directly. No shared memory, no `__syncthreads`. Worth ~1.6x on
-  its own. It also replaces one deadlock trap with another: a `_sync`
-  primitive whose mask names a lane that never arrives does not return.
+  registers directly. It needs no shared memory and no `__syncthreads`. It is
+  worth approximately 1.6x alone. It also trades one deadlock trap for another.
+  A `_sync` primitive never returns if its mask names a lane that never
+  arrives.
 
-- **Split-K**, or flash-decoding. If there are not enough (sequence, head)
-  pairs to fill the GPU, manufacture blocks by cutting the *context*. Each
-  block computes a partial `(m, l, acc)` and a second kernel merges them with
-  `exp(m_j - M)` — the same rescale the online softmax already does, one level
-  up, and exact. At one sequence this is worth **10x**.
+- **Split-K**, which is also called flash-decoding. If the (sequence, head)
+  pairs cannot fill the GPU, make more blocks: cut the *context* into chunks.
+  Each block computes a partial `(m, l, acc)`. A second kernel merges them with
+  `exp(m_j - M)`. That is the same rescale that the online softmax already
+  does, one level up, and it is exact. At one sequence this is worth **10x**.
 
-Split-K is a trade, and the other side of it shows up at 64 sequences, where
-the grid was already full and there was no idleness to sell. Giving every row
-group its own softmax means every lane works out its own maximum and rescale,
-where one thread used to do it for the whole block. Redundant arithmetic is
-free right up to the moment the kernel stops waiting on memory, and at a full
-grid it is not: you give back a few percent. Real engines dispatch on batch
-size for exactly this reason.
+Split-K is a trade. You see the other side of it at 64 sequences. There the grid
+was already full, and there was no idle time to sell.
 
-The numbers are worth holding together: 2x from how you read memory, 1.6x from
-how you reduce, 10x from having enough blocks to fill the machine, and a few
-percent handed back where the last one buys nothing. They are not the same
-kind of win, and a profiler tells them apart while a stopwatch does not. That
-is what `./vc ncu` is for.
+When each row group gets its own softmax, every lane computes its own maximum
+and its own rescale. Before, one thread did that for the whole block.
 
-And one bug worth the price of the stage. A block reduction that hands its
-answer back through shared memory needs a barrier after every thread has READ
-it, not only before. The next reduction reuses the scratch, a warp that runs
-ahead overwrites a result a slower warp has not collected, and a few percent
-of the output is wrong on some inputs and right on others.
-`compute-sanitizer --tool racecheck` finds it in one run and names both source
-lines. A stopwatch, a print statement and an afternoon do not.
+Redundant arithmetic is free until the kernel stops to wait on memory. At a full
+grid it is not free. You give back a few percent. A real engine dispatches on
+the batch size for this exact reason.
+
+Hold the four numbers together:
+
+- 2x from how you read memory,
+- 1.6x from how you reduce,
+- 10x from enough blocks to fill the machine,
+- and a few percent back, where the last one buys nothing.
+
+These are not the same kind of win. A profiler separates them. A stopwatch does
+not. That is what `./vc ncu` is for.
+
+And one bug pays for the whole stage. A block reduction that returns its answer
+through shared memory needs a barrier after every thread READS it. A barrier
+before the read is not sufficient.
+
+The next reduction uses the same scratch memory. A warp that runs ahead
+overwrites a result that a slower warp did not collect yet. A few percent of the
+output is then wrong on some inputs and correct on others.
+
+`compute-sanitizer --tool racecheck` finds this bug in one run, and it names
+both source lines. A stopwatch, a print statement and an afternoon do not.
 
 ### And the same three questions about a GEMV
 
-Stage 18b is the shortest version of the whole argument. Weight-only int8
-halves the bytes decode must read, which should nearly halve decode time — but
-only if the dequantize happens on a value already in a register. Materialise
-the bf16 weight first and you have added a full-size write and a full-size
-read, and made it slower than not quantizing at all.
+Stage 18b is the shortest version of the whole argument. Weight-only int8 makes
+the bytes that decode must read half as many. The decode time must then also
+become almost half as large.
 
-Then measure against cuBLAS and watch the win evaporate somewhere between one
-row and four. A GEMV is not a small GEMM. That crossover is stage 3's ridge
-again, in milliseconds you measured yourself.
+That is true on one condition. The dequantize must happen on a value that is
+already in a register. If you materialise the bf16 weight first, you add a
+full-size write and a full-size read. The kernel is then slower than no
+quantization at all.
+
+Then measure against cuBLAS, and watch the win disappear between one row and
+four rows. A GEMV is not a small GEMM. That crossover is the ridge from stage 3
+again, in milliseconds that you measured yourself.
 
 ---
 
@@ -442,17 +478,20 @@ again, in milliseconds you measured yourself.
 
 From **Orca (OSDI '22)**, and arguably as important as paging.
 
-**Static batching**: gather 8 requests, run until all 8 finish. A request that needs
-10 tokens sits padded and idle while one needing 500 tokens finishes. Output lengths
-in real traffic vary by 10-100x, so most of your batch slots are dead air.
+**A static batch**: collect 8 requests, and run until all 8 finish. A request
+that needs 10 tokens sits padded and idle while a request that needs 500 tokens
+finishes. In real traffic the output lengths differ by a factor of 10 to 100. So
+most of your batch slots hold nothing.
 
-**Continuous batching** = scheduling at **iteration granularity**. After *every*
-forward pass the scheduler re-decides the batch: finished sequences leave, waiting
-ones join. No padding to a common length, no waiting for the straggler.
+**Continuous batching** means that the scheduler works at **iteration
+granularity**. After *every* forward pass it decides the batch again. A finished
+sequence leaves, and a waiting sequence joins. There is no padding to a common
+length, and no wait for the slowest sequence.
 
-The subtlety that makes it work: sequences at different lengths can share a batch
-because attention is per-sequence anyway. You flatten all tokens into one ragged
-tensor and hand the kernel a length array (`cu_seqlens`). No padding, ever.
+One detail makes this work. Sequences of different lengths can share a batch,
+because attention is per-sequence in any case. So flatten all of the tokens into
+one ragged tensor, and give the kernel a length array (`cu_seqlens`). There is
+no padding, at any time.
 
 ---
 
@@ -467,17 +506,20 @@ tensor and hand the kernel a length array (`cu_seqlens`). No padding, ever.
 | Latency metric | **TTFT** | **TPOT / ITL** |
 | Wants | Few big chunks | Max batch size |
 
-They fight. A single 8000-token prefill occupies a whole step, and every sequence
-mid-generation stalls — users see a visible hitch in their token stream.
+The two workloads fight. One 8000-token prefill fills a whole step. Every
+sequence in the middle of generation stalls, and the user sees the token stream
+stop.
 
-**Chunked prefill** (Sarathi-Serve) splits the prefill into fixed token budgets and
-co-schedules chunks alongside decodes in one mixed batch. It piggybacks the
-bandwidth-starved decode tokens onto the compute-heavy prefill GEMM, filling both
-sides of the roofline. This is the main throughput-vs-latency dial in modern servers.
+**Chunked prefill** (Sarathi-Serve) cuts the prefill into fixed token budgets.
+It then schedules the chunks together with the decodes, in one mixed batch. The
+decode tokens, which wait on bandwidth, travel with the prefill GEMM, which
+needs compute. That fills both sides of the roofline.
 
-**Disaggregated prefill** takes it further: separate GPU pools for prefill and decode,
-shipping KV blocks between them over the network. You isolate TTFT from TPOT
-completely. This is where large deployments are heading.
+This is the main dial between throughput and latency in a modern server.
+
+**Disaggregated prefill** goes further. It gives prefill and decode separate GPU
+pools, and it sends the KV blocks between them across the network. That isolates
+TTFT from TPOT completely. Large deployments move in this direction.
 
 ---
 
@@ -486,22 +528,23 @@ completely. This is where large deployments are heading.
 | When | Idea | Why it mattered |
 |---|---|---|
 | 2022 | **Orca** — iteration-level scheduling | Continuous batching. Stop waiting on stragglers. |
-| 2022 | **FlashAttention** | Tiling + online softmax; never materialize the N×N score matrix. |
+| 2022 | **FlashAttention** | Tiles and an online softmax. The N x N score matrix never exists. |
 | 2023 | **vLLM / PagedAttention** (SOSP) | KV cache as virtual memory. Kills fragmentation. |
-| 2023 | **Speculative decoding** | Exploit that verify-K ≈ cost of generate-1. Lossless. |
+| 2023 | **Speculative decoding** | A check on K tokens costs about as much as one new token. It loses nothing. |
 | 2023 | **S-LoRA** | Thousands of LoRA adapters on one base model, paged like KV. |
 | 2023 | **GQA** goes mainstream | Model architecture bends to KV cache pressure. |
 | 2024 | **Sarathi-Serve** — chunked prefill | Stop prefill from stalling decode. |
-| 2024 | **Automatic prefix caching** | Content-hash blocks; share prefixes across requests. |
+| 2024 | **Automatic prefix caching** | Hash the contents of a block. Requests then share a prefix. |
 | 2024 | **FP8 KV cache** | Halve the other big memory reader. |
 | 2025 | **vLLM V1 rewrite** | Isolated EngineCore process, unified scheduler, persistent batch. |
-| 2025+ | **Disaggregated P/D** | Separate prefill and decode fleets; isolate TTFT from TPOT. |
+| 2025+ | **Disaggregated P/D** | Separate fleets for prefill and decode. TTFT and TPOT stop interfering. |
 
 ---
 
 ## 7. Anatomy of the real vLLM
 
-Roughly what you're rebuilding, so you can read the source afterward:
+This is approximately what you rebuild. Read it, and you can then read the real
+source:
 
 ```
 AsyncLLM  (HTTP / OpenAI-compatible surface)
@@ -520,14 +563,16 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
 
 **Key V0 → V1 changes** (2025), all of which you'll independently rediscover:
 
-- Engine loop moved into its **own process** — the API server's Python overhead was
-  measurably stalling the GPU between steps.
-- **No prefill/decode distinction in the scheduler.** Just a per-step token budget;
-  a request contributes however many tokens it needs. Chunked prefill becomes the
-  default rather than a mode.
-- **Persistent batch**: the input tensors are mutated in place across steps instead
-  of being rebuilt, so CUDA graphs stay valid and Python work per step goes to ~0.
-- Prefix caching on by default, because the hash lookup got cheap enough to be free.
+- The engine loop moved into its **own process**. The Python overhead on the API
+  side stalled the GPU between steps by a measurable amount.
+- **The scheduler no longer separates prefill from decode.** There is one token
+  budget for each step. A request contributes as many tokens as it needs.
+  Chunked prefill is now the default, and not a mode.
+- **A persistent batch.** The engine changes the input tensors in place across
+  steps. It does not build them again. So the CUDA graphs stay valid, and the
+  Python work in each step falls to approximately zero.
+- Prefix caching is now on by default. The hash lookup became cheap enough to be
+  free.
 
 ---
 
@@ -537,12 +582,15 @@ EngineCore  ── own process, so Python on the API side can't stall the GPU
   `2 * 32 * 8 * 128 * 2 = 128 KB/token`. A 4k-token conversation = **512 MB**.
   On your 12 GB card, after ~5 GB for an 8B model in fp8, that's roughly a dozen
   such conversations. **That number is your throughput.**
-- Block size 16 is the standard default: big enough to amortize block-table lookups,
-  small enough that the average waste (8 tokens/sequence) is noise.
-- A decode step at batch 1 on a small model is ~1 ms of GPU work. Unoptimized Python
-  and kernel launches can cost about the same. Hence CUDA graphs.
-- Speculative decoding acceptance rates run ~60-80% with a good draft; expect
-  1.5-2.5x, and near zero on high-entropy creative text.
+- Block size 16 is the standard default. It is large enough to spread the cost
+  of a block-table lookup. It is small enough that the average waste, 8 tokens
+  for each sequence, is noise.
+- A decode step at batch 1 on a small model is approximately 1 ms of GPU work.
+  Python and the kernel launches can cost the same, if you do not optimise them.
+  That is why CUDA graphs exist.
+- A good draft gives a speculative decoding acceptance rate of 60% to 80%.
+  Expect 1.5x to 2.5x. Expect almost nothing on creative text, which has a high
+  entropy.
 
 And for the kernels, four hardware constants and what they cost you:
 
@@ -551,77 +599,93 @@ And for the kernels, four hardware constants and what they cost you:
 - The memory system serves a warp in **128-byte transactions**, and the widest
   load one thread can issue is **16 bytes**. 8 lanes x 16 bytes is exactly one
   transaction, which is why stage 08b targets that width and gets ~2x.
-- **Registers per SM** (65536 on most modern cards) divided by registers per
-  thread caps how many warps an SM can hold, which is how much memory latency
-  it can hide. `ptxas` prints the numerator; `./vc info` prints the
-  denominator.
-- **Blocks must outnumber SMs**, by a good margin, or the machine idles. At
-  batch 1 a (num_seqs, num_heads) grid is 16 blocks against ~58 SMs, and
-  that one fact is worth 10x in stage 08c.
+- **Registers for each SM**, which is 65536 on most modern cards. Divide that
+  number by the registers for each thread. The result limits how many warps an
+  SM holds, and that is how much memory latency it hides. `ptxas` prints the
+  numerator. `./vc info` prints the denominator.
+- **The blocks must be more than the SMs**, by a large margin. If they are not,
+  the machine idles. At batch 1, a (num_seqs, num_heads) grid gives 16 blocks
+  against approximately 58 SMs. That one fact is worth 10x in stage 08c.
 
 ---
 
 ## 9. Vocabulary
 
-- **TTFT** — time to first token; dominated by queue wait + prefill.
-- **TPOT / ITL** — time per output token / inter-token latency; the streaming smoothness.
-- **Goodput** — throughput that actually met its latency SLO. The metric that matters.
-- **Ragged / flat batch** — all sequences' tokens concatenated, described by `cu_seqlens`.
-- **Slot mapping** — for each token in the flat batch, the physical KV slot to write to.
-- **Block table** — per-sequence array mapping logical block index → physical block id.
-- **Preemption** — evicting a running sequence under memory pressure (swap or recompute).
-- **Online softmax** — the running max/sum trick letting you softmax in tiles, from
-  FlashAttention. You'll implement it in stage 8.
+- **TTFT.** Time to first token. The queue wait and the prefill control it.
+- **TPOT / ITL.** Time for each output token, or inter-token latency. It is how
+  smooth the stream looks.
+- **Goodput.** The throughput that met its latency SLO. This is the metric that
+  matters.
+- **Ragged batch**, or flat batch. The tokens of all sequences, concatenated.
+  `cu_seqlens` describes it.
+- **Slot mapping.** For each token in the flat batch, the physical KV slot to
+  write it to.
+- **Block table.** One array for each sequence. It maps a logical block index to
+  a physical block id.
+- **Preemption.** The scheduler removes a running sequence under memory
+  pressure. It swaps the blocks out, or it computes them again later.
+- **Online softmax.** The running maximum and sum that let you softmax in tiles.
+  It comes from FlashAttention. You write it in stage 8.
 
 And the CUDA half, all of it earned in stages 08 through 08c:
 
-- **Warp** — the 32 threads that issue together. **Lane** — one thread's index
-  in it.
-- **Coalescing** — consecutive lanes reading consecutive addresses, so their
-  requests merge into whole transactions. The single highest-value habit.
-- **Sector** — the 32-byte unit the cache actually fetches. "Bytes per sector
-  used" is coalescing, measured, and `./vc ncu` reads it.
-- **Occupancy** — warps resident on an SM against the maximum it can hold.
-  Bounded by registers and shared memory per block, and it is how much latency
-  the SM can hide, not how busy it is.
-- **Spill** — ptxas ran out of registers and put the overflow in local memory,
-  which is DRAM. Always a loss, and always visible in the build log.
-- **Warp shuffle** — `__shfl_xor_sync` and friends, exchanging registers
-  between lanes with no shared memory and no barrier. Every lane in the mask
-  must reach the instruction or it never returns.
-- **Split-K / flash-decoding** — cutting the CONTEXT into chunks to
-  manufacture blocks when there are not enough sequences to fill the GPU. Each
-  block emits a partial `(m, l, acc)`; a merge pass rescales them by
-  `exp(m_j - M)`. Exact, not approximate.
-- **Fused epilogue** — applying the last operation (a dequantize scale, a
-  bias, an activation) to a value already sitting in a register, instead of
-  writing a whole tensor out for a second kernel to read back. Stage 18b is
-  15x, and that is the entire difference.
+- **Warp.** The 32 threads that issue together. A **lane** is the index of one
+  thread in the warp.
+- **Coalescing.** Consecutive lanes read consecutive addresses, so their
+  requests merge into whole transactions. This is the most valuable habit.
+- **Sector.** The 32-byte unit that the cache fetches. "Bytes per sector used"
+  is a measurement of coalescing, and `./vc ncu` reads it.
+- **Occupancy.** The warps resident on an SM against the maximum that it holds.
+  The registers and the shared memory for each block limit it. It tells you how
+  much latency the SM hides. It does not tell you how busy the SM is.
+- **Spill.** ptxas ran out of registers and put the excess in local memory,
+  which is DRAM. It is always a loss, and the build log always shows it.
+- **Warp shuffle.** `__shfl_xor_sync` and the related primitives. They exchange
+  registers between lanes with no shared memory and no barrier. Every lane in
+  the mask must reach the instruction. If one does not, the primitive never
+  returns.
+- **Split-K**, or flash-decoding. Cut the CONTEXT into chunks to make more
+  blocks, when the sequences cannot fill the GPU. Each block emits a partial
+  `(m, l, acc)`. A merge pass then rescales them by `exp(m_j - M)`. The result
+  is exact, and not an approximation.
+- **Fused epilogue.** Apply the last operation to a value that already sits in a
+  register. The last operation can be a dequantize scale, a bias or an
+  activation. The alternative writes a whole tensor out for a second kernel to
+  read back. Stage 18b is 15x, and this is the whole difference.
 
 ---
 
 ## 10. The second track: what changes when shapes are frozen
 
-Everything above is about a physical fact — memory bandwidth — and the moves it
-forces. None of it depends on PyTorch. But the *shape* of the code that
-implements those moves depends enormously on whether your framework dispatches
-kernels at runtime or compiles programs ahead of time.
+Everything above is about one physical fact, memory bandwidth, and the moves
+that it forces. None of it depends on PyTorch.
 
-Run `./vc backend jax` and you rebuild the ladder on XLA. Eleven of the twenty
-stages get a JAX twin; the other nine — the allocator, prefix cache, scheduler,
-chunked prefill, detokenizer, server, metrics, speculative decoding, guided
-decoding — are pure logic and are literally the same file on both tracks. That
-split is itself the lesson: **most of an inference engine is not framework
-code.** The bookkeeping is the product.
+But the *shape* of the code that makes those moves depends on one thing very
+strongly. Does your framework dispatch kernels at runtime, or does it compile
+programs in advance?
+
+Run `./vc backend jax`, and you build the ladder again on XLA. Eleven of the
+twenty stages have a JAX twin. The other nine are pure logic, and they are the
+same file on both tracks:
+
+- the allocator and the prefix cache,
+- the scheduler and the chunked prefill,
+- the detokenizer, the server and the metrics,
+- the speculative decoding and the guided decoding.
+
+That split is the lesson. **Most of an inference engine is not framework code.**
+The bookkeeping is the product.
 
 Where the twins diverge, they diverge from one root cause.
 
 ### XLA compiles for exact shapes
 
-PyTorch dispatches a kernel per op, at runtime, from whatever shape the tensor
-happens to have. XLA compiles a whole program for one specific set of shapes,
-and a different set means a different program — traced and compiled from
-scratch, seconds of wall clock, on the critical path.
+PyTorch dispatches one kernel for each op, at runtime, from the shape that the
+tensor has at that moment.
+
+XLA compiles a whole program for one specific set of shapes. A different set of
+shapes is a different program. XLA traces and compiles it again, and that costs
+seconds of wall clock on the critical path.
 
 So the tax you are trying to remove is not the same tax:
 
@@ -631,63 +695,67 @@ So the tax you are trying to remove is not the same tax:
 | the fix | CUDA graphs | shape buckets + AOT compile |
 | what makes it work | static pointers and shapes | static shapes |
 
-Same fix. Completely different reason. That is worth sitting with, because it
-is the strongest evidence that bucketing is not a CUDA trick — it is what you
-do whenever the cost of *preparing* to run work is large compared to the work.
+The same fix comes from a completely different reason. Think about that. It is
+the strongest evidence that a bucket is not a CUDA trick. You use a bucket
+whenever the cost to *prepare* the work is large next to the work.
 
 ### The KV cache stops being a thing you grow
 
-torch hands you a cache one token longer each step. In JAX that is a recompile
-per token, so the cache is **preallocated to max_len and written into** with a
-dynamic slice. Shapes never change; one compile serves the whole decode.
+torch gives you a cache that is one token longer at each step. In JAX that means
+one recompile for each token. So you **preallocate the cache to max_len and
+write into it** with a dynamic slice. The shapes never change, and one compile
+serves the whole decode.
 
 Which drags four stages sideways:
 
-- **02** — you own the cache. `init_cache(batch, max_len)`, and you carry
-  `cache_len` yourself. Round max_len up to a bucket and prompts of 200 and 250
-  tokens share a compiled decode step. Stage 12's idea, arrived at on stage 2.
-- **04** — right-pad instead of left-pad, and read logits from a per-row index.
-  The padding waste is identical; only the layout moved.
-- **05** — eviction cannot shrink the batch, because the batch dimension *is*
-  the compilation. So the batch is a fixed **slot table**: finishing frees a
-  slot, admitting fills one, nothing is copied. That is a page table with one
-  page per sequence, two stages before you build the real one.
-- **05, again** — a step costs the same whether one slot is busy or eight.
-  Continuous batching's win therefore shows up entirely as **useful tokens per
-  forward pass**, not as faster steps. On this track, occupancy is the whole
-  game.
+- **02.** You own the cache. Call `init_cache(batch, max_len)`, and carry
+  `cache_len` yourself. Round max_len up to a bucket, and a prompt of 200 tokens
+  and a prompt of 250 tokens then share one compiled decode step. That is the
+  idea from stage 12, and you find it on stage 2.
+- **04.** Pad on the right, and not on the left. Read the logits from an index
+  for each row. The waste from the padding is the same. Only the layout moved.
+- **05.** Eviction cannot make the batch smaller, because the batch dimension
+  *is* the compilation. So the batch is a fixed **slot table**. A sequence that
+  finishes frees a slot, a new sequence fills one, and the engine copies
+  nothing. That is a page table with one page for each sequence, two stages
+  before you build the real one.
+- **05, again.** A step costs the same with one busy slot or with eight. So the
+  win from continuous batching appears only as **useful tokens for each forward
+  pass**. It does not appear as a faster step. On this track, occupancy is the
+  whole game.
 
 ### Two places the JAX version is simply better
 
-- **Stage 08** is Pallas rather than CUDA, and the online softmax is
-  identical. What changes is that the block-table lookup has to happen inside
-  the kernel, with a computed index, because no BlockSpec can express "which
-  page do I need? ask the page table."
-- **Stage 20** stops being a simulation. `shard_map` over a mesh of CPU devices
-  gives you real shardings and a real `psum`, so "column-parallel then
-  row-parallel, exactly one all-reduce" becomes two PartitionSpecs you can
-  read — and the test counts the collectives in the compiled HLO to prove
-  there is exactly one.
+- **Stage 08** is Pallas and not CUDA. The online softmax is the same. One thing
+  changes: the block-table lookup must happen inside the kernel, with a computed
+  index. No BlockSpec can say "which page do I need? ask the page table."
+- **Stage 20** stops to be a simulation. `shard_map` over a mesh of CPU devices
+  gives you real shardings and a real `psum`. So "column-parallel, then
+  row-parallel, with exactly one all-reduce" becomes two PartitionSpecs that you
+  can read. The test then counts the collectives in the compiled HLO, and proves
+  that there is one.
 
 ### And one place it is honestly worse
 
-The preallocated cache is rewritten functionally every step, per layer, inside
-the scan. So decode time grows with the ceiling you *chose*, not the context
-you *hold* — roughly 1.3x from a 128-slot cache to a 1024-slot one, where the
-torch track is nearly flat. Buffer donation does not fix it; the copy is inside
-the scan.
+JAX writes the preallocated cache again at every step, for each layer, inside
+the scan. So the decode time grows with the ceiling that you *chose*, and not
+with the context that you *hold*.
 
-What fixes it is making the buffer granular so a step only touches the blocks
-it needs. Which is PagedAttention. The JAX track gives you a reason to want
-stages 06-09 before you get there.
+That is approximately 1.3x from a 128-slot cache to a 1024-slot cache. The torch
+track is almost flat over the same range. Buffer donation does not fix this. The
+copy is inside the scan.
+
+The fix is to make the buffer granular, so that a step touches only the blocks
+that it needs. That is PagedAttention. The JAX track gives you a reason to want
+stages 06 to 09 before you reach them.
 
 ---
 
 ## Appendix A: "What if a model fit entirely in cache?"
 
-A reasonable thing to wonder, once you accept that decode is memory-bound: what
-if the weights were small enough to live in the GPU's on-chip cache instead of
-VRAM? Run `./vc cliff` to measure it on your own card.
+This is a reasonable question, after you accept that decode waits on memory.
+What if the weights were small enough to live in the on-chip cache of the GPU,
+and not in VRAM? Run `./vc cliff` to measure it on your own card.
 
 ### The cliff is real
 
@@ -699,9 +767,10 @@ working set   achieved bandwidth
   256 MB         380 GB/s   spills to VRAM
 ```
 
-**~5x the bandwidth**, and the cliff lands exactly where L2 runs out. A
-cache-resident model really would decode ~5x faster at batch 1, and the whole
-"you must batch to ~150" argument would soften enormously.
+That is approximately **5 times the bandwidth**, and the cliff falls exactly
+where L2 runs out. A model that fits in the cache really does decode
+approximately 5 times faster at batch 1. The argument "you must batch to
+approximately 150" then becomes much weaker.
 
 ### But look what fits in 50 MB
 
@@ -712,57 +781,65 @@ cache-resident model really would decode ~5x faster at batch 1, and the whole
 | int4 (0.5 bytes) | 100M |
 | 1.58-bit ternary | ~250M |
 
-GPT-2 small was 124M. BERT-base was 110M. "Fits in cache" means roughly
-2019-era capability. Getting frontier intelligence down there needs something
-like a 1000x gain in intelligence-per-parameter, and scaling laws run the other
-way: capability climbs roughly logarithmically in parameters.
+GPT-2 small was 124M. BERT-base was 110M. So "it fits in the cache" means
+approximately the capability of 2019.
+
+To put frontier intelligence into that space, you need approximately a 1000x
+gain in intelligence for each parameter. The scaling laws move the other way.
+Capability climbs with the logarithm of the parameter count.
 
 ### The catch that doesn't go away
 
-Grant the magic 25M-parameter genius anyway. **The KV cache does not shrink.**
-Its size is set by context length and layer count, not parameter count. A long
-conversation is still hundreds of MB.
+Give yourself the magic 25M-parameter genius anyway. **The KV cache does not
+become smaller.** The context length and the layer count set its size. The
+parameter count does not. A long conversation still needs hundreds of MB.
 
-So the bottleneck does not vanish, it *relocates*. Weights stop being the
-dominant read, KV becomes essentially all of it, and everything in stages 06-09
--- paging, prefix sharing, eviction -- becomes **more** important, not less.
-The memory-bound problem is scale-invariant that way.
+So the bottleneck does not disappear. It *moves*. The weights stop to be the
+largest read, and the KV cache becomes almost all of it.
+
+Everything in stages 06 to 09 then becomes **more** important, and not less:
+paging, prefix sharing and eviction. The memory-bound problem does not change
+with scale.
 
 ### The industry already made this bet -- in silicon, not models
 
-Nobody waited for models to shrink. They built chips with enough SRAM to hold
-the model:
+Nobody waited for the models to become smaller. Companies built chips with
+enough SRAM to hold the model:
 
-- **Groq's LPU**: a few hundred MB of on-chip SRAM and *no external DRAM at all*.
-  The entire pitch is what the roofline predicts -- exceptional batch-1 latency,
-  because HBM is never touched.
-- **Cerebras**: wafer-scale, tens of GB of on-chip SRAM.
+- **The Groq LPU**: a few hundred MB of on-chip SRAM, and *no external DRAM*.
+  The whole sales argument is what the roofline predicts. The batch-1 latency is
+  exceptional, because the chip never touches HBM.
+- **Cerebras**: wafer-scale, with tens of GB of on-chip SRAM.
 
-They scale by wiring many chips together so one model spans their combined SRAM,
-and the theory holds -- the latency win is real.
+They scale up when they connect many chips together, so that one model spans the
+combined SRAM. The theory holds, and the latency win is real.
 
-The open question is cost per token. GPUs claw back their bandwidth disadvantage
-through batching (the 4,000 tok/s row in section 1). SRAM machines win latency
-but need a lot of silicon per model. Whether that pencils out at scale is a live
-commercial argument, not a settled one.
+The open question is the cost for each token. A GPU takes back its bandwidth
+disadvantage with a batch. See the 4,000 tok/s row in section 1. An SRAM machine
+wins on latency, and it needs much silicon for each model. Does that work at
+scale? That is a live commercial argument, and not a settled one.
 
-You cannot easily run this trick on a GPU, because L2 is a *cache*, not a
-scratchpad -- residency cannot be pinned, the hardware evicts what it likes.
-Groq uses explicitly-managed SRAM with deterministic scheduling, which is exactly
-why it works there and is awkward here.
+You cannot use this trick on a GPU. L2 is a *cache*, and not a scratchpad. You
+cannot pin residency, and the hardware evicts what it wants.
+
+Groq manages its SRAM explicitly, with a deterministic schedule. That is exactly
+why the trick works there and is difficult here.
 
 ### Where the idea already pays off
 
-- **Speculative decoding** (stage 17) -- the draft model is tiny and effectively
-  cache-resident. You get the small model's speed *and* the big model's output
-  distribution. That is the closest thing to having it both ways, and it is why
-  the technique works at all.
-- **MoE** -- a 400B model with 15B active parameters per token moves 15B worth of
-  bytes, not 400B. Same instinct: cut bytes-per-token without cutting capability.
-- **On-device** -- phone NPUs running a few-hundred-MB model live in this regime
-  already.
+- **Speculative decoding** (stage 17). The draft model is very small, so it
+  effectively lives in the cache. You get the speed of the small model *and* the
+  output distribution of the big model. That is as near as you get to both, and
+  it is why the technique works.
+- **MoE.** A 400B model with 15B active parameters for each token moves 15B of
+  bytes, and not 400B. It is the same instinct: cut the bytes for each token,
+  and do not cut the capability.
+- **On-device.** A phone NPU that runs a model of a few hundred MB already lives
+  in this regime.
 
-**Verdict:** the mechanism is real. The bet is not "models shrink to fit cache"
-but "hardware grows enough SRAM," and that bet is already funded and shipping.
-What kills the pure version is the KV cache, which scales with context rather
-than parameters and therefore refuses to disappear.
+**The verdict:** the mechanism is real. The bet is not that "models become small
+enough for the cache". The bet is that "hardware grows enough SRAM". That bet
+already has money behind it, and the chips already ship.
+
+The KV cache kills the pure version. It scales with the context, and not with
+the parameters. So it refuses to disappear.

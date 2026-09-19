@@ -7,9 +7,9 @@ memory-bound (~7.8 ms/token). One 8000-token prefill is a single enormous step.
 Every sequence mid-generation stalls for the whole thing, and users watching a
 token stream see it visibly freeze.
 
-The fix, from Sarathi-Serve: give each step a TOKEN BUDGET. A prefill that
-exceeds it is split across steps, and the leftover budget is filled with decode
-tokens from other sequences. One batch, mixed work.
+The fix comes from Sarathi-Serve. Give each step a TOKEN BUDGET. Cut a prefill
+that is larger than the budget across several steps. Then spend the rest of
+the budget on decode tokens from other sequences. One batch, mixed work.
 
 This is the main throughput-vs-latency dial in every modern serving stack:
 

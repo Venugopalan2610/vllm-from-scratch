@@ -1,8 +1,10 @@
 """Stage 09 - Copy-on-write and automatic prefix caching.
 
-Spec in app/s09_prefix.py. Pure data structure again -- no GPU needed, so test
-it as hard as you can. Refcount bugs here surface as OOM-under-load ten stages
-later, which is the worst possible place to debug them.
+The spec is in app/s09_prefix.py. This is a pure data structure again, and it
+needs no GPU. So test it as hard as you can.
+
+A reference-count bug here appears as an OOM under load, ten stages later. That
+is the worst possible place to debug it.
 """
 
 import random
@@ -61,7 +63,7 @@ def test_refcount_fuzz_never_leaks():
 # ---- fork / copy-on-write -------------------------------------------
 
 def test_fork_shares_blocks_without_copying():
-    """n>1 sampling: the prompt is prefilled once and shared."""
+    """n>1 sampling: one prefill of the prompt serves every sample."""
     a = RefCountedAllocator(num_blocks=16, block_size=4)
     parent = SharedBlockTable(a)
     parent.reserve(12)                    # 3 blocks
@@ -203,7 +205,7 @@ def test_cache_saves_prefill_on_a_shared_system_prompt():
     system = list(range(2000))
     hs = block_hashes(system, block_size)
 
-    # user 1: cold. every block is a miss and must be computed.
+    # user 1: cold. Every block is a miss, so the engine computes them all.
     hit = cache.lookup(hs)
     assert hit == []
     computed = 0

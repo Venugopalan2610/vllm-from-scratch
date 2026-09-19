@@ -41,7 +41,8 @@ def test_matches_one_at_a_time(jmodel_exact, prompts):
 
 
 def test_more_requests_than_slots(jmodel_exact):
-    """Six requests through two slots. Everybody finishes, nobody is lost."""
+    """Six requests through two slots. Every request finishes. None of them
+    disappears."""
     model = jmodel_exact
     ps = ["The capital of France is", "def fibonacci(n):", "In 1969, humans",
           "Water boils at", "The largest planet is", "Two plus two is"]
@@ -52,7 +53,8 @@ def test_more_requests_than_slots(jmodel_exact):
 
 
 def test_a_freed_slot_is_reused(jmodel_exact):
-    """The whole idea: a slot that finishes is refilled, not left idle."""
+    """This is the whole idea. A new request fills a slot that finishes. The
+    slot does not stay idle."""
     model = jmodel_exact
     eng = ContinuousEngine(model, max_batch_size=2, max_len=256)
     eng.add_request("short", "Two plus two is", 2)
@@ -109,10 +111,11 @@ def test_useful_tokens_per_forward_pass(jmodel):
     lens = [len(got[rid]) for rid in range(len(ps))]
     tokens = sum(lens)
 
-    # What a static batch would have cost for the SAME outputs: chunks of B,
-    # each chunk running until its slowest member. That is the definition of
-    # static batching, so it can be counted rather than re-measured -- and
-    # counting it keeps both sides on identical work, which is the only way
+    # What a static batch costs for the SAME outputs: chunks of B, and each
+    # chunk runs until its slowest member. That is the definition of a static
+    # batch, so you count it. You do not measure it again.
+    #
+    # A count also keeps both sides on identical work. That is the only way
     # the comparison means anything.
     static_steps = sum(max(lens[i:i + B]) for i in range(0, len(lens), B))
 

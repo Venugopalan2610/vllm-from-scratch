@@ -96,10 +96,12 @@ def build(name, *sources, extra_cuda_cflags=()):
         ) from None
 
 
-# torch serialises builds of one extension with a lock file, and waits for it
-# by polling, forever, silently. Interrupt a first compile -- Ctrl-C, a killed
-# test run, a closed notebook -- and the file outlives the process that made
-# it, and every run after that hangs with no output at all.
+# torch serialises the builds of one extension with a lock file. It waits for
+# that lock by a poll, forever, and it prints nothing.
+#
+# Now interrupt a first compile with Ctrl-C, a killed test run or a closed
+# notebook. The lock file outlives the process that made it, and every later
+# run hangs with no output.
 #
 # There is only ever one build of one extension in this repo, so a lock older
 # than a generous compile is certainly stale.

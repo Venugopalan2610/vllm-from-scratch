@@ -2,10 +2,12 @@
 
 Two things here are worth reading before you use them:
 
-`jbench_ms` blocks. JAX dispatch is asynchronous -- `f(x)` returns as soon as
-the work is ENQUEUED, not when it is done. A timing loop without
-block_until_ready() measures Python, and on a small model that reads as a 50x
-speedup you did not get. Every measurement in this track goes through here.
+`jbench_ms` blocks. JAX dispatch is asynchronous. `f(x)` returns when the work
+reaches the queue, and not when the device finishes it.
+
+A timing loop with no block_until_ready() measures Python. On a small model
+that reads as a 50x speedup that you did not get. Every measurement in this
+track goes through here.
 
 `build_paged` shuffles the physical blocks, exactly as the torch helper does. A
 correct paged kernel cannot care what order the blocks landed in.

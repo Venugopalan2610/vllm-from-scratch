@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup for a fresh clone. Idempotent -- safe to re-run.
+# One-time setup for a fresh clone. You can run it again safely.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,24 +17,25 @@ DEPS=(torch "transformers>=4.51" accelerate safetensors numpy ninja
 
 # The JAX track is opt-in: `./setup.sh --jax`. It is another ~400MB, and half
 # the ladder (allocator, scheduler, detokenizer, ...) is framework-free and
-# needs none of it. cuda13 matches the torch wheel this repo pins; on an older
-# driver swap it for jax[cuda12].
+# needs none of it. cuda13 matches the torch wheel that this repo pins. On an
+# older driver, use jax[cuda12] instead.
 JAX_DEPS=("jax[cuda13]")
 WANT_JAX=0
 for a in "$@"; do [ "$a" = "--jax" ] && WANT_JAX=1; done
 
-# Colab already has torch, CUDA and Triton installed and working
-# together, which is the fiddly part. Pulling another 2.5GB of PyTorch
-# into a private venv would spend several minutes arriving at the same
-# place, so there we build the venv ON TOP of the system packages and
-# install only what is genuinely missing. `./vc` finds .venv/bin either
-# way, which is the point: the loop is identical on both.
+# Colab already has torch and CUDA installed and working together, which
+# is the difficult part. Another 2.5GB of PyTorch in a private venv costs
+# several minutes and arrives at the same place.
+#
+# So on Colab this script builds the venv ON TOP of the system packages,
+# and it installs only what is missing. `./vc` finds .venv/bin in both
+# cases. That is the point: the loop is the same on both.
 if [ "${1:-}" = "--colab" ] || [ -n "${COLAB_RELEASE_TAG:-}" ]; then
   echo "==> hosted notebook detected: venv over the system packages"
   [ -d .venv ] || python3 -m venv --system-site-packages .venv
   .venv/bin/pip install -q --upgrade pip
   .venv/bin/pip install -q "${DEPS[@]}"
-  # Colab already has a working jax; do not fight it for the CUDA plugin.
+  # Colab already has a jax that works. Do not fight it for the CUDA plugin.
   [ "$WANT_JAX" = 1 ] && .venv/bin/pip install -q jax
 else
   command -v uv >/dev/null || {
@@ -75,9 +76,8 @@ else:
     print("   WARNING: no CUDA. Stages 6, 9, 10, 11, 13, 14, 16, 17, 19, 20")
     print("   still work; the GPU stages will skip.")
 
-# Stages 08, 08b and 08c compile a .cu of your own, so they need a real
-# toolkit. Triton used to ship its own compiler and this repo needed none;
-# writing CUDA means nvcc.
+# Stages 08, 08b and 08c compile a .cu file of your own, so they need a real
+# toolkit. You write CUDA here, and CUDA needs nvcc.
 nvcc = shutil.which("nvcc") or (CUDA_HOME and f"{CUDA_HOME}/bin/nvcc")
 if nvcc and shutil.os.path.exists(nvcc):
     print(f"   nvcc {nvcc}")

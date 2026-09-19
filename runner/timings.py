@@ -1,6 +1,6 @@
 """./vc math [params_in_billions] [batch]
 
-Prints the two timings -- read vs compute -- with every division shown.
+It prints the two timings, read against compute, and it shows every division.
 No number appears without its arithmetic.
 """
 
@@ -90,9 +90,9 @@ def main():
     print(f"     {read_ms:.2f} ms of reading")
     print(f"  {'-' * 26}  =  {B}batch {crossover:.0f}{X}")
     print(f"   {comp_ms / batch:.4f} ms per request")
-    print(f"\n  {D}Below batch {crossover:.0f}, extra requests are nearly free -- you are")
-    print(f"  filling idle time. Above it, you pay real arithmetic for each one.")
-    print(f"  This is what max_num_seqs is set from.{X}\n")
+    print(f"\n  {D}Below batch {crossover:.0f}, an extra request costs almost nothing.")
+    print(f"  It fills idle time. Above it, you pay real arithmetic for each one.")
+    print(f"  Set max_num_seqs from this number.{X}\n")
 
 
 if __name__ == "__main__":

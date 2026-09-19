@@ -2,10 +2,10 @@
 
 `./vc lore 13` for the insight. `./vc test 13` to check yourself.
 
-Every request in the batch carries its OWN temperature, top_k, top_p, penalties
-and seed, and they must all be applied in ONE vectorized pass. Once the kernels
-are fast (stages 08 and 12), a Python loop over 256 requests here quietly
-becomes your bottleneck.
+Each request in the batch carries its OWN temperature, top_k, top_p, penalties
+and seed. ONE vectorized pass must apply all of them. After the kernels become
+fast, in stages 08 and 12, a Python loop over 256 requests here quietly becomes
+your bottleneck.
 """
 
 from dataclasses import dataclass

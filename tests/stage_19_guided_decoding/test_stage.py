@@ -1,8 +1,10 @@
 """Stage 19 - Constrained output via logit masking.
 
-Spec in app/s19_guided.py. The JSON validator is supplied in tests/helpers.py --
-compiling a grammar is a separate discipline. This stage is about aligning a
-validator to the TOKENIZER and keeping mask construction off the critical path.
+The spec is in app/s19_guided.py. tests/helpers.py gives you the JSON
+validator, because a grammar compiler is a separate discipline.
+
+This stage is about two things: how to align a validator to the TOKENIZER, and
+how to keep the mask build off the critical path.
 """
 
 import json
@@ -148,7 +150,8 @@ def test_constrained_generation_is_always_valid_json(tk):
 
 
 def test_unconstrained_generation_is_essentially_never_valid(tk):
-    """Not a test of your code -- the baseline that justifies the stage."""
+    """This checks no code of yours. It is the baseline that justifies the
+    stage."""
     rng = random.Random(0)
     ok = 0
     for _ in range(300):

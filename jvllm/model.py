@@ -1,4 +1,4 @@
-"""Qwen3 in pure JAX. Provided -- read it, don't edit it.
+"""Qwen3 in pure JAX. The repo gives you this file. Read it. Do not edit it.
 
 The torch track gets its model from HuggingFace. There is no Flax Qwen3, so
 this is one. It loads the same safetensors file, and its logits match the torch
@@ -6,13 +6,15 @@ model to within bf16 noise.
 
 WHAT IS DIFFERENT FROM THE TORCH MODEL, AND WHY IT MATTERS FOR EVERY STAGE
 
-torch grows the KV cache by concatenation: every decode step produces a cache
-one token longer. That is fine when the kernel is dispatched at runtime from a
-Python shape. XLA is not that: it compiles for exact shapes, and a cache that
-grows by one every step means a full recompile every step. Thirty seconds of
-XLA per token.
+torch grows the KV cache by concatenation. Every decode step makes a cache that
+is one token longer. That works when a Python shape dispatches the kernel at
+runtime.
 
-So the cache here is PREALLOCATED and written into:
+XLA does not work that way. It compiles for exact shapes. A cache that grows by
+one token at every step then forces a full recompile at every step. That is
+thirty seconds of XLA for each token.
+
+So you PREALLOCATE the cache here and write into it:
 
     cache = model.init_cache(batch=4, max_len=1024)     # zeros, fixed forever
     logits, cache = model.forward(ids, positions, cache, cache_len)
@@ -241,9 +243,9 @@ def _forward(params, cfg, ids, positions, kc, vc, cache_len, all_positions,
     )
     x = rms_norm(x, params["final_norm"], cfg.rms_norm_eps)
 
-    # Gather BEFORE the lm_head. The vocab is 152k wide; projecting every
-    # position of a 512-token prefill would allocate 300MB of logits to throw
-    # away all but one row of.
+    # Gather BEFORE the lm_head. The vocab is 152k wide. A projection of every
+    # position of a 512-token prefill allocates 300 MB of logits, and you then
+    # keep one row and throw the rest away.
     if not all_positions:
         x = jnp.take_along_axis(x, logits_index[:, None, None], axis=1)[:, 0]
 

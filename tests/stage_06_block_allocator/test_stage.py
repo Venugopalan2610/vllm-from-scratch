@@ -1,7 +1,7 @@
 """Stage 06 - Blocks, block tables, free list.
 
-Spec in app/s06_blocks.py. No GPU, no model -- this is pure data structure, and
-it is the foundation every later stage stands on. Test it hard.
+The spec is in app/s06_blocks.py. There is no GPU and no model. This is a pure
+data structure, and every later stage stands on it. Test it hard.
 """
 
 import math
@@ -113,7 +113,8 @@ def test_slot_rejects_unallocated_positions():
 
 
 def test_logical_positions_are_contiguous_physical_ones_are_not():
-    """The whole point of paging: logical order is preserved, physical is free.
+    """This is the whole point of paging. The logical order stays. The
+    physical order is free.
 
     Two sequences interleaving their allocations end up with scrambled
     physical blocks, and neither one cares.
@@ -193,7 +194,7 @@ def test_paging_beats_reservation_on_real_traffic(hf):
 
 
 def test_internal_waste_is_under_one_block(hf):
-    """Paged waste is bounded: at most block_size-1 tokens per sequence."""
+    """Paging has a bound on its waste: block_size-1 tokens for each sequence."""
     lens = [17, 33, 100, 5, 64]
     bs = 16
     used = sum(math.ceil(L / bs) * bs for L in lens)

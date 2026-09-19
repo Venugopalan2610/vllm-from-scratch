@@ -128,7 +128,8 @@ def test_every_new_length_costs_a_compile(jmodel):
 
 
 def test_baseline_throughput(jmodel):
-    """Not pass/fail. This records your rock-bottom number -- twice.
+    """This is not a pass or a fail. It records your slowest number, two
+    times.
 
     COLD includes XLA compiling one program per prefix length. WARM re-runs the
     identical lengths, so every compile is a cache hit and what is left is the

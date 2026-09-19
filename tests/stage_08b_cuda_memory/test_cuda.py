@@ -2,9 +2,11 @@
 
 Spec in app/cuda/s08b_paged_attn_vec.cu.
 
-Correctness is checked against stage 07, exactly as stage 08 was: the
-arithmetic did not change, so the answers must not either. What changed is
-the bytes per transaction, and the last two checks are about that.
+These checks compare against stage 07, exactly as stage 08 did. The arithmetic
+did not change, so the answers must not change.
+
+What changed is the bytes in each transaction. The last two checks examine
+that.
 """
 
 import pytest

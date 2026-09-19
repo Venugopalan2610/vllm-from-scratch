@@ -51,7 +51,7 @@ def test_shapes_that_do_not_divide_by_anything(nvcc, dev, B, N, K):
 
 
 def test_accepts_a_bare_vector(nvcc, dev):
-    """Decode hands you one row. It should not have to be shaped (1, K)."""
+    """Decode gives you one row. The caller must not have to shape it (1, K)."""
     W = torch.randn(512, 1024, device=dev)
     q, s = quantize_int8_per_channel(W)
     x = torch.randn(1024, device=dev)

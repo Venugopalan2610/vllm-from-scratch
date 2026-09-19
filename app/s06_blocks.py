@@ -2,8 +2,9 @@
 
 `./vc lore 6` for the insight. `./vc test 6` to check yourself.
 
-This is virtual memory for the KV cache. No attention changes yet -- just the
-memory manager. Get this right and stage 07 is mostly bookkeeping.
+This is virtual memory for the KV cache. Attention does not change yet. This
+stage is the memory manager alone. Make it correct, and stage 07 is mostly
+bookkeeping.
 
 The mapping, worth holding in your head:
 
@@ -51,9 +52,9 @@ class BlockAllocator:
         raise NotImplementedError
 
     def free(self, block_ids) -> None:
-        """Return blocks to the pool. Freeing an already-free block should
-        raise -- it means two sequences believe they own it, and the resulting
-        corruption is very hard to trace back.
+        """Return blocks to the pool. A call on a block that is already free
+        must raise. It means that two sequences each believe that they own the
+        block, and the corruption that follows is very hard to trace back.
         """
         raise NotImplementedError
 

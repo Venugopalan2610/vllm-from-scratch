@@ -2,9 +2,9 @@
 
 `./vc lore 18b`. `./vc test 18b`.
 
-Stage 18 proved the accuracy of weight-only int8 and left the speed on the
-table, because PyTorch has to materialise a bf16 weight before it can
-multiply. The kernel is in app/cuda/s18b_gemv_int8.cu.
+Stage 18 proved that weight-only int8 keeps the accuracy. It did not take the
+speed, because PyTorch must materialise a bf16 weight before it can multiply.
+The kernel is in app/cuda/s18b_gemv_int8.cu.
 
 This wrapper holds one number you have to MEASURE rather than guess:
 GEMV_MAX_ROWS, the batch size above which cuBLAS beats your kernel. The

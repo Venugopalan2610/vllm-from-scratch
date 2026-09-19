@@ -5,15 +5,15 @@
 # Solutions live on the `solutions` branch, not on master. This pulls them
 # from there (or from a local .solutions/ if you have one checked out).
 #
-#   dev/verify.sh              all stages, torch track
-#   dev/verify.sh 7 8          just those
-#   dev/verify.sh --jax        the JAX track (shared stages included)
-#   dev/verify.sh --both       both tracks, in ONE pytest run
-#   dev/verify.sh --jax 7 8    combine freely
+#   dev/verify.sh              all stages, torch track.
+#   dev/verify.sh 7 8          only those stages.
+#   dev/verify.sh --jax        the JAX track, with the shared stages.
+#   dev/verify.sh --both       both tracks, in ONE pytest run.
+#   dev/verify.sh --jax 7 8    combine the arguments freely.
 #
-# --both loads four models onto one GPU (torch bf16 + fp32, jax bf16 + fp32).
-# On a 12GB card that is tight; running the tracks as two invocations is safer
-# and is what CI does.
+# --both loads four models onto one GPU: torch bf16 and fp32, jax bf16 and
+# fp32. On a 12GB card that is tight. Run the two tracks as two commands. That
+# is safer, and CI does it that way.
 set -u
 cd "$(dirname "$0")/.."
 

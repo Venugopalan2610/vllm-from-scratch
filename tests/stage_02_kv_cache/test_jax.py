@@ -27,7 +27,8 @@ LONG_PROMPT = "The history of computing began " * 200     # ~1000 tokens
 
 
 def test_identical_to_stage_01(jmodel_exact, prompts):
-    """Caching is an optimization, not a behavior change. Same tokens, exactly."""
+    """A cache is an optimization. It is not a change of behaviour. It must
+    give exactly the same tokens."""
     model = jmodel_exact
     for p in prompts[:2]:
         want = naive_generate(model, p, max_tokens=12)
@@ -43,7 +44,7 @@ def test_identical_to_stage_01(jmodel_exact, prompts):
 
 
 def test_cache_is_not_leaked_between_calls(jmodel_exact):
-    """Calling twice must not contaminate the second result."""
+    """A second call must give a clean result. The first call must not touch it."""
     model = jmodel_exact
     a = cached_generate(model, "The capital of France is", max_tokens=10)
     _ = cached_generate(model, "Something else entirely, quite different", 10)
@@ -92,9 +93,9 @@ def test_kv_bytes_per_token(jmodel):
         f"you use num_attention_heads={cfg.num_attention_heads} by mistake?)"
     )
 
-    # The model's own accounting must agree with yours. If it does not, one of
-    # you is wrong about GQA, and it is worth finding out which before stage 06
-    # budgets VRAM with this number.
+    # The accounting of the model must agree with your accounting. If the two
+    # disagree, one of them is wrong about GQA. Find out which one, before
+    # stage 06 budgets VRAM with this number.
     assert jmodel.cache_bytes(batch=1, max_len=1) == got
 
     print(f"\n  \033[36mKV per token\033[0m: {got / 1024:.1f} KB")
@@ -108,7 +109,8 @@ def test_kv_bytes_per_token(jmodel):
 
 
 def test_is_actually_faster(jmodel):
-    """The whole point -- measured warm, so it is the algorithm and not XLA.
+    """This is the whole point. Measure it warm, so that you see the algorithm
+    and not XLA.
 
     Both paths are run once first to fill the compilation cache. What is left
     is arithmetic: the uncached loop re-reads the whole prefix every step, the

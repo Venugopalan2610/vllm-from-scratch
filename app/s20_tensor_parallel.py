@@ -2,9 +2,9 @@
 
 `./vc lore 20` for the insight. `./vc test 20` to check yourself.
 
-You have one GPU, so you will not get a speedup here. What you will get is the
-sharding and collective logic right, and an understanding of exactly where the
-communication lands -- which is the part that decides whether TP is worth it.
+You have one GPU, so you get no speedup here. You get two other things. You
+make the sharding and the collective logic correct, and you learn exactly where
+the communication lands. That second part decides if TP is worth its cost.
 
 The pattern, and the reason it is only ONE all-reduce per block:
 
@@ -21,9 +21,9 @@ The pattern, and the reason it is only ONE all-reduce per block:
     Attention: shard by whole HEADS (Q, K, V column-parallel), output
     projection row-parallel. Again one all-reduce.
 
-Sharding mid-head instead of by whole heads is the classic bug: it mixes parts
-of different heads' subspaces, and the output looks plausible while being
-completely wrong.
+The classic bug is a shard in the middle of a head, and not a shard by whole
+heads. It mixes parts of the subspaces of different heads. The output then
+looks plausible and is completely wrong.
 """
 
 import torch

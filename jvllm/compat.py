@@ -58,8 +58,8 @@ def enable_pallas_triton():
     if cc is None:
         return False
 
-    # jax reports "8.9"; the Triton backend wants arch_name "8.9" and an
-    # integer compute_capability 89.
+    # jax reports "8.9". The Triton backend wants arch_name "8.9" and an
+    # integer compute_capability of 89.
     arch = str(cc)
     try:
         cc_int = int(arch.replace(".", ""))

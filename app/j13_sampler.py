@@ -2,10 +2,9 @@
 
 `./vc lore 13 --jax` for the insight. `./vc test 13 --jax` to check yourself.
 
-Every request has its own temperature, top-k, top-p, penalties and seed, and
-they all have to be applied in ONE vectorized pass over the batch. The naive
-per-request Python loop quietly becomes your bottleneck the moment the kernels
-are fast.
+Each request has its own temperature, top-k, top-p, penalties and seed. ONE
+vectorized pass over the batch must apply all of them. When the kernels become
+fast, a naive Python loop over the requests quietly becomes your bottleneck.
 
 WHAT YOU'RE BUILDING
 
@@ -28,11 +27,13 @@ RANDOMNESS IS THE INTERESTING PART HERE
 JAX has no global RNG. There is no `manual_seed`, no hidden state, nothing a
 concurrent request can perturb. A key is a value you carry.
 
-That is a nuisance in a notebook and exactly right in a server. A request's
-seed IS its key. Two requests in the same batch cannot affect each other's
-stream, and a seeded request produces the same tokens whether it was batched
-with one neighbour or sixty-three. Reproducibility stops being a promise you
-make and becomes a property of the data structure.
+That is a nuisance in a notebook, and it is exactly correct in a server. The
+seed of a request IS its key.
+
+Two requests in the same batch cannot touch the stream of the other. A request
+with a seed makes the same tokens next to one neighbour or next to sixty-three.
+Reproducibility stops to be a promise, and becomes a property of the data
+structure.
 
     jax.random.key(seed)            a request that brought its own seed
     jax.random.fold_in(base, i)     one that did not
@@ -62,13 +63,14 @@ TRAPS
 
   - jnp.sort is ascending and there is no `descending=`. Reverse it.
 
-  - JIT THE CORE. Run eagerly, this sampler costs ~40 ms at batch 64 -- more
-    than a decode step -- and essentially none of that is arithmetic. It is one
-    device dispatch per jnp op, sixty-four separate PRNG key constructions, and
-    a host round trip for anything you called int() on. Assemble the per-row
-    parameters into arrays, then hand them to one jitted function. Which also
-    means no `if int(k.max()) <= 0: return logits` shortcut: that is a sync,
-    and it makes the function untraceable.
+  - JIT THE CORE. In eager mode this sampler costs approximately 40 ms at
+    batch 64. That is more than a decode step, and almost none of it is
+    arithmetic. It is one device dispatch for each jnp op, sixty-four separate
+    PRNG key constructions, and a host round trip for each int() call.
+
+    Put the per-row parameters into arrays, then give them to one jitted
+    function. So there is also no `if int(k.max()) <= 0: return logits`
+    shortcut. That is a sync, and it makes the function untraceable.
 
   - Build the keys as a batch too. `[jax.random.key(p.seed) for p in params]`
     is 64 dispatches. `jax.random.key_data` / `wrap_key_data` let you select

@@ -81,7 +81,7 @@ def test_decode_is_memory_bound(hf):
 
 
 def test_decode_barely_cares_about_context_length(hf):
-    """Doubling the context does NOT double decode time.
+    """Two times the context does NOT give two times the decode time.
 
     Attention over the cache is a small part of the work; reading the WEIGHTS
     dominates, and that cost is fixed. This is why long context hurts memory

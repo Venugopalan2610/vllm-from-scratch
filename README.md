@@ -1,40 +1,49 @@
 # Build Your Own vLLM
 
-Twenty-odd stages, from a naive greedy loop to a paged, continuously-batched,
-CUDA-graphed, speculatively-decoding inference server. Every stage is gated by
-checks, and most are gated by a **measurement** — you don't advance because your
-code runs, you advance because it got faster in the way the stage predicted.
+More than twenty stages. You start with a naive greedy loop. You finish with a
+paged, continuously-batched, CUDA-graphed inference server that decodes
+speculatively.
 
-Four of those stages are **CUDA you write yourself**: a paged attention kernel,
-then the same kernel made to coalesce, then warp shuffles and split-K, then a
-quantized GEMV with a fused epilogue. Not Triton. Real `.cu` files, real
-`nvcc`, real register counts.
+Checks gate every stage. A **measurement** gates most of them. You do not
+advance because your code runs. You advance because it became faster in the way
+that the stage predicted.
 
-Runs entirely on one consumer GPU. **In PyTorch or in JAX** — the same ladder,
-two backends, and about half the stages are shared between them because they
-are pure logic and no framework appears in them at all.
+Four of those stages are **CUDA that you write yourself**:
+
+- a paged attention kernel,
+- the same kernel, made to coalesce,
+- warp shuffles and split-K,
+- a quantized GEMV with a fused epilogue.
+
+This is not Triton. These are real `.cu` files, real `nvcc`, and real register
+counts.
+
+The course runs on one consumer GPU. You can use **PyTorch or JAX**. It is the
+same ladder on two backends. Approximately half of the stages serve both
+tracks, because they are pure logic and no framework appears in them.
 
 The derivations behind these stages are at
-[derivingsystems.com](https://derivingsystems.com), and
-[The Course](https://derivingsystems.com/course.html) is the whole ladder on one
-page if you want to read it before you build it.
+[derivingsystems.com](https://derivingsystems.com).
+[The Course](https://derivingsystems.com/course.html) puts the whole ladder on
+one page. Read it before you build, if you want to.
 
-## Start without installing anything
+## Start with no installation
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Venugopalan2610/vllm-from-scratch/blob/master/colab.ipynb)
 
-A free Colab T4, no local setup, about three minutes to stage 1. It also puts
-the GPU stages (8, 8b, 8c, 12, 18, 18b) within reach of a machine that can't
-run them — Colab already has a CUDA toolkit, which the kernel stages need.
+Use a free Colab T4. There is no local setup, and stage 1 is approximately three
+minutes away. Colab also puts the GPU stages (8, 8b, 8c, 12, 18, 18b) into reach
+of a machine that cannot run them. Colab has a CUDA toolkit, and the kernel
+stages need one.
 
-The catch is that a Colab runtime is temporary, so your work dies with the
-session. The notebook's last two cells save it, either as a download or pushed
-to your fork. Past about stage 5, do this locally instead.
+A Colab runtime is temporary, so your work dies with the session. The last two
+cells of the notebook save it. They download it, or they push it to your fork.
+After approximately stage 5, work locally instead.
 
 ## Or start locally
 
-**Fork this repo**, then clone your fork. You want your own copy: `./vc submit`
-commits your work, and you'll want somewhere to push it.
+**Fork this repo**, then clone your fork. You want your own copy. `./vc submit`
+commits your work, and you need a place to push it to.
 
 ```bash
 gh repo fork Venugopalan2610/vllm-from-scratch --clone
@@ -43,15 +52,18 @@ cd vllm-from-scratch
 ./setup.sh --jax  # ...and JAX, if you want the second track. +~400MB.
 ```
 
-No GPU? Setup still works, and about half the stages still run — the allocator,
-scheduler, prefix cache, metrics, speculative sampling, guided decoding and
-tensor-parallel stages are pure logic. A GPU but no `nvcc`? Everything runs
-except the four CUDA stages, which skip rather than fail.
+Do you have no GPU? Setup still works, and approximately half of the stages
+still run. The allocator, the scheduler, the prefix cache, the metrics, the
+speculative sampling, the guided decoding and the tensor-parallel stages are
+pure logic.
+
+Do you have a GPU but no `nvcc`? Everything runs except the four CUDA stages.
+Those stages skip. They do not fail.
 
 ## Two ways in
 
 The notebooks in [`course/`](course/) build the intuition. The ladder in `app/`
-makes you build the engine. They are ordered: read the notebooks for a stage,
+makes you build the engine. They have an order. Read the notebooks for a stage,
 then build the stage.
 
 ```bash
@@ -60,8 +72,8 @@ then build the stage.
 ```
 
 A notebook does the arithmetic by hand, measures the machine, plots the two
-against each other, and then explains the gap. Nothing in `course/` is gated;
-nothing in `app/` is optional.
+against each other, and then explains the gap. No check gates the notebooks in `course/`.
+Nothing in `app/` is optional.
 
 ## The loop
 
@@ -73,11 +85,11 @@ nothing in `app/` is optional.
 ./vc submit       # all green? banked, committed, next stage opens automatically
 ```
 
-`./vc submit` refuses to advance while anything is red, so you cannot skip a
-stage by accident. When it passes it commits **only `app/`** — your work — and
-prints the next stage's guide.
+`./vc submit` refuses to advance while one check still fails, so you cannot
+skip a stage by accident. When the checks pass, it commits **only `app/`**, which is
+your work. It then prints the guide for the next stage.
 
-That's the whole thing. Everything below is reference.
+That is the whole thing. Everything below is reference.
 
 ## Two tracks
 
@@ -87,18 +99,25 @@ That's the whole thing. Everything below is reference.
 ./vc test 8 --jax     one command on the other track, without switching
 ```
 
-The JAX track walks the original twenty stages with the same insights and the
-same measurements. Eleven of them get a JAX twin — you edit `app/j08_paged_pallas.py`
-instead of `app/cuda/s08_paged_attn.cu`, and `./vc guide` points you at the right
-one. The other nine are **framework-free**: the block allocator, prefix cache,
-scheduler, chunked prefill, detokenizer, async server, metrics, speculative
-decoding and guided decoding contain no tensors worth porting, so both tracks
-build and test the identical file.
+The JAX track walks the original twenty stages, with the same insights and the
+same measurements. Eleven stages have a JAX twin. You edit
+`app/j08_paged_pallas.py` in the place of `app/cuda/s08_paged_attn.cu`, and
+`./vc guide` points you at the correct file.
 
-The torch track has three stages the JAX track does not: **08b, 08c and 18b**
-are CUDA, and there is no honest JAX equivalent of a warp shuffle. So the
-ladders are 23 stages and 20 stages, and the numbering does not shift, because
-the extra ones carry letters.
+The other nine stages are **framework-free**. These nine hold no tensors that
+are worth a port:
+
+- the block allocator and the prefix cache,
+- the scheduler and the chunked prefill,
+- the detokenizer, the async server and the metrics,
+- the speculative decoding and the guided decoding.
+
+Both tracks build and test the same file.
+
+The torch track has three stages that the JAX track does not have: **08b, 08c
+and 18b**. They are CUDA, and there is no honest JAX equivalent of a warp
+shuffle. So the ladders are 23 stages and 20 stages. The numbers do not shift,
+because the extra stages carry letters.
 
 | | torch track | jax track |
 |---|---|---|
@@ -108,16 +127,16 @@ the extra ones carry letters.
 | stage 12 | CUDA graphs, to delete launch overhead | shape buckets, to delete recompiles |
 | stage 20 | 2 gloo ranks on CPU | `shard_map` over a CPU device mesh |
 
-`jvllm/` is provided, like `tests/helpers.py` — the JAX track needs a Qwen3 to
-build on and there is no Flax one, so there is one here. Read
-`jvllm/model.py` before stage 01; the cache API it hands you is why the two
-ladders diverge where they do. [LORE.md §10](LORE.md) is the full argument.
+`jvllm/` is code that the repo gives you, like `tests/helpers.py`. The JAX track needs a Qwen3
+to build on, and there is no Flax one, so this repo holds one. Read
+`jvllm/model.py` before stage 01. The cache API that it gives you is the reason
+that the two ladders separate where they do. [LORE.md §10](LORE.md) holds the
+full argument.
 
-Why bother, if the ideas are the same? Because the ideas being the same is the
-finding. Bucketing shapes is not a CUDA trick — you rediscover it on the JAX
-track for a completely unrelated reason. And the nine shared stages are a
-direct measurement of how much of an inference engine is actually framework
-code: not much.
+Why do this, if the ideas are the same? Because the sameness of the ideas is the
+finding. A bucket for each shape is not a CUDA trick. You find the same idea again on
+the JAX track, for a completely different reason. And the nine shared stages measure how
+much of an inference engine is framework code. The answer is: not much.
 
 ## What a guide looks like
 
@@ -154,11 +173,12 @@ THE CHECKS (13)
   ...
 ```
 
-A CUDA stage names two files: the `.cu` you live in and the `.py` that builds
-and calls it. `./vc peek` prints both.
+A CUDA stage names two files: the `.cu` file that you live in, and the `.py`
+file that builds and calls it. `./vc peek` prints both.
 
-The short "why" is in the guide. The **full spec** — signatures, the sketch, and
-the specific traps — lives in the docstrings of the file you're editing. Open it.
+The guide holds the short "why". The **full spec** is in the docstrings of the
+file that you edit. It gives the signatures, the sketch, and the specific traps.
+Open it.
 
 ## Other commands
 
@@ -176,8 +196,9 @@ the specific traps — lives in the docstrings of the file you're editing. Open 
 
 ## If you get stuck
 
-Reference solutions exist for all 20 stages, but they are **not on this branch**.
-They live on `solutions`, so a fresh clone shows you stubs and nothing else.
+Reference solutions exist for all of the stages, but they are **not on this
+branch**. They live on the `solutions` branch, so a fresh clone shows you stubs
+and nothing else.
 
 ```bash
 ./vc peek             # print this stage's reference solution
@@ -185,9 +206,9 @@ They live on `solutions`, so a fresh clone shows you stubs and nothing else.
 ./vc peek 7 --apply   # write it straight into the file
 ```
 
-It fetches the branch on first use. Reach for it when you're stuck rather than
-stalling — a stage you read the answer to beats a repo you abandoned. You can
-also browse them directly:
+The command fetches the branch on first use. Use it when you are stuck. Do not
+stall. A stage that you read the answer to is better than a repo that you
+abandoned. You can also browse the solutions directly:
 
 ```bash
 git show solutions:.solutions/s07_paged_attn.py
@@ -195,13 +216,16 @@ git show solutions:.solutions/s07_paged_attn.py
 
 ## Rules
 
-- You edit `app/`. You never edit `tests/` — the checks are the spec.
-- Progress lives in `.progress.json` (gitignored). Delete it to start over.
+- You edit `app/`. You never edit `tests/`. The checks are the spec.
+- Progress lives in `.progress.json`, which git ignores. Delete it to start
+  again.
 
 **All 453 torch checks and all 360 JAX checks pass against the reference
-solutions.** Nothing here is aspirational: if a check fails, it is your code,
-not the harness. Verify that claim yourself any time — it pulls the solutions
-branch, runs everything, and puts your stubs back:
+solutions.** Nothing here is aspirational. If a check fails, the cause is your
+code and not the harness.
+
+Verify that claim yourself at any time. The script pulls the solutions branch,
+runs everything, and then puts your stubs back:
 
 ```bash
 dev/verify.sh          # whole suite, torch track
@@ -209,16 +233,17 @@ dev/verify.sh --jax    # whole suite, jax track
 dev/verify.sh 7 8      # or just some stages
 ```
 
-Run the two tracks as separate invocations rather than `--both`: together they
-want four models resident on one card. The torch run is about three minutes
-once the kernels are built, the JAX run about eight.
+Run the two tracks as separate commands. Do not use `--both`. Together they want
+four models resident on one card. The torch run needs approximately three
+minutes after the kernels build. The JAX run needs approximately eight minutes.
 
 ## Read this first
 
-This course is the build half of a book. **[Deriving Systems](https://derivingsystems.com)**
-is the derivation half: twelve chapters working out, from arithmetic you
-can do on a napkin, why an inference engine has to look like this at all.
-Chapters 7 through 12 lead directly into these stages.
+This course is the build half of a book.
+**[Deriving Systems](https://derivingsystems.com)** is the derivation half. Its
+twelve chapters start from arithmetic that you can do on a napkin. They work out
+why an inference engine must look like this. Chapters 7 through 12 lead directly
+into these stages.
 
 - [The Ridge](https://derivingsystems.com/07-the-ridge.html) sets up stages 01-03
 - [The Cache That Ate the Batch](https://derivingsystems.com/08-kv-cache.html) sets up stage 02
@@ -227,12 +252,13 @@ Chapters 7 through 12 lead directly into these stages.
 - [Below the Floor](https://derivingsystems.com/11-below-the-floor.html) sets up stages 03 and 12
 - [Spending the Idle](https://derivingsystems.com/12-spending-the-idle.html) sets up stage 17
 
-[LORE.md](LORE.md) is the in-repo conceptual spine: one physical fact about memory
-bandwidth, and the forced moves that follow from it. Section 1 answers
-"is this IO-bound or CPU-bound?" with no jargon and every division written out.
-Section 3b is the CUDA argument: why the same kernel is worth writing three
-times, and which constraint each version is actually fighting. Section 9 is the
-vocabulary, warps and coalescing and occupancy included.
+[LORE.md](LORE.md) is the conceptual spine inside this repo. It holds one
+physical fact about memory bandwidth, and the moves that the fact forces.
+
+Section 1 answers the question "is this IO-bound or CPU-bound?" It uses no
+jargon and writes out every division. Section 3b is the CUDA argument: why the
+same kernel is worth three versions, and which constraint each version fights.
+Section 9 is the vocabulary. It includes warps, coalescing and occupancy.
 
 ## The ladder
 
@@ -246,34 +272,37 @@ vocabulary, warps and coalescing and occupancy included.
 | A5 | 15-16 | Async engine, OpenAI-compatible API, the metrics that matter |
 | A6 | 17-20 | Speculative decoding, quantization (**+ 18b, a CUDA int8 GEMV**), guided decoding, tensor parallel |
 
-Roughly half need no GPU at all — the allocator, scheduler, prefix cache,
-sampler, detokenizer, metrics, guided decoding and speculative sampling are pure
-logic, and they are tested hardest, because their failure modes (leaks,
-starvation, livelock, distribution skew) are the ones that look like "the server
-just got slow" in production.
+Approximately half of the stages need no GPU. The allocator, the scheduler, the
+prefix cache, the sampler, the detokenizer, the metrics, the guided decoding and
+the speculative sampling are pure logic.
 
-The four with a letter — 08b, 08c and 18b, plus 08 itself — are the CUDA ones.
-They need `nvcc`, they are the only stages that do, and they are where the
-course stops being about what to compute and starts being about which thread
-touches which byte.
+These stages get the hardest tests. Their failure modes are leaks, starvation,
+livelock and distribution skew. In production, all four look like "the server
+became slow".
+
+The four stages with a letter are the CUDA ones: 08b, 08c and 18b, with 08
+itself. They need `nvcc`. They are the only stages that do. They are also where
+the course stops to ask what to compute, and starts to ask which thread touches
+which byte.
 
 ## This machine
 
-- RTX 4080 Laptop, 12 GB. Model is Qwen3-0.6B (28 layers, GQA 16:8) — small
-  enough to iterate in seconds, real enough to have every structural feature
-  that matters. Override with `VC_MODEL=...`.
-- sm_89 means native FP8, which stage 18 uses.
-- Stage 20 runs 2 gloo ranks on CPU. You get the sharding and collective logic
-  right; on one GPU there is no speedup to be had.
-- **A CUDA toolkit IS needed** for stages 08, 08b, 08c and 18b, because you
-  are writing `.cu` files and `nvcc` has to compile them. `./setup.sh` says so
-  if it cannot find one. The other 19 stages need only the PyTorch wheel.
-- The first run of a kernel stage spends 20-40 seconds in `nvcc`. After that
-  the build is cached in `.cudacache/` and only a source change rebuilds it.
+- RTX 4080 Laptop, 12 GB. The model is Qwen3-0.6B (28 layers, GQA 16:8). It is
+  small enough to iterate in seconds, and real enough to have every structural
+  feature that matters. Override it with `VC_MODEL=...`.
+- sm_89 gives native FP8, which stage 18 uses.
+- Stage 20 runs 2 gloo ranks on the CPU. You make the sharding and the
+  collective logic correct. On one GPU there is no speedup to get.
+- **You need a CUDA toolkit** for stages 08, 08b, 08c and 18b. You write `.cu`
+  files, and `nvcc` must compile them. `./setup.sh` tells you if it cannot find
+  one. The other 19 stages need only the PyTorch wheel.
+- The first run of a kernel stage spends 20 to 40 seconds in `nvcc`. The build
+  then stays in `.cudacache/`, and only a source change rebuilds it.
   `VC_CUDA_VERBOSE=1 ./vc test 8` shows the compiler command and the register
   counts.
-- On the JAX track, Pallas's default Mosaic GPU backend needs sm_90+, so stage
-  08 goes through the older Triton backend — which JAX gates on a hardcoded
-  allowlist of device kinds that no laptop GPU is on. `jvllm/compat.py` reads
-  your card's compute capability and registers it. If neither backend can
-  compile, stage 08's checks skip rather than fail.
+- On the JAX track, the default Mosaic GPU backend of Pallas needs sm_90 or
+  more. So stage 08 goes through the older Triton backend. JAX gates that
+  backend on a hardcoded allowlist of device kinds, and no laptop GPU is on the
+  list. `jvllm/compat.py` reads the compute capability of your card and
+  registers it. If neither backend compiles, the checks for stage 08 skip. They
+  do not fail.

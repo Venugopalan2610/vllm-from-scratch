@@ -74,7 +74,7 @@ def test_naive_per_token_decoding_is_broken(hf):
 
 
 def test_no_replacement_characters_are_ever_emitted(hf):
-    """Partial UTF-8 must be buffered, never streamed."""
+    """Hold a partial UTF-8 character in the buffer. Never stream it."""
     _, tok = hf
     for text in ("🎉🚀🌟", "日本語", "🇯🇵 flag"):
         ids = tok(text, add_special_tokens=False).input_ids

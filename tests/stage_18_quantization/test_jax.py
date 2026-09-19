@@ -1,7 +1,7 @@
 """Stage 18 (JAX) - Weight-only quantization over a pytree.
 
-Spec in app/j18_quantization.py. The check that matters most is not the round
-trip error -- it is that the dequantize stays in the epilogue.
+The spec is in app/j18_quantization.py. The most important check is not the
+round trip error. It is that the dequantize stays in the epilogue.
 """
 
 import jax
@@ -35,7 +35,7 @@ def test_int8_round_trip(jdev):
 
 
 def test_scales_are_per_channel_not_per_tensor(jdev):
-    """A row that is 1000x smaller must not be crushed to zero."""
+    """A row that is 1000 times smaller must not go to zero."""
     W = jnp.concatenate([
         jnp.ones((1, 32), jnp.float32) * 100.0,
         jnp.ones((1, 32), jnp.float32) * 0.1,
@@ -117,7 +117,7 @@ def test_fp8_round_trip(jdev):
 
 
 def test_tree_bytes_and_the_saving(jmodel):
-    """Quantizing is a tree_map, and the accounting has to be honest."""
+    """You quantize with a tree_map, and the accounting must be honest."""
     full = tree_bytes(jmodel.params)
     qtree = quantize_tree(jmodel.params)
     quant = tree_bytes(qtree)

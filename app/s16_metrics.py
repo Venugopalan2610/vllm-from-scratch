@@ -12,10 +12,10 @@ misdiagnose every performance problem you hit:
     KV utilization  how full the block pool is
     preemptions     how often you had to kick someone out
 
-The last two are the ones people forget, and they are the ones that explain the
-other four. Rising preemptions with high KV utilization means you set
-max_num_seqs too high and the system is thrashing -- which looks identical to
-"the model got slow" from the outside.
+People forget the last two, and those two explain the other four. More
+preemptions with a high KV utilization means that you set max_num_seqs too
+high, and the system now thrashes. From the outside that looks the same as
+"the model became slow".
 """
 
 import math

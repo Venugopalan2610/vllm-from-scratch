@@ -113,7 +113,7 @@ def test_decode_is_memory_bound(jmodel):
 
 
 def test_decode_barely_cares_about_context_length(jmodel):
-    """Doubling the context does NOT double decode time.
+    """Two times the context does NOT give two times the decode time.
 
     Reading the WEIGHTS dominates, and that cost is fixed. This is why long
     context hurts memory CAPACITY far more than speed -- and why stages 06-09

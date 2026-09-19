@@ -31,12 +31,12 @@
 // ONLINE SOFTMAX
 // ---------------------------------------------------------------------------
 //
-// The score row is never materialised. At 2048 context that row is 8KB per
-// (seq, head), and writing it out and reading it back is more traffic than
-// the K it came from. The same trick as FlashAttention:
+// The score row never exists in memory. At 2048 context that row is 8 KB for
+// each (seq, head). To write it out and read it back costs more traffic than
+// the K that it came from. Use the trick from FlashAttention:
 //
 //     m_new = max(m_old, max(scores))      running maximum
-//     alpha = exp(m_old - m_new)           what the old accumulator is worth
+//     alpha = exp(m_old - m_new)           the value of the old accumulator
 //     p     = exp(scores - m_new)
 //     l     = l * alpha + sum(p)           running denominator
 //     acc   = acc * alpha + sum(p * V)     running numerator
@@ -55,22 +55,22 @@
 //     one inside `if (pos < n)` hangs the kernel, and a hung kernel looks
 //     like a hung test, not like a crash.
 //
-//   - Mask by position, not by block. Blocks are recycled, so slots past
-//     context_len hold some other request's tokens. Scoring them gives a
-//     plausible, wrong answer.
+//   - Mask by position, and not by block. The allocator recycles blocks, so a
+//     slot after context_len holds the tokens of another request. A score on
+//     those tokens gives a plausible and wrong answer.
 //
 //   - GQA: query head h reads KV head h / (num_heads / num_kv_heads).
 //
-//   - Cache layout is (num_blocks, num_kv_heads, block_size, head_dim), so
-//     the address of position `pos` of sequence `s` is
+//   - The cache layout is (num_blocks, num_kv_heads, block_size, head_dim).
+//     So the address of position `pos` of sequence `s` is
 //         phys = block_tables[s][pos / block_size]
 //         row  = ((phys * num_kv_heads + kvh) * block_size + pos % block_size)
 //         k    = key_cache + row * head_dim
-//     Use int64_t for that product. A big cache overflows int.
+//     Use int64_t for that product. A large cache overflows an int.
 //
 //   - Check every launch. C10_CUDA_KERNEL_LAUNCH_CHECK() turns a silent
-//     failure into an exception; without it a kernel that never ran reads as
-//     a numerical bug.
+//     failure into an exception. Without it, a kernel that never ran looks
+//     like a numerical bug.
 //
 // Build errors point at real line numbers in this file. To see the compiler
 // command and the register counts:  VC_CUDA_VERBOSE=1 ./vc test 8
@@ -99,10 +99,13 @@ constexpr int kThreads = 128;
 // The shape above. One block per (seq, head), 128 threads, one thread per
 // position in the tile, online softmax folded tile by tile.
 //
-// You will need shared memory for: the query vector (read once, used by every
-// position), the tile's probabilities, the running accumulator, and a
-// scratch array for the tree reductions. Pass the size as the third launch
-// argument and declare it `extern __shared__ float smem[]`.
+// You need shared memory for four things:
+//   - the query vector, which you read one time and every position uses,
+//   - the probabilities of the tile,
+//   - the running accumulator,
+//   - a scratch array for the tree reductions.
+// Pass the size as the third launch argument. Declare it as
+// `extern __shared__ float smem[]`.
 
 }  // namespace
 

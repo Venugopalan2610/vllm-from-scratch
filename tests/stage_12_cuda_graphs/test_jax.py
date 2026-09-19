@@ -152,7 +152,7 @@ def test_one_recompile_costs_more_than_many_steps(jdev):
 
 
 def test_donation_reuses_the_buffer(jdev):
-    """Donation is visible: the donated array is invalidated afterwards.
+    """You can see the donation. JAX makes the donated array invalid.
 
     That is the proof it was reused in place rather than copied. It is also
     the trap -- read a donated buffer after the call and JAX raises.

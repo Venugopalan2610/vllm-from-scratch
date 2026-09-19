@@ -1,8 +1,9 @@
 """Stage 10 - Admission, queues, and preemption.
 
-Spec in app/s10_scheduler.py. No GPU: this is scheduling logic, and it is worth
-testing to destruction because the failure modes (leaks, starvation, livelock)
-all look like "the server got slow and then died" in production.
+The spec is in app/s10_scheduler.py. There is no GPU. This is scheduling logic,
+and it deserves the hardest checks that you can write. Its failure modes are
+leaks, starvation and livelock. In production all three look the same: "the
+server became slow and then it died".
 """
 
 import random
@@ -38,10 +39,11 @@ def test_does_not_admit_what_it_cannot_fit():
 
 
 def test_head_of_line_blocking_is_preserved():
-    """A big prompt at the head must not be skipped for a small one behind it.
+    """The scheduler must not pass over a big prompt at the head for a small
+    prompt behind it.
 
-    Skipping looks like a throughput win and is actually unbounded starvation
-    of long prompts. FCFS at the head of the queue.
+    That looks like a throughput win. It is unbounded starvation of the long
+    prompts. Use FCFS at the head of the queue.
     """
     s = sched(num_blocks=4, block_size=16, max_num_seqs=8)
     s.add_request("big", prompt_len=64, max_tokens=2)     # needs all 4 blocks

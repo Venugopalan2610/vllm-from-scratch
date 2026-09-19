@@ -7,16 +7,18 @@ WHAT YOU'RE BUILDING
     static_batch_generate(model, prompts, max_tokens) -> list[list[int]]
     padding_waste(output_lens) -> float
 
-One batch of N prompts, prefilled together, then a shared decode loop until
-everyone is done. Each prompt's output must be what it would have been alone.
+One batch of N prompts. Prefill them together, then run a shared decode loop
+until every row finishes. The output of each prompt must equal the output that
+the prompt gives alone.
 
-WHY THIS IS RIGHT-PADDED AND THE TORCH TRACK IS LEFT-PADDED
+WHY THIS TRACK PADS ON THE RIGHT AND THE TORCH TRACK PADS ON THE LEFT
 
-torch left-pads so that index -1 is everyone's last real token, because HF's
-mask makes the leading pad invisible. You have a written-into cache instead, so
-the natural layout is the other way round: every row's prompt starts at slot 0,
-runs to L_b, and the pad sits at the END where the generated tokens are about
-to overwrite it.
+torch pads on the left, so that index -1 holds the last real token of every
+row. The mask in HF hides the pad at the front.
+
+You write into a cache instead, so the natural layout is the opposite. The
+prompt of each row starts at slot 0 and runs to L_b. The pad sits at the END,
+and the generated tokens overwrite it.
 
 Which means the last position is NOT everyone's last token, and you have to say
 where each row's logits live:
@@ -50,17 +52,17 @@ THE SKETCH
         cache_len = cache_len + 1
         next = argmax(logits, -1)
 
-Note `cache_len = lens`, not T. The prefill wrote junk K/V into slots
-L_b..T-1 for every short row, and setting cache_len to L_b is what makes the
-first decoded token overwrite that junk and the mask never read it.
+Note that `cache_len = lens`, and not T. For every short row, the prefill wrote
+waste K and V into slots L_b to T-1. Set cache_len to L_b. The first decoded
+token then overwrites that waste, and the mask never reads it.
 
 WHERE THE WASTE IS
 
 Two different wastes, and this stage is about seeing both:
 
-  - PREFILL waste: every row is padded out to the longest prompt, so a batch
-    of [12, 400] tokens does 800 tokens of prefill work for 412 tokens of
-    prompt. That is the batch's shape, and no layout fixes it.
+  - PREFILL waste: the batch pads every row out to the longest prompt. So a
+    batch of [12, 400] tokens does 800 tokens of prefill work for 412 tokens
+    of prompt. That is the shape of the batch, and no layout corrects it.
 
   - DECODE waste: the batch runs until its SLOWEST member finishes. A row that
     hit eos on step 3 keeps occupying its slot for another 60 steps, and here

@@ -87,7 +87,8 @@ def test_ragged_context_lengths(dev):
 
 
 def test_ignores_junk_beyond_context_len(dev):
-    """Freed blocks get reused and hold another sequence's garbage.
+    """The allocator gives a freed block to another sequence, and that
+    sequence writes into it.
 
     If you attend past context_lens you will silently mix in a different
     request's data -- a correctness bug AND a data-leak between users.
@@ -136,7 +137,7 @@ def test_softmax_rows_sum_to_one(dev):
 
 
 def test_report_the_slowdown(dev):
-    """Not pass/fail. Paging cost you something -- find out how much."""
+    """This is not a pass or a fail. Paging costs you time. Find out how much."""
     import time
     S, H, KVH, D, L = 64, 16, 8, 128, 512
     k, v = rand_kv(S, KVH, L, D, dev, dtype=torch.float16)

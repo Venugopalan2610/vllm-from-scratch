@@ -8,11 +8,11 @@ buys you three separate features:
 
   - n>1 sampling: fork the prompt's blocks instead of re-prefilling
   - beam search: all beams share the common prefix
-  - automatic prefix caching: a shared system prompt is prefilled ONCE, for
+  - automatic prefix caching: one prefill of a shared system prompt serves
     every user, forever
 
-The price is that you now need refcounts, and copy-on-write when a shared block
-is about to be modified. This is `fork()` and page tables, exactly.
+The price is that you now need reference counts, and a copy-on-write before a
+write into a shared block. This is `fork()` and a page table, exactly.
 """
 
 

@@ -15,8 +15,8 @@ MODEL = os.environ.get("VC_MODEL", "Qwen/Qwen3-0.6B")
 # the same card in the same session. Set before anything imports jax.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-# Stage 20 needs a multi-device mesh; one GPU is one device, so the CPU backend
-# supplies the ranks. Must be set before jax initialises its backends.
+# Stage 20 needs a mesh of several devices, and one GPU is one device. So the
+# CPU backend supplies the ranks. Set this before jax starts its backends.
 _flags = os.environ.get("XLA_FLAGS", "")
 if "xla_force_host_platform_device_count" not in _flags:
     os.environ["XLA_FLAGS"] = (
@@ -27,14 +27,16 @@ if "xla_force_host_platform_device_count" not in _flags:
 #
 # Two tracks share this tree, and the file name says which one a check is on:
 #
-#   test_jax.py    the JAX twin of a stage that has one
-#   test_cuda.py   a stage that exists ONLY on the torch track, because it is
-#                  a CUDA kernel and there is no honest JAX equivalent of a
-#                  warp shuffle. stages.yaml marks these `tracks: [torch]`.
-#   test_stage.py  everything else. If the stage has no test_jax.py beside it
-#                  then it is framework-free -- the allocator, the scheduler,
-#                  the detokenizer -- and belongs to BOTH tracks, because
-#                  there is nothing framework-shaped in it to port.
+#   test_jax.py    the JAX twin of a stage that has one.
+#
+#   test_cuda.py   a stage on the torch track ONLY. It is a CUDA kernel, and
+#                  there is no honest JAX equivalent of a warp shuffle.
+#                  stages.yaml marks these stages `tracks: [torch]`.
+#
+#   test_stage.py  every other stage. A stage with no test_jax.py beside it is
+#                  framework-free, such as the allocator, the scheduler or the
+#                  detokenizer. It belongs to BOTH tracks, because it holds
+#                  nothing framework-shaped to port.
 #
 # tests/test_harness.py checks this against stages.yaml, because the rule now
 # lives in two places and nothing else would notice them drifting apart.
@@ -104,7 +106,7 @@ def nvcc(dev):
 
 @pytest.fixture(scope="session")
 def jdev():
-    """A JAX GPU device, or skip. Importing jvllm pins the allocator first."""
+    """A JAX GPU device, or a skip. An import of jvllm pins the allocator."""
     pytest.importorskip("jvllm", reason="JAX not installed -- ./setup.sh --jax")
     import jax
 

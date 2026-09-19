@@ -7,10 +7,12 @@ Two rules, and they point in opposite directions:
     the engine loop must never block on HTTP
     HTTP must never block on the GPU
 
-So: one background task runs step() forever, and each HTTP request is a
-consumer on a queue that the loop feeds. Real vLLM V1 pushes this further and
-puts the engine in a separate PROCESS, because Python overhead on the API side
-was measurably stalling the GPU between steps.
+So one background task runs step() forever. Each HTTP request is a consumer on
+a queue that the loop feeds.
+
+Real vLLM V1 goes further and puts the engine in a separate PROCESS. Python
+overhead on the API side stalled the GPU between steps by a measurable
+amount.
 
 The tests inject a fake step-engine, so this stage is about the plumbing, not
 the model.

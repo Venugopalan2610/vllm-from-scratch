@@ -1,8 +1,11 @@
 """./vc ncu [stage]
 
-Run Nsight Compute on a stage's kernel and print the counters that decide
-whether it is fast: how many bytes per second the memory system delivered,
-how many sectors it moved per request, and how many warps were resident.
+Run Nsight Compute on the kernel of a stage. Print the counters that decide if
+the kernel is fast:
+
+  - the bytes for each second that the memory system delivered,
+  - the sectors that it moved for each request,
+  - the warps that were resident.
 
 A wall clock tells you that a kernel is slow. These tell you which of the
 three possible reasons it is.
@@ -82,7 +85,7 @@ def main():
 
     print(f"\n{B}stage {stage}{X}  {D}{kernel}, {small} sequences, "
           f"1024 tokens of context{X}")
-    print(f"{D}profiling...{X}")
+    print(f"{D}Profile run...{X}")
     r = subprocess.run(
         ["ncu", "--csv", "--target-processes", "all",
          "--kernel-name", f"regex:{kernel}",
@@ -102,7 +105,7 @@ This is a driver setting, not a permission on a file. To change it:
     sudo update-initramfs -u
     # then reboot
 
-Until then the stage checks still run; they just skip the counter check.
+Until then, the stage checks still run. They skip only the counter check.
 See https://developer.nvidia.com/ERR_NVGPUCTRPERM{X}""")
         return 1
 

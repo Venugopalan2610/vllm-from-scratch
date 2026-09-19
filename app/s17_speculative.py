@@ -2,9 +2,9 @@
 
 `./vc lore 17` for the insight. `./vc test 17` to check yourself.
 
-Stage 03 measured why this works: decode is memory-bound, so a forward pass
-over K tokens costs almost the same as a forward pass over 1. The weights get
-read once either way.
+Stage 03 measured why this works. Decode waits on memory, so a forward pass
+over K tokens costs almost as much as a forward pass over 1 token. The GPU
+reads the weights one time in both cases.
 
 So: propose K tokens cheaply, verify all K in ONE target forward pass, and
 accept the longest correct prefix.

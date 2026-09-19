@@ -1,7 +1,7 @@
 """Stage 17 - Speculative decoding.
 
-Spec in app/s17_speculative.py. The headline test is statistical: prove the
-output distribution is unchanged. Everything else is bookkeeping.
+The spec is in app/s17_speculative.py. The main check is statistical. It proves
+that the output distribution does not move. Everything else is bookkeeping.
 """
 
 import random
@@ -60,9 +60,9 @@ def test_identical_distributions_accept_everything():
 
 
 def test_rejection_stops_at_the_first_failure():
-    """Everything after a rejection was conditioned on a dead token."""
+    """A rejection kills a token. Everything after it depended on that token."""
     rng = random.Random(0)
-    # draft is certain about token 0; target is certain about token 1
+    # The draft is certain about token 0. The target is certain about token 1.
     p = torch.tensor([[0.0, 1.0], [0.5, 0.5], [0.5, 0.5]])
     q = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
     out, n = rejection_sample(p, q, [0, 0], rng)

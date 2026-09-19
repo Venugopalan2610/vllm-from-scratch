@@ -2,9 +2,12 @@
 
 Spec in app/s15_server.py.
 
-No GPU and no model here: a fake step-engine is injected, so these tests check
-the PLUMBING -- that HTTP never blocks the engine loop, that streaming works,
-and that a disconnected client's KV actually gets released.
+There is no GPU and no model here. A fake step-engine takes the place of the
+real one, so these checks examine the PLUMBING:
+
+  - HTTP never blocks the engine loop,
+  - the stream works,
+  - a client that disconnects releases its KV blocks.
 """
 
 import asyncio

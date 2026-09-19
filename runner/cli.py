@@ -64,9 +64,9 @@ BACKENDS = ("torch", "jax")
 
 
 def progress():
-    """Progress is per TRACK. Clearing stage 08 in Triton says nothing about
-    whether you can write the same kernel in Pallas, so the two ladders are
-    banked separately and you can walk them in either order.
+    """Progress belongs to a TRACK. A pass on stage 08 in CUDA says nothing
+    about the same kernel in Pallas. So the two ladders bank separately, and
+    you can walk them in either order.
 
     `p["completed"]` is the active track's list -- the same list object that
     lives in p["tracks"], so mutating it mutates the track.
@@ -194,7 +194,7 @@ def check_files(s, p):
     if p["backend"] == "jax":
         if twin.exists():
             return [twin]
-        # test_cuda.py is a torch-only stage; it never reaches this track.
+        # test_cuda.py belongs to a torch-only stage. It never reaches here.
         return [f for f in files if f.name != "test_cuda.py"]
     return [f for f in files if f.name != "test_jax.py"]
 
@@ -338,7 +338,7 @@ def cmd_submit(flat, p):
         return 0
     idx = stage_index(flat, s)
     s = dict(s, _file=" and ".join(stage_files(s, p)))
-    print(f"\n{C['b']}{C['c']}Submitting stage {stage_label(s)}  "
+    print(f"\n{C['b']}{C['c']}Submission: stage {stage_label(s)}  "
           f"{stage_name(s, p)}{C['x']}   {C['dim']}[{p['backend']}]{C['x']}")
     print(f"{C['dim']}running checks...{C['x']}\n")
     rc, passed, failed, out = run_checks(s, p)
@@ -351,9 +351,9 @@ def cmd_submit(flat, p):
 
     print(f"{C['g']}{C['b']}  ALL {passed} CHECKS PASSED{C['x']}")
 
-    # Commit ONLY the learner's work. Never `git add -A` here -- that sweeps up
-    # harness edits and anything else lying around, and a later rewind would
-    # throw them away along with the stage.
+    # Commit ONLY the work of the learner. Never use `git add -A` here. It
+    # collects harness edits and every other loose change, and a later rewind
+    # then throws them away with the stage.
     subprocess.run(["git", "add", "app/"], cwd=ROOT, capture_output=True)
     track = "" if p["backend"] == "torch" else f" [{p['backend']}]"
     msg = f"stage {stage_label(s)} complete: {stage_name(s, p)}{track}"
@@ -487,7 +487,7 @@ def solution_text(name):
         if t:
             return t
 
-    print(f"{C['dim']}fetching the solutions branch...{C['x']}")
+    print(f"{C['dim']}Fetch of the solutions branch...{C['x']}")
     subprocess.run(
         ["git", "fetch", "origin", "solutions:refs/remotes/origin/solutions"],
         cwd=ROOT, capture_output=True,
@@ -529,7 +529,7 @@ def cmd_peek_apply(flat, p, stage_id=None):
         (ROOT / f).parent.mkdir(parents=True, exist_ok=True)
         (ROOT / f).write_text(text)
         print(f"{C['y']}Wrote the reference solution into {f}.{C['x']}")
-    print(f"{C['dim']}Read it before you submit -- the point was the reading.{C['x']}")
+    print(f"{C['dim']}Read it before you submit. The reading was the point.{C['x']}")
     return 0
 
 
@@ -546,7 +546,7 @@ def cmd_reset(flat, p, arg):
     p["completed"] = [c for c in p["completed"] if c in keep]
     save_progress(p)
     print(f"{C['y']}Rewound to stage {stage_label(s)}.{C['x']} "
-          f"{C['dim']}Your code in app/ is untouched.{C['x']}")
+          f"{C['dim']}Your code in app/ did not change.{C['x']}")
     return cmd_guide(flat, p)
 
 

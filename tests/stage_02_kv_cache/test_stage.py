@@ -30,7 +30,8 @@ from tests.conftest import measurement
 
 
 def test_identical_to_stage_01(hf_exact, prompts, dev):
-    """Caching is an optimization, not a behavior change. Same tokens, exactly."""
+    """A cache is an optimization. It is not a change of behaviour. It must
+    give exactly the same tokens."""
     model, tok = hf_exact
     for p in prompts:
         want = naive_generate(model, tok, p, max_tokens=24)
@@ -45,7 +46,7 @@ def test_identical_to_stage_01(hf_exact, prompts, dev):
 
 
 def test_cache_is_not_leaked_between_calls(hf_exact, dev):
-    """Calling twice must not contaminate the second result."""
+    """A second call must give a clean result. The first call must not touch it."""
     model, tok = hf_exact
     a = cached_generate(model, tok, "The capital of France is", max_tokens=12)
     _ = cached_generate(model, tok, "Something else entirely, quite different", max_tokens=12)
@@ -79,7 +80,7 @@ LONG_PROMPT = "The history of computing began " * 200  # ~1000 tokens
 
 
 def test_is_actually_faster(hf, dev, timer):
-    """The whole point -- measured at a prompt length where it matters."""
+    """This is the whole point. Measure it at a prompt length where it counts."""
     import time
     model, tok = hf
     N = 64
@@ -105,12 +106,13 @@ def test_is_actually_faster(hf, dev, timer):
 
 
 def test_the_win_grows_with_context(hf, dev):
-    """Why the speedup above was measured at 1000 tokens and not 6.
+    """Why the measurement above uses 1000 tokens, and not 6.
 
-    The cache saves you from recomputing the PREFIX, so its value is
-    proportional to prefix length. At a 6-token prompt on a 0.6B model there is
-    almost nothing to save, and both paths are bound by Python and kernel-launch
-    overhead instead of by arithmetic -- you are nowhere near the memory roofline.
+    The cache saves the work on the PREFIX, so the prefix length controls its
+    value. A 6-token prompt on a 0.6B model saves almost nothing.
+
+    At that size, Python and the kernel launches bound both paths. The
+    arithmetic does not. You are far away from the memory roofline.
 
     That overhead floor is a bug you will fix much later, with CUDA graphs, in
     stage 12. Notice it now: `./vc info` printed your batch-1 ceiling, and this

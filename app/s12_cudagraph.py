@@ -2,9 +2,10 @@
 
 `./vc lore 12` for the insight. `./vc test 12` to check yourself.
 
-Stage 03 measured the problem: decode ran at ~7.8 ms/token against a 3.14 ms
-roofline floor. That 2.5x gap is not arithmetic and it is not memory -- it is
-Python, and it is thousands of individual kernel launches per step.
+Stage 03 measured the problem. Decode ran at approximately 7.8 ms/token against
+a roofline floor of 3.14 ms. That gap of 2.5x is not arithmetic, and it is not
+memory. It is Python, and it is thousands of separate kernel launches in each
+step.
 
 A CUDA graph records an entire sequence of launches once and replays it as a
 single unit. The CPU stops being in the loop.
@@ -16,8 +17,9 @@ The catch: a graph records EXACT pointers and EXACT shapes. So you must
   - capture one graph per batch size you intend to run, and pad up to the
     nearest captured size ("bucketing")
 
-Real servers capture at 1, 2, 4, 8, 16, ... and fall back to eager above the
-largest bucket. Prefill is never graphed -- its shapes change every request.
+A real server captures at 1, 2, 4, 8, 16 and more, and it uses the eager path
+above the largest bucket. It never captures a prefill. The shapes of a prefill
+change with every request.
 """
 
 import torch

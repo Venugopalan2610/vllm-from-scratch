@@ -1,9 +1,11 @@
 """Checks on the harness itself, not on any stage.
 
-These exist because the two tracks are wired together by CONVENTION -- a stage
-belongs to the JAX track if stages.yaml gives it a `jax_file`, and a test file
-belongs to the JAX track if it is named test_jax.py. Two places, one rule, and
-nothing but this file to stop them drifting apart.
+These checks exist because a CONVENTION connects the two tracks. A stage
+belongs to the JAX track when stages.yaml gives it a `jax_file`. A test file
+belongs to the JAX track when its name is test_jax.py.
+
+That is one rule in two places, and only this file stops the two from
+separating.
 
 They are cheap and framework-free, so they run on both tracks.
 """

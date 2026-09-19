@@ -52,7 +52,8 @@ def test_bucket_selection():
 
 @pytest.mark.parametrize("bs", [1, 2, 4, 8])
 def test_replay_matches_eager_exactly(runner, stack, dev, bs):
-    """Same kernels in the same order -- this should be bit-identical."""
+    """The same kernels run in the same order. The result must be identical,
+    bit for bit."""
     x = torch.randn(bs, 512, device=dev, dtype=torch.float16)
     want = stack(x)
     got = runner.run(x)
@@ -96,7 +97,8 @@ def test_stale_padding_cannot_leak_nans(runner, stack, dev):
 
 
 def test_graphs_are_faster_than_eager(runner, stack, dev):
-    """The point. Deleting the Python and the launches should be visible."""
+    """This is the point. You removed the Python and the launches, and the
+    clock must show it."""
     rows = []
     for bs in (1, 2, 4, 8):
         x = torch.randn(bs, 512, device=dev, dtype=torch.float16)

@@ -14,17 +14,19 @@ next seventeen stages moving. Do not skip it.
 
 THE ONE THING THAT WILL RUIN YOUR MEASUREMENT
 
-JAX dispatch is ASYNCHRONOUS. `model.forward(ids)` returns as soon as the work
-is enqueued, not when it is finished. Time a loop without blocking and you
-measure how fast Python can queue work -- which on a 0.6B model reads as
-0.05 ms/token, an impossible 20 TB/s of memory bandwidth, and a decode step
-apparently faster than the roofline allows.
+JAX dispatch is ASYNCHRONOUS. `model.forward(ids)` returns when the work
+reaches the queue, and not when the device finishes it.
+
+Time a loop with no block, and you measure how fast Python fills that queue.
+On a 0.6B model that reads as 0.05 ms/token. That is 20 TB/s of memory
+bandwidth, which is impossible, and a decode step faster than the roofline
+permits.
 
     out = fn()
     jax.block_until_ready(out)      # <- the whole measurement depends on this
 
-Block ONCE at the end of the timed loop, not inside it: blocking every
-iteration serialises dispatch and measures a different (also wrong) thing.
+Block ONCE at the end of the timed loop, and not inside it. A block at every
+iteration serialises the dispatch, and it measures a different wrong thing.
 
 And warm up separately. The first call on a new shape compiles, and XLA
 compilation is seconds. Run the warmups, block, THEN start the clock.
@@ -34,10 +36,12 @@ compilation is seconds. Run the warmups, block, THEN start the clock.
 
 FOR time_decode
 
-Steady-state decode, not prefill: preallocate a cache, prefill the context
-once, then step one token at a time with the shapes held constant. cache_len
-changes VALUE every step but not SHAPE, so the compiled step is reused -- if
-your loop recompiles, you are timing the compiler again.
+Measure steady-state decode, and not prefill. Preallocate a cache, prefill the
+context one time, then step one token at a time and hold the shapes constant.
+
+cache_len changes its VALUE at every step, and it never changes SHAPE. So XLA
+reuses the compiled step. If your loop recompiles, you time the compiler
+again.
 """
 
 

@@ -2,11 +2,12 @@
 //
 // `./vc lore 8c`. `./vc test 8c`.
 //
-// Stage 08b reads memory about as well as this kernel can. Run it at
-// num_seqs = 64 and it sits near the streaming bandwidth of the card. Run it
-// at num_seqs = 1 and it sits at a few percent of it, and no amount of
-// coalescing will move that, because the memory system is no longer the
-// problem:
+// Stage 08b reads memory as well as this kernel can. Run it at num_seqs = 64,
+// and it stays near the streaming bandwidth of the card. Run it at
+// num_seqs = 1, and it reaches a few percent of that bandwidth.
+//
+// No amount of coalescing moves that number. The memory system is no longer
+// the problem:
 //
 //     grid = (num_seqs, num_heads) = (1, 16) = 16 blocks
 //     ./vc info tells you how many SMs this GPU has
@@ -49,9 +50,10 @@
 //
 //     grid = (num_seqs, num_heads, SPLITS)
 //
-// Block (s, h, j) attends over its own chunk of the context and writes a
+// Block (s, h, j) attends over its own chunk of the context. It then writes a
 // PARTIAL softmax state: the running maximum m, the running denominator l,
-// and the un-normalised accumulator acc. A second kernel merges the splits:
+// and the accumulator acc, which is not normalised. A second kernel merges
+// the splits:
 //
 //     M     = max_j m_j
 //     w_j   = exp(m_j - M)
@@ -60,9 +62,11 @@
 // which is the alpha rescale you already wrote, applied across blocks
 // instead of across tiles. It is exact. There is no approximation here.
 //
-// How many splits: enough blocks to cover the SMs, and never so many that a
-// split is shorter than a hundred or so tokens, because then the merge costs
-// more than the split saved. Read the SM count with
+// How many splits? Use enough blocks to cover the SMs. Never use so many that
+// a split becomes shorter than approximately one hundred tokens. Below that
+// length the merge costs more than the split saves.
+//
+// Read the SM count with
 // at::cuda::getCurrentDeviceProperties()->multiProcessorCount.
 //
 // DO NOT call .item() on a tensor to decide the grid. It copies from the
@@ -92,20 +96,21 @@ constexpr unsigned kFull = 0xffffffffu;
 //       some of the time. compute-sanitizer --tool racecheck finds it every
 //       time and names both lines; there is a check here that runs it.
 //
-//       Then consider not needing them at all. Every lane of a row group
-//       leaves the butterfly holding the same score, so each group can carry
-//       its OWN (m, l, acc) with no barrier anywhere in the loop, and the
-//       groups merge at the end with the same rescale the splits use. Same
-//       trick at three levels: tile, group, block.
+//       Then think about how to need no block reduction at all. Every lane
+//       of a row group leaves the butterfly with the same score. So each
+//       group can carry its OWN (m, l, acc), with no barrier in the loop.
+//       The groups then merge at the end, with the same rescale that the
+//       splits use. That is the same trick at three levels: tile, group and
+//       block.
 // TODO: __global__ void paged_attn_split(...)  -> partial (m, l, acc)
 // TODO: __global__ void combine_splits(...)    -> the merge above
 // TODO: int choose_splits(int S, int H, int max_ctx)
 //
-//       One split means nothing to merge: write the answer straight out
-//       rather than staging a partial state for a second kernel to read
-//       back. An empty split, and an empty row group, both still have to
-//       report something the merge can ignore -- and watch for -inf minus
-//       -inf, which is NaN, and poisons every other partial state with it.
+//       With one split there is nothing to merge. Write the answer out
+//       directly. Do not stage a partial state for a second kernel to read
+//       back. An empty split and an empty row group must both report
+//       something that the merge can ignore. Watch for -inf minus -inf. That
+//       is NaN, and it poisons every other partial state.
 
 }  // namespace
 

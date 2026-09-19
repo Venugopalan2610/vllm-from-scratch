@@ -2,8 +2,8 @@
 
 Spec in app/j07_paged_attn.py.
 
-The physical blocks are shuffled in every fixture here. An implementation that
-assumes sequence-block b lives at physical block b passes nothing.
+Every fixture here shuffles the physical blocks. An implementation that assumes
+that sequence-block b lives at physical block b passes no check.
 """
 
 import jax.numpy as jnp
@@ -78,7 +78,8 @@ def test_ragged_context_lengths(jdev):
 
 
 def test_ignores_junk_beyond_context_len(jdev):
-    """Blocks are recycled, so the tail of the last block is someone else's data.
+    """The allocator recycles blocks, so the tail of the last block holds the
+    data of another sequence.
 
     Mask on `position < context_len`, not on the block count.
     """
