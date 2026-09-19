@@ -22,18 +22,18 @@ __device__ __forceinline__ float warp_sum(float v) {
 //
 // Two separate reuse decisions, and they point in opposite directions:
 //
-//   the WEIGHTS are read once each and never again, by anyone. Staging them
-//   in shared memory would be a copy for its own sake. They go straight from
-//   global memory into registers, 16 bytes per lane.
+//   The kernel reads each WEIGHT one time, and never again. A copy into
+//   shared memory has no purpose. The weights go directly from global memory
+//   into registers, 16 bytes for each lane.
 //
-//   the ACTIVATIONS are read by every output row in the block, and there are
-//   only K of them per batch row. They go to shared memory once and are read
-//   from there N/kWarpsPerBlock times.
+//   Every output row in the block reads the ACTIVATIONS, and each batch row
+//   has only K of them. They go to shared memory one time. The kernel then
+//   reads them from there N/kWarpsPerBlock times.
 //
-// MAXB accumulators then live in registers, so the 16 weights a lane just
-// loaded are used for every row of the batch before they are discarded. A
-// kernel with one block per (row, output) instead reads the whole matrix B
-// times, which is stage 03's roofline mistake written in CUDA.
+// MAXB accumulators then live in registers. The 16 weights that a lane loaded
+// serve every row of the batch before the lane drops them. A kernel with one
+// block for each (row, output) reads the whole matrix B times. That is the
+// roofline mistake from stage 03, written in CUDA.
 template <typename scalar_t, bool WIDE, int MAXB>
 __global__ void __launch_bounds__(kThreads) gemv_int8(
     scalar_t* __restrict__ out,                // (B, N)
@@ -97,8 +97,8 @@ __global__ void __launch_bounds__(kThreads) gemv_int8(
   if (!live) return;
 
   // The epilogue. One multiply, on a value already in a register.
-  // Dequantizing the WEIGHTS instead would write K bf16 values out to memory
-  // and read them back, which is the traffic this stage exists to avoid.
+  // A dequantize of the WEIGHTS writes K bf16 values out to memory and reads
+  // them back. This stage exists to avoid that traffic.
   const float sc = scales[n];
 #pragma unroll
   for (int b = 0; b < MAXB; ++b) {
@@ -142,8 +142,8 @@ void dispatch_b(torch::Tensor& out, const torch::Tensor& x,
 
 }  // namespace
 
-// The largest batch this kernel is built for. Above it the weight read is
-// amortised enough that a real GEMM wins, and you should call one.
+// The largest batch for this kernel. Above it, the batch spreads the weight
+// read far enough that a real GEMM wins. Call one.
 constexpr int kMaxBatch = 8;
 
 torch::Tensor gemv_int8_cuda(torch::Tensor x, torch::Tensor w,

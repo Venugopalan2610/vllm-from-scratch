@@ -10,7 +10,7 @@ SOURCE = "app/cuda/s08_paged_attn.cu"
 
 
 def _ext():
-    # Lazy and memoized. The first call compiles; later calls are a dict hit.
+    # Lazy and memoized. The first call compiles. Later calls are a dict hit.
     return build("s08_paged_attn", SOURCE)
 
 

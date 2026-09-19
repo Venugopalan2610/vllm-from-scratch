@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-# Seeded rows fold off a FIXED base, so a request's key is a function of its
-# seed alone and nothing else in the batch can move it.
+# Seeded rows fold off a FIXED base. So the key of a request depends on its
+# seed alone, and nothing else in the batch can move it.
 _SEED_BASE = jax.random.key(0)
 
 
@@ -36,14 +36,14 @@ def apply_repetition_penalty(logits, prev_tokens, penalties):
             continue
         idx = jnp.asarray(sorted(set(toks)), dtype=jnp.int32)
         vals = out[i, idx]
-        # Divide positives, MULTIPLY negatives. Dividing a negative logit makes
-        # it larger, i.e. rewards the token you meant to punish.
+        # Divide positives, MULTIPLY negatives. A division makes a negative
+        # logit larger, so it rewards the token that you meant to punish.
         out = out.at[i, idx].set(jnp.where(vals > 0, vals / pen, vals * pen))
     return out
 
 
 def apply_top_k(logits, k):
-    """k is (B,) -- 0 means disabled for that row.
+    """k is (B,). A 0 turns top-k off for that row.
 
     No `if int(k.max()) <= 0: return` shortcut. That reads one device value on
     the host, which is a sync, and it makes the whole function untraceable.

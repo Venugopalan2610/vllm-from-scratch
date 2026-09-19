@@ -77,7 +77,7 @@ class ContinuousEngine:
                     req.finished = True
                     finished.append(req)
 
-        # evict BEFORE the forward -- finished rows must not cost us compute.
+        # Evict BEFORE the forward. A finished row must not cost compute.
         # That is the entire difference from stage 04.
         if finished:
             self._evict()

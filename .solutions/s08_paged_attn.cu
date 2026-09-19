@@ -5,8 +5,8 @@
 //     grid  = (num_seqs, num_heads)     one block per (sequence, query head)
 //     block = 128 threads               they share one output vector
 //
-// One thread per context position, walking head_dim serially. It is correct
-// and it is slow, and the reason it is slow is visible in one line below:
+// One thread for each context position, and each thread walks head_dim alone.
+// It is correct and it is slow. One line below shows the reason:
 // thread t reads kp[0..D), thread t+1 reads an address D elements further on.
 // The warp touches 32 different cache lines to get 32 dot products started.
 // Stage 08b fixes exactly that.
@@ -85,8 +85,8 @@ __global__ void __launch_bounds__(kThreads) paged_attn_v1(
   float* red = acc_sh + D;                     // kThreads
   __shared__ float m_i, l_i, m_new_sh, alpha_sh;
 
-  // The query vector is read once per block and used by every position, so
-  // fold the scale into it here rather than into every score.
+  // The block reads the query vector one time, and every position uses it.
+  // So fold the scale into it here, and not into every score.
   for (int d = tid; d < D; d += kThreads) {
     q_sh[d] = static_cast<float>(q[((int64_t)s * H + h) * D + d]) * scale;
     acc_sh[d] = 0.f;
@@ -141,7 +141,7 @@ __global__ void __launch_bounds__(kThreads) paged_attn_v1(
     }
 
     // --- the numerator. Threads switch roles: now each owns a slice of
-    //     head_dim and walks every position in the tile. Reading V down a
+    //     head_dim and walks every position in the tile. A read of V down a
     //     column like this is as uncoalesced as the K read above. ---
     const int tile = min(kThreads, n - base);
     __syncthreads();

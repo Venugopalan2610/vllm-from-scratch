@@ -7,15 +7,16 @@
 //     stage 08   thread t reads k[pos_t][0..D)     addresses D apart
 //     stage 08b  thread t reads k[pos][t*VEC..]    addresses 16 bytes apart
 //
-// Threads now cooperate ALONG head_dim. LPR = D/VEC of them share one row and
-// each moves 16 bytes, so a warp issues a handful of full 128-byte
-// transactions instead of 32 separate ones. The remaining ROWS = 128/LPR
-// groups work on different positions at the same time.
+// Threads now cooperate ALONG head_dim. LPR = D/VEC of them share one row,
+// and each one moves 16 bytes. So a warp issues a few full 128-byte
+// transactions, and not 32 separate ones. The other ROWS = 128/LPR groups
+// work on different positions at the same time.
 //
 // The accumulator stays in registers. Each thread owns VEC elements of the
-// output for the positions its group walks, and the online-softmax rescale
-// applies to every partial sum equally, so the sum across groups can wait
-// until the very end. One shared-memory reduction per block, not per tile.
+// output, for the positions that its group walks. The online-softmax rescale
+// applies equally to every partial sum. So the sum across groups can wait
+// until the end. That is one shared-memory reduction for each block, and not
+// one for each tile.
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
@@ -172,9 +173,9 @@ __global__ void __launch_bounds__(kThreads) paged_attn_vec(
 }
 
 
-// The launcher picks the vector width. 16 bytes per thread is the target; a
-// head_dim that does not divide by it falls back to scalar loads rather than
-// reading past the end of a row. Alignment is a precondition, not a hope.
+// The launcher picks the vector width. The target is 16 bytes for each
+// thread. A head_dim that does not divide by it uses scalar loads, and never
+// reads past the end of a row. Alignment is a precondition, not a hope.
 template <typename scalar_t, int VEC>
 void launch_impl(torch::Tensor& out, const torch::Tensor& q,
                  const torch::Tensor& kc, const torch::Tensor& vc,

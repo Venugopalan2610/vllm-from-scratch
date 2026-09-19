@@ -5,7 +5,7 @@ import numpy as np
 
 
 def write_kv(key_cache, value_cache, key, value, slot_indices):
-    """Functional scatter. Returns NEW caches -- nothing is written in place."""
+    """Functional scatter. It returns NEW caches, and writes nothing in place."""
     block_size = key_cache.shape[2]
     blocks = slot_indices // block_size
     offs = slot_indices % block_size
@@ -23,7 +23,7 @@ def paged_attention(query, key_cache, value_cache, block_tables,
     if scale is None:
         scale = 1.0 / np.sqrt(head_dim)
 
-    # One gather for every sequence at once -- no Python loop over sequences.
+    # One gather for all sequences at one time. No Python loop over sequences.
     # (S, nb, KVH, BS, D) -> (S, KVH, nb*BS, D)
     k = jnp.take(key_cache, block_tables, axis=0)
     v = jnp.take(value_cache, block_tables, axis=0)

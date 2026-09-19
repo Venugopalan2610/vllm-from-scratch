@@ -1,9 +1,11 @@
 // Reference solution, stage 08c - warp primitives and split-K.
 //
-// Stage 08b reads memory about as well as this kernel can. At num_seqs = 64
-// it runs near the measured streaming bandwidth of the card. At num_seqs = 1
-// it runs at seven percent of it, and no amount of coalescing will fix that,
-// because the problem is no longer the memory system:
+// Stage 08b reads memory as well as this kernel can. At num_seqs = 64 it runs
+// near the measured streaming bandwidth of the card. At num_seqs = 1 it runs
+// at seven percent of that bandwidth.
+//
+// No amount of coalescing fixes that. The memory system is no longer the
+// problem:
 //
 //     grid = (num_seqs, num_heads) = (1, 16) = 16 blocks
 //     this GPU has ~60 SMs
@@ -17,10 +19,10 @@
 //      lanes leaves the answer in every lane of the group.
 //
 //   2. Split-K, also called flash-decoding. Cut the context into SPLITS
-//      chunks and give each chunk its own block. Every block produces a
-//      PARTIAL softmax state (m, l, acc), and a second kernel merges them
-//      with the same rescaling rule the online softmax already uses. The
-//      grid becomes (num_seqs, num_heads, SPLITS), and the machine fills up.
+//      chunks, and give each chunk its own block. Every block makes a
+//      PARTIAL softmax state (m, l, acc). A second kernel merges them with
+//      the rescale rule that the online softmax already uses. The grid
+//      becomes (num_seqs, num_heads, SPLITS), and the machine fills up.
 //
 // The merge is exact, not an approximation. exp(m_j - M) is the same alpha
 // from stage 08, applied across blocks instead of across tiles.
@@ -108,15 +110,15 @@ __device__ __forceinline__ float block_sum(float v, float* smem, int tid) {
 //
 // There is not one __syncthreads in the loop below, and that is the point.
 //
-// Every lane of a row group ends the butterfly holding the same score, so
-// every lane of a group runs the same online softmax and arrives at the same
-// m and l without being told. Each group is therefore an INDEPENDENT partial
-// softmax over its own stride of the context, exactly like a split is.
+// Every lane of a row group ends the butterfly with the same score. So every
+// lane of a group runs the same online softmax, and reaches the same m and l
+// with no message. Each group is an INDEPENDENT partial softmax over its own
+// stride of the context, exactly like a split.
 //
-// So the block-wide max and sum that stage 08b did once per tile are not
-// needed at all. They are replaced by one merge at the end, over ROWS partial
-// states, with the same exp(m_r - M) rescale used to merge the splits. The
-// same trick, at three levels: tile, group, block.
+// So the kernel does not need the block-wide max and sum that stage 08b did
+// for each tile. One merge at the end takes their place. It runs over ROWS
+// partial states, with the same exp(m_r - M) rescale that merges the splits.
+// The same trick works at three levels: tile, group and block.
 
 template <typename scalar_t, int VEC, bool SINGLE>
 __global__ void __launch_bounds__(kThreads) paged_attn_split(
@@ -182,8 +184,8 @@ __global__ void __launch_bounds__(kThreads) paged_attn_split(
   }
   float m_i = -INFINITY, l_i = 0.f;
 
-  // Every group walks the same NUMBER of positions, so no lane of a warp can
-  // leave the loop early and strand the others at a shuffle.
+  // Every group walks the same NUMBER of positions. So no lane of a warp can
+  // leave the loop early and leave the others waiting at a shuffle.
   const int steps = (hi - lo + ROWS - 1) / ROWS;
   __syncthreads();                             // q_sh is finished with
 
@@ -255,9 +257,9 @@ __global__ void __launch_bounds__(kThreads) paged_attn_split(
 
     // One split means nothing to merge. Normalise here and write the answer,
     // instead of writing a partial state out to memory for a second kernel
-    // to read straight back. That round trip is small next to the K/V reads,
-    // but the launch and the allocations behind it are not, and at a full
-    // grid it is all cost and no benefit.
+    // to read straight back. That round trip is small next to the K/V reads.
+    // The launch and its allocations are not small. At a full grid they are
+    // all cost and no benefit.
     if constexpr (SINGLE) {
       const float inv = (L > 0.f) ? 1.f / L : 0.f;
       scalar_t* op = out + ((int64_t)s * H + h) * D + lane * VEC;
@@ -401,8 +403,8 @@ torch::Tensor paged_attn(torch::Tensor query, torch::Tensor key_cache,
   auto ctx = context_lens.to(torch::kInt).contiguous();
 
   // The upper bound on context comes from the width of the block table, which
-  // is a host-side size. Reading context_lens.max() would need a real value
-  // off the device, and that is a full pipeline stall on every single call.
+  // is a host-side size. context_lens.max() needs a real value from the
+  // device, and that is a full pipeline stall on every call.
   int nsplits = (int)splits;
   if (nsplits <= 0) nsplits = choose_splits(S, H, MBS * BS);
 

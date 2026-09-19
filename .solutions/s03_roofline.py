@@ -34,7 +34,7 @@ def time_decode(model, ctx_len: int, steps: int = 40) -> float:
     past = model(ids, use_cache=True).past_key_values
     one = torch.randint(0, 1000, (1, 1), device=dev)
 
-    # warmup, and let the cache grow naturally -- no copying in the loop
+    # Warm up, and let the cache grow naturally. The loop copies nothing.
     for _ in range(5):
         past = model(one, past_key_values=past, use_cache=True).past_key_values
 

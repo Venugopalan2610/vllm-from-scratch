@@ -15,8 +15,8 @@ def _paged_attn_kernel(q_ref, kc_ref, vc_ref, bt_ref, ctx_ref, o_ref, *,
     h = pl.program_id(1)
     kvh = h // group
 
-    # Built INSIDE the kernel. A jnp scalar defined at module level would be
-    # captured as a constant, and pallas_call refuses those outright:
+    # Build it INSIDE the kernel. pallas_call captures a jnp scalar from module
+    # level as a constant, and it refuses those outright:
     # "captures constants [f32[]]. You should pass them as inputs."
     neg = jnp.float32(-1e30)
     ctx = ctx_ref[0]
@@ -62,9 +62,9 @@ def paged_attention_pallas(query, key_cache, value_cache, block_tables,
     kernel = functools.partial(_paged_attn_kernel, scale=scale,
                                group=H // KVH, block_size=BS, head_dim=D)
 
-    # K and V get a BlockSpec covering the WHOLE cache, because which blocks
-    # this program needs is not known until it reads the block table. Every
-    # other operand is tiled by (seq, head).
+    # K and V get a BlockSpec that covers the WHOLE cache. The program does not
+    # know which blocks it needs until it reads the block table. Every other
+    # operand has a (seq, head) tile.
     return pl.pallas_call(
         kernel,
         grid=(S, H),

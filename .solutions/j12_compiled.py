@@ -46,9 +46,9 @@ class CompiledDecode:
 
     @staticmethod
     def _pad(x, bs, bucket):
-        # Only the BATCHED arguments get padded. Weights ride along unchanged,
-        # and padding them would be nonsense (and, for a (512, 512) weight in a
-        # bucket-4 call, a negative pad width).
+        # Pad only the BATCHED arguments. The weights travel with no change. A
+        # pad on a weight is nonsense. For a (512, 512) weight in a bucket-4
+        # call, it is also a negative pad width.
         if x.shape[0] != bs or bs == bucket:
             return x
         # Zeros, deterministically. Padding rows are real rows to the model.

@@ -30,7 +30,7 @@ def apply_repetition_penalty(logits, prev_tokens, penalties):
 
 
 def apply_top_k(logits, k):
-    """k is (B,) -- 0 means disabled for that row."""
+    """k is (B,). A 0 turns top-k off for that row."""
     B, V = logits.shape
     out = logits
     kmax = int(k.max())
@@ -45,8 +45,8 @@ def apply_top_k(logits, k):
 
 
 def apply_top_p(logits, p):
-    """p is (B,) -- 1.0 means disabled. Keeps the smallest set of tokens whose
-    cumulative probability reaches p, always keeping at least one."""
+    """p is (B,). A 1.0 turns top-p off. Keep the smallest set of tokens whose
+    cumulative probability reaches p. Always keep at least one token."""
     probs = torch.softmax(logits, dim=-1)
     sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
     cum = sorted_probs.cumsum(dim=-1)
@@ -86,9 +86,10 @@ def sample(logits, params, prev_tokens=None):
             u[i].uniform_(generator=g)
         else:
             u[i].uniform_()
-    # NOTE the parentheses: `-torch.log(x).clamp_min(e)` parses as
-    # `-(torch.log(x).clamp_min(e))`, which clamps a NEGATIVE number to +e,
-    # then takes log of a negative -> NaN -> argmax returns 0 forever.
+    # NOTE the parentheses. `-torch.log(x).clamp_min(e)` parses as
+    # `-(torch.log(x).clamp_min(e))`. That clamps a NEGATIVE number to +e.
+    # The outer log then sees a negative, gives NaN, and argmax returns 0
+    # forever.
     gumbel = -torch.log((-torch.log(u.clamp_min(1e-20))).clamp_min(1e-20))
     sampled = (out + gumbel).argmax(dim=-1)
 

@@ -100,7 +100,7 @@ class Scheduler:
                 i += 1
                 continue
             if not self._grow(seq, seq.num_tokens + 1):
-                # out of KV -- free memory by preempting the newest sequence
+                # Out of KV. Preempt the newest sequence to free memory.
                 if self.running[-1] is seq and len(self.running) == 1:
                     raise OutOfBlocks(
                         f"cannot fit even one sequence (seq {seq.id}, "
