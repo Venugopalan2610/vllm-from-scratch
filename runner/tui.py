@@ -183,6 +183,33 @@ class VcTUI:
             self.status_message = "No editable files found for this stage."
             return
 
+        target_files = files
+        if len(files) > 1:
+            f1_name = Path(files[0]).name
+            f2_name = Path(files[1]).name
+            self.status_message = f"Edit which file? [1] {f1_name} (Kernel)  [2] {f2_name} (Wrapper)  [b] Both  [Esc] Cancel"
+            self.render()
+            while True:
+                try:
+                    c = self.stdscr.getch()
+                except curses.error:
+                    continue
+                if c == -1:
+                    time.sleep(0.02)
+                    continue
+                if c in (ord("1"), ord("\n"), 10, 13, curses.KEY_ENTER):
+                    target_files = [files[0]]
+                    break
+                elif c == ord("2"):
+                    target_files = [files[1]]
+                    break
+                elif c in (ord("b"), ord("B")):
+                    target_files = files
+                    break
+                elif c in (27, ord("q"), ord("Q")):
+                    self.status_message = "Edit cancelled."
+                    return
+
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
         if not editor:
             for candidate in ["nvim", "vim", "nano", "vi"]:
@@ -192,9 +219,9 @@ class VcTUI:
         if not editor:
             editor = "vim"
 
-        file_paths = [str(ROOT / f) for f in files]
+        file_paths = [str(ROOT / f) for f in target_files]
         cmd = [editor]
-        # Open side-by-side vertical splits in vim if multiple files (e.g. CUDA kernel + Python binding)
+        # Open side-by-side vertical splits in vim if multiple files
         if len(file_paths) > 1 and ("vim" in editor or "nvim" in editor):
             cmd.append("-O")
         cmd.extend(file_paths)
@@ -214,7 +241,7 @@ class VcTUI:
             self.init_colors()
             self.stdscr.erase()
             self.active_tab = 3  # show console
-            files_str = ", ".join(files)
+            files_str = ", ".join(target_files)
             self.console_lines.append("")
             self.console_lines.append(f">>> Returned from {editor} editing {files_str}. Press [t] to test! <<<")
             self.status_message = f"Saved {files_str}. Press [t] to test, or [s] to submit!"
