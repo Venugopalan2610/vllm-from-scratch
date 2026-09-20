@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -127,16 +128,19 @@ class VcTUI:
         self.is_running = True
         self.status_message = f"Testing stage {stage_label(stage)}... please wait"
         self.active_tab = 3  # Switch to console
-        self.console_lines.append(f"\n--- Testing Stage {stage_label(stage)}: {stage_name(stage, self.progress)} ---")
+        self.console_lines.append("")
+        self.console_lines.append(f"--- Testing Stage {stage_label(stage)}: {stage_name(stage, self.progress)} ---")
 
         def worker():
             code, passed, failed, output = run_checks(stage, self.progress)
             self.console_lines.extend(output.splitlines())
             if code == 0:
-                self.console_lines.append(f"\n>>> SUCCESS: ALL {passed} CHECKS PASSED! <<<")
+                self.console_lines.append("")
+                self.console_lines.append(f">>> SUCCESS: ALL {passed} CHECKS PASSED! <<<")
                 self.status_message = f"Stage {stage_label(stage)} passed ({passed} checks). Ready to submit [s]!"
             else:
-                self.console_lines.append(f"\n>>> FAILED: {failed} checks failed. <<<")
+                self.console_lines.append("")
+                self.console_lines.append(f">>> FAILED: {failed} checks failed. <<<")
                 self.status_message = f"Stage {stage_label(stage)} failed. Fix errors and retry [t]."
             self.is_running = False
 
@@ -156,7 +160,8 @@ class VcTUI:
                 if stage["id"] not in self.progress["completed"]:
                     self.progress["completed"].append(stage["id"])
                     save_progress(self.progress)
-                self.console_lines.append(f"\n>>> BANKED: Stage {stage_label(stage)} committed and submitted! <<<")
+                self.console_lines.append("")
+                self.console_lines.append(f">>> BANKED: Stage {stage_label(stage)} committed and submitted! <<<")
                 self.status_message = f"Stage {stage_label(stage)} complete! Next stage unlocked."
                 # Advance to next incomplete stage
                 for i, stg in enumerate(self.ladder):
@@ -164,7 +169,8 @@ class VcTUI:
                         self.selected_idx = i
                         break
             else:
-                self.console_lines.append(f"\n>>> SUBMISSION REJECTED: {failed} checks failed. <<<")
+                self.console_lines.append("")
+                self.console_lines.append(f">>> SUBMISSION REJECTED: {failed} checks failed. <<<")
                 self.status_message = f"Submission failed for stage {stage_label(stage)}."
             self.is_running = False
 
@@ -209,7 +215,8 @@ class VcTUI:
             self.stdscr.erase()
             self.active_tab = 3  # show console
             files_str = ", ".join(files)
-            self.console_lines.append(f"\n>>> Returned from {editor} editing {files_str}. Press [t] to test! <<<")
+            self.console_lines.append("")
+            self.console_lines.append(f">>> Returned from {editor} editing {files_str}. Press [t] to test! <<<")
             self.status_message = f"Saved {files_str}. Press [t] to test, or [s] to submit!"
 
     def render(self):
@@ -313,14 +320,21 @@ class VcTUI:
                 f"FILES:      {', '.join(stage_files(cur_stage, self.progress))}",
                 "",
                 "THE INSIGHT:",
-                f"  {cur_stage.get('insight', '').strip()}",
-                "",
-                "DELIVER:",
-                f"  {cur_stage.get('deliver', '').strip()}",
-                "",
-                "MEASURE:",
-                f"  {cur_stage.get('measure', '').strip()}",
             ]
+            for l in cur_stage.get("insight", "").strip().splitlines():
+                for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
+                    lines.append(f"  {wl}")
+            lines.append("")
+            lines.append("DELIVER:")
+            for l in cur_stage.get("deliver", "").strip().splitlines():
+                for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
+                    lines.append(f"  {wl}")
+            lines.append("")
+            lines.append("MEASURE:")
+            for l in cur_stage.get("measure", "").strip().splitlines():
+                for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
+                    lines.append(f"  {wl}")
+
             terms = terms_for_stage(
                 stage_label(cur_stage), [stage_label(item) for item in self.ladder]
             )
@@ -328,10 +342,16 @@ class VcTUI:
                 lines.append("")
                 lines.append("NEW TERMS INTRODUCED:")
                 for t in terms:
-                    lines.append(f"  • {t.name}: {t.definition}")
+                    term_str = f"• {t.name}: {t.definition}"
+                    for wl in textwrap.wrap(term_str, width=inner_w - 4):
+                        lines.append(f"  {wl}")
 
             for i, line in enumerate(lines[:content_h]):
-                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], curses.color_pair(7))
+                clean = line.rstrip("\r\n")[:inner_w]
+                try:
+                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
+                except curses.error:
+                    pass
 
         elif self.active_tab == 1:  # Lore
             insight = cur_stage.get("insight", "No lore recorded for this stage.")
@@ -340,11 +360,17 @@ class VcTUI:
                 "=" * len(f"LORE INSIGHT: Stage {stage_label(cur_stage)}"),
                 "",
             ]
-            lore_lines.extend(insight.splitlines() or [insight])
+            for l in insight.splitlines():
+                for wl in textwrap.wrap(l, width=inner_w - 2) or [""]:
+                    lore_lines.append(wl)
             lore_lines.append("")
             lore_lines.append("See LORE.md in the repo root for the complete mathematical derivation.")
             for i, line in enumerate(lore_lines[:content_h]):
-                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], curses.color_pair(7))
+                clean = line.rstrip("\r\n")[:inner_w]
+                try:
+                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
+                except curses.error:
+                    pass
 
         elif self.active_tab == 2:  # Checks
             checks = checks_for(cur_stage, self.progress)
@@ -355,21 +381,34 @@ class VcTUI:
             for name, desc in checks:
                 check_lines.append(f"• {name}")
                 if desc:
-                    check_lines.append(f"    {desc[:inner_w-6]}")
+                    for wl in textwrap.wrap(desc, width=inner_w - 6):
+                        check_lines.append(f"    {wl}")
             for i, line in enumerate(check_lines[:content_h]):
-                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], curses.color_pair(7))
+                clean = line.rstrip("\r\n")[:inner_w]
+                try:
+                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
+                except curses.error:
+                    pass
 
         elif self.active_tab == 3:  # Console
-            visible_console = self.console_lines[-content_h:]
+            flat_console = []
+            for item in self.console_lines:
+                for sub in str(item).splitlines():
+                    flat_console.append(sub)
+            visible_console = flat_console[-content_h:]
             for i, line in enumerate(visible_console):
                 color = curses.color_pair(7)
                 if "SUCCESS" in line or "ALL" in line:
                     color = curses.color_pair(2) | curses.A_BOLD
                 elif "FAILED" in line or "ERROR" in line:
                     color = curses.color_pair(4) | curses.A_BOLD
-                elif line.startswith("---"):
+                elif line.startswith("---") or line.startswith(">>>"):
                     color = curses.color_pair(1) | curses.A_BOLD
-                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], color)
+                clean = line.rstrip("\r\n")[:inner_w]
+                try:
+                    self.stdscr.addstr(content_y + i, left_w + 2, clean, color)
+                except curses.error:
+                    pass
 
         elif self.active_tab == 4:  # Peek Solution
             sol_content = "Loading reference solution from solutions branch..."
@@ -389,7 +428,11 @@ class VcTUI:
 
             sol_lines = sol_content.splitlines()
             for i, line in enumerate(sol_lines[:content_h]):
-                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], curses.color_pair(7))
+                clean = line.rstrip("\r\n")[:inner_w]
+                try:
+                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
+                except curses.error:
+                    pass
 
         # 3. Footer Bar
         try:
