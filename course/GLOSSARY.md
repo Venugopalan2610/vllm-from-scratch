@@ -1410,3 +1410,18 @@ attention to slash KV cache memory.
 **Check:** no
 
 **Taught in:** Stage 31.
+
+### System 1 decision model
+
+*Also:* Jev, non-autoregressive decision model, typed decisions, Choice, Score, Noul
+
+A non-autoregressive neural model architecture that outputs typed, structured
+probabilistic primitives (categorical choice, calibrated continuous score, or
+proposition truth probability) directly in a single forward pass without sequential
+autoregressive decoding or KV cache allocation.
+
+**Like:** an inline rule-engine compiler executing at neural speeds.
+
+**Check:** no
+
+**Taught in:** Stage 32.

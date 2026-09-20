@@ -1232,4 +1232,34 @@ During decode attention:
 
 Decode attention executes directly against compressed latents with zero intermediate decompression and zero mathematical approximation error.
 
+---
+
+## 25. System 1 Decision Models: Non-Autoregressive Typed Inference (TypeSafe Jev)
+
+In classical cognitive science, Daniel Kahneman distinguishes between **System 1** (fast, instinctive, automated decisions) and **System 2** (slow, deliberate, step-by-step reasoning). 
+
+Modern LLM serving engines are almost exclusively built for **System 2**:
+- They generate output sequentially, token by token.
+- Each generated token requires reading the entire KV cache and all model weights from HBM.
+- A 100-token response requires 100 round-trips through GPU memory, bound by memory bandwidth.
+
+However, many critical software automation tasks—such as **request classification, front-door guardrails, quality grading, and router dispatch**—do not require conversational prose. They require **typed, deterministic, probabilistic decisions**.
+
+TypeSafe AI introduced **Jev**, a specialized non-autoregressive "System 1" model designed specifically for software decisions rather than free-form text:
+
+### 1. The Three Typed Primitives
+Rather than sampling over a 150k vocabulary of sub-word tokens, a System 1 model maps hidden representations directly to typed schema heads:
+1. **`Choice`:** Categorical distribution over discrete targets (e.g. `["billing", "support", "technical"]` or adapter IDs) with normalized confidence probabilities:
+   $$\mathbf{p} = \text{Softmax}(W_{\text{choice}} \cdot h_L)$$
+2. **`Score`:** Continuous calibrated scalar regression bounded to an explicit range $[A, B]$ via scaled sigmoid projection:
+   $$\text{Score} = A + (B - A) \cdot \sigma(w_{\text{score}}^T h_L + b)$$
+3. **`Noul`:** A pure probability $p \in [0, 1]$ evaluating the belief/truth value of a boolean proposition (e.g. `is_jailbreak_prompt`):
+   $$\text{Noul} = \sigma(w_{\text{noul}}^T h_L + b)$$
+
+### 2. The Serving Implication: Zero KV Cache Overhead
+Because Jev executes non-autoregressively in a single forward pass:
+- **No KV Cache Allocation:** It never calls `BlockAllocator.allocate()` or occupies physical blocks in PagedAttention.
+- **50x–200x Latency Advantage:** A single forward step completes in 1–2 milliseconds on modern GPUs, compared to 100–500 ms for an autoregressive LLM decode loop.
+- **The Front-Door Pattern:** In high-performance serving architectures, a System 1 model sits at the entrance of the scheduler. It screens incoming requests for safety violations (`Noul`), scores priority (`Score`), and routes requests to specialized LoRA adapters (`Choice`) before a single byte of precious KV cache is allocated in the main engine.
+
 

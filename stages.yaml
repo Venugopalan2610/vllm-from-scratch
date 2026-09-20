@@ -598,3 +598,17 @@ arcs:
           K and V in VRAM, saving over 80% of KV cache bandwidth with zero loss in precision.
         deliver: "MLA compression, baseline unabsorbed attention, and the exact decode weight absorption trick."
         measure: "Exact numerical equivalence to standard attention and >80% KV memory reduction."
+
+      - id: "32-jev"
+        tracks: ["torch"]
+        file: "app/s32_jev.py"
+        name: "TypeSafe Jev: Non-autoregressive System 1 decisions"
+        difficulty: 4
+        insight: >
+          Autoregressive generation generates tokens sequentially at high memory-bandwidth
+          cost. Many automation decisions (routing, grading, guardrails) do not require
+          prose: they require typed, probabilistic decisions. TypeSafe AI's Jev model
+          computes typed primitives (Choice, Score, Noul) in a single non-autoregressive
+          forward pass with zero KV cache allocation, operating 50x-200x faster than an LLM.
+        deliver: "A Jev typed decision engine supporting Choice, Score, and Noul primitives with front-door router integration."
+        measure: "Single-pass execution (zero KV cache blocks consumed), typed schema conformance, and sub-millisecond guardrail routing."

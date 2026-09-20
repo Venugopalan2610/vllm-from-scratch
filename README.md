@@ -6,7 +6,7 @@
 
 Stage 01 is the slowest inference engine that you will ever write. It is slow on purpose. For each new token, it computes all the earlier tokens again.
 
-35 stages later, the same GPU runs a production-style inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
+36 stages later, the same GPU runs a production-style inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
 
 ---
 
@@ -37,7 +37,7 @@ Its twelve chapters start from arithmetic that you can do on a napkin and work o
 - **[Spending the Idle](https://derivingsystems.com/12-spending-the-idle.html)** — Sets up Stage 17 (lossless speculative decoding).
 
 Inside this repository, two key companion documents guide your implementation:
-- **[LORE.md](LORE.md)** — The conceptual spine. 24 sections of mathematical proofs, memory wall derivations, hardware profiling guides, and systems architecture.
+- **[LORE.md](LORE.md)** — The conceptual spine. 25 sections of mathematical proofs, memory wall derivations, hardware profiling guides, and systems architecture.
 - **[`course/GLOSSARY.md`](course/GLOSSARY.md)** — Defines every systems and ML term with an analogy from traditional software engineering.
 
 ---
@@ -56,7 +56,7 @@ You build one complete, high-performance LLM serving system from first principle
 | **A5: Production Serving** | 15–16 | Async worker loop, OpenAI-compatible HTTP server (`/v1/chat/completions`), and Prometheus telemetry (TTFT, ITL) |
 | **A6: Advanced Acceleration**| 17–20 | Tree-attention speculative decoding, quantization (**+ 18b, a custom Int8 GEMV CUDA kernel**), JSON grammar masking, and Megatron-style Tensor Parallelism |
 | **A7: The Capstone Engine** | 21–28 | **The integrated server**: paged model, scheduler, graphs with pinned staging buffers, int8 weights, FP8 KV cache (24b), tree speculation, zero-copy POSIX shared-memory IPC, and client disconnect abort |
-| **A8: The Frontier Extension** | 29–31 | **Advanced single-GPU serving**: LRU prefix cache eviction & cache-aware admission (29), Multi-LoRA serving with Batched GEMV (30), and DeepSeek Multi-Head Latent Attention (MLA) with decode weight absorption (31) |
+| **A8: The Frontier Extension** | 29–32 | **Advanced single-GPU serving**: LRU prefix cache eviction & cache-aware admission (29), Multi-LoRA serving with Batched GEMV (30), DeepSeek Multi-Head Latent Attention (MLA) with decode weight absorption (31), and TypeSafe Jev System 1 typed decision models (32) |
 | **Capstone Practicums** | I, J, K | **Whole-system timeline profiling (`./vc nsys`)**, **hardware counters & bank conflict analysis (`./vc ncu`)**, and **TensorRT-LLM architecture synthesis** |
 
 ### Bare-Metal CUDA (Not Triton)
@@ -110,6 +110,7 @@ You built the complete single-GPU core of vLLM. Here is how your engine maps to 
 | **Speculative Decoding** | Multi-branch Tree-Attention + n-gram drafts (Stage 17, 25) | Speculative decoding framework |
 | **Structured Output** | Automaton JSON grammar mask compilation (Stage 19, 26) | Outlines / XGrammar integration |
 | **Server & IPC** | `/v1/chat/completions` + POSIX shared memory ring (Stage 27) | AsyncLLM engine & multi-process IPC |
+| **System 1 Decision Models** | TypeSafe Jev non-autoregressive typed decisions (Choice, Score, Noul) with zero KV-cache overhead (Stage 32) | Front-door admission, fast guardrails, and dynamic routing |
 
 #### What Requires Multi-GPU / Multi-Node Hardware
 Features intentionally beyond the single-GPU scope of this course:
