@@ -6,7 +6,7 @@
 
 Stage 01 is the slowest inference engine that you will ever write. It is slow on purpose. For each new token, it computes all the earlier tokens again.
 
-31 stages later, the same GPU runs a production-style inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
+35 stages later, the same GPU runs a production-style inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
 
 ---
 
@@ -37,7 +37,7 @@ Its twelve chapters start from arithmetic that you can do on a napkin and work o
 - **[Spending the Idle](https://derivingsystems.com/12-spending-the-idle.html)** — Sets up Stage 17 (lossless speculative decoding).
 
 Inside this repository, two key companion documents guide your implementation:
-- **[LORE.md](LORE.md)** — The conceptual spine. 21 sections of mathematical proofs, memory wall derivations, hardware profiling guides, and systems architecture.
+- **[LORE.md](LORE.md)** — The conceptual spine. 24 sections of mathematical proofs, memory wall derivations, hardware profiling guides, and systems architecture.
 - **[`course/GLOSSARY.md`](course/GLOSSARY.md)** — Defines every systems and ML term with an analogy from traditional software engineering.
 
 ---
