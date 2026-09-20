@@ -169,7 +169,7 @@ class VcTUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def render(self):
-        self.stdscr.clear()
+        self.stdscr.erase()
         max_y, max_x = self.stdscr.getmaxyx()
 
         if max_y < 24 or max_x < 80:
@@ -365,10 +365,17 @@ class VcTUI:
             curses.curs_set(0)
         except Exception:
             pass
-        self.stdscr.timeout(100)  # non-blocking for responsive UI/threads
+        self.stdscr.timeout(50)  # 50ms polling for responsive inputs and thread state
+
+        dirty = True
+        prev_running = False
 
         while True:
-            self.render()
+            if dirty or self.is_running or (prev_running != self.is_running):
+                self.render()
+                dirty = False
+                prev_running = self.is_running
+
             try:
                 ch = self.stdscr.getch()
             except curses.error:
@@ -376,6 +383,8 @@ class VcTUI:
 
             if ch == -1:
                 continue
+
+            dirty = True
 
             if ch in (ord("q"), ord("Q")):
                 break
@@ -404,6 +413,8 @@ class VcTUI:
             elif ch in (ord("s"), ord("S")):
                 if not self.is_running:
                     self.submit_stage(self.ladder[self.selected_idx])
+            elif ch == curses.KEY_RESIZE:
+                dirty = True
 
 
 def main():
