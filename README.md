@@ -110,7 +110,9 @@ You built the complete single-GPU core of vLLM. Here is how your engine maps to 
 | **Speculative Decoding** | Multi-branch Tree-Attention + n-gram drafts (Stage 17, 25) | Speculative decoding framework |
 | **Structured Output** | Automaton JSON grammar mask compilation (Stage 19, 26) | Outlines / XGrammar integration |
 | **Server & IPC** | `/v1/chat/completions` + POSIX shared memory ring (Stage 27) | AsyncLLM engine & multi-process IPC |
-| **System 1 Decision Models** | TypeSafe Jev non-autoregressive typed decisions (Choice, Score, Noul) with zero KV-cache overhead (Stage 32) | Front-door admission, fast guardrails, and dynamic routing |
+| **System 1 Decision Models** | Clean-room TypeSafe Jev architecture (Choice, Score, Noul) with zero KV-cache overhead (Stage 32) | Front-door admission, fast guardrails, and dynamic routing |
+
+> *Note on Jev (Stage 32): TypeSafe AI's commercial Jev weights are closed-source/hosted. Stage 32 implements a clean-room architecture of the published Jev System 1 specification (Choice, Score, Noul), which can be mounted onto open encoder backbones (e.g. `microsoft/deberta-v3-large` or community reproductions) for local deployment.*
 
 #### What Requires Multi-GPU / Multi-Node Hardware
 Features intentionally beyond the single-GPU scope of this course:

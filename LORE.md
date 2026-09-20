@@ -1262,4 +1262,7 @@ Because Jev executes non-autoregressively in a single forward pass:
 - **50x–200x Latency Advantage:** A single forward step completes in 1–2 milliseconds on modern GPUs, compared to 100–500 ms for an autoregressive LLM decode loop.
 - **The Front-Door Pattern:** In high-performance serving architectures, a System 1 model sits at the entrance of the scheduler. It screens incoming requests for safety violations (`Noul`), scores priority (`Score`), and routes requests to specialized LoRA adapters (`Choice`) before a single byte of precious KV cache is allocated in the main engine.
 
+### 3. Clean-Room Architecture & Open Ecosystem Lineage
+TypeSafe AI's commercial Jev model weights are closed-source and hosted as a commercial API. In this course, Stage 32 is a **clean-room architectural implementation** of the published Jev System 1 specification. In local open-source production environments, these non-autoregressive typed heads (`Choice`, `Score`, `Noul`) are mounted directly on top of open encoder backbones (such as `microsoft/deberta-v3-large` or community models like `open-jev-deberta-v3-large`).
+
 

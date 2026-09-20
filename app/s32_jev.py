@@ -16,6 +16,14 @@ Key Serving Invariant:
   System 1 decision inference allocates ZERO blocks in the PagedAttention
   KV cache, running 50x-200x faster than an LLM and acting as a sub-millisecond
   front-door guardrail and LoRA adapter router.
+
+Note on Weights & Lineage:
+  TypeSafe AI's commercial Jev model is hosted and closed-source (available via
+  typesafe.ai and OpenRouter). Stage 32 is a clean-room architectural implementation
+  of the published Jev System 1 specification (Choice, Score, Noul primitives).
+  In local production, these typed heads can be mounted on top of any open
+  encoder backbone (e.g., DeBERTa-v3 or community reproductions like
+  open-jev-deberta-v3-large).
 """
 
 from dataclasses import dataclass
