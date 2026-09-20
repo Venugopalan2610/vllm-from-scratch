@@ -8,6 +8,7 @@ Run with:
 import curses
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -57,15 +58,16 @@ class VcTUI:
         self.backend = self.progress["backend"]
         self.data, self.ladder = load_stages(self.backend)
         self.selected_idx = 0
-        self.active_tab = 0  # 0: Guide, 1: Lore, 2: Checks, 3: Solution, 4: Console
-        self.tabs = ["1: Guide", "2: Lore", "3: Checks", "4: Peek Solution", "5: Console"]
+        self.active_tab = 0  # 0: Guide, 1: Lore, 2: Checks, 3: Console, 4: Solution
+        self.tabs = ["1: Guide", "2: Lore", "3: Checks", "4: Console", "5: Peek Solution"]
         self.console_lines = [
             "Welcome to the vc Stage Runner TUI.",
-            "Select a stage on the left and press [t] to test, or [s] to submit.",
+            "Select a stage on the left and press [e] to edit code in Vim.",
+            "Press [t] to test, or [s] to submit and advance.",
             "Use [1-5] or [h]/[l] to switch inspector tabs.",
         ]
         self.is_running = False
-        self.status_message = "Ready. [t] Test · [s] Submit · [Tab] Switch Track · [q] Quit"
+        self.status_message = "Ready. [e] Edit (Vim) · [t] Test · [s] Submit · [Tab] Track · [q] Quit"
         self.right_scroll = 0
         self.gpu_str = get_gpu_info()
 
@@ -124,7 +126,7 @@ class VcTUI:
         """Run pytest for the stage and update console."""
         self.is_running = True
         self.status_message = f"Testing stage {stage_label(stage)}... please wait"
-        self.active_tab = 4  # Switch to console
+        self.active_tab = 3  # Switch to console
         self.console_lines.append(f"\n--- Testing Stage {stage_label(stage)}: {stage_name(stage, self.progress)} ---")
 
         def worker():
@@ -144,7 +146,7 @@ class VcTUI:
         """Submit the current stage."""
         self.is_running = True
         self.status_message = f"Verifying and submitting stage {stage_label(stage)}..."
-        self.active_tab = 4
+        self.active_tab = 3  # Switch to console
 
         def worker():
             code, passed, failed, output = run_checks(stage, self.progress)
@@ -167,6 +169,48 @@ class VcTUI:
             self.is_running = False
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def edit_stage(self, stage):
+        """Open stage file(s) directly in Vim / $EDITOR with seamless curses resumption."""
+        files = stage_files(stage, self.progress)
+        if not files:
+            self.status_message = "No editable files found for this stage."
+            return
+
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+        if not editor:
+            for candidate in ["nvim", "vim", "nano", "vi"]:
+                if shutil.which(candidate):
+                    editor = candidate
+                    break
+        if not editor:
+            editor = "vim"
+
+        file_paths = [str(ROOT / f) for f in files]
+        cmd = [editor]
+        # Open side-by-side vertical splits in vim if multiple files (e.g. CUDA kernel + Python binding)
+        if len(file_paths) > 1 and ("vim" in editor or "nvim" in editor):
+            cmd.append("-O")
+        cmd.extend(file_paths)
+
+        curses.def_prog_mode()
+        curses.endwin()
+        try:
+            subprocess.run(cmd)
+        except Exception as e:
+            self.console_lines.append(f"Error launching editor {editor}: {e}")
+        finally:
+            curses.reset_prog_mode()
+            try:
+                curses.curs_set(0)
+            except Exception:
+                pass
+            self.init_colors()
+            self.stdscr.erase()
+            self.active_tab = 3  # show console
+            files_str = ", ".join(files)
+            self.console_lines.append(f"\n>>> Returned from {editor} editing {files_str}. Press [t] to test! <<<")
+            self.status_message = f"Saved {files_str}. Press [t] to test, or [s] to submit!"
 
     def render(self):
         self.stdscr.erase()
@@ -315,9 +359,19 @@ class VcTUI:
             for i, line in enumerate(check_lines[:content_h]):
                 self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], curses.color_pair(7))
 
-        elif self.active_tab == 3:  # Solution Peek
-            target_path = Path(".solutions") / f"s{cur_stage['id'].replace('-', '_').split('_')[0]}_{cur_stage['id'].split('-')[-1]}.py"
-            # Fallback searching .solutions
+        elif self.active_tab == 3:  # Console
+            visible_console = self.console_lines[-content_h:]
+            for i, line in enumerate(visible_console):
+                color = curses.color_pair(7)
+                if "SUCCESS" in line or "ALL" in line:
+                    color = curses.color_pair(2) | curses.A_BOLD
+                elif "FAILED" in line or "ERROR" in line:
+                    color = curses.color_pair(4) | curses.A_BOLD
+                elif line.startswith("---"):
+                    color = curses.color_pair(1) | curses.A_BOLD
+                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], color)
+
+        elif self.active_tab == 4:  # Peek Solution
             sol_content = "Loading reference solution from solutions branch..."
             try:
                 out = subprocess.run(
@@ -337,22 +391,10 @@ class VcTUI:
             for i, line in enumerate(sol_lines[:content_h]):
                 self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], curses.color_pair(7))
 
-        elif self.active_tab == 4:  # Console
-            visible_console = self.console_lines[-content_h:]
-            for i, line in enumerate(visible_console):
-                color = curses.color_pair(7)
-                if "SUCCESS" in line or "ALL" in line:
-                    color = curses.color_pair(2) | curses.A_BOLD
-                elif "FAILED" in line or "ERROR" in line:
-                    color = curses.color_pair(4) | curses.A_BOLD
-                elif line.startswith("---"):
-                    color = curses.color_pair(1) | curses.A_BOLD
-                self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], color)
-
         # 3. Footer Bar
         try:
             self.stdscr.addstr(max_y - 2, 2, self.status_message[: max_x - 4], curses.color_pair(3) | curses.A_BOLD)
-            help_bar = " [↑/↓/j/k] Select · [t] Test · [s] Submit · [1-5] Tab · [Tab] Backend · [q] Quit"
+            help_bar = " [↑/↓/j/k] Select · [e] Edit (Vim) · [t] Test · [s] Submit · [1-5] Tab · [Tab] Track · [q] Quit"
             self.stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(6))
         except curses.error:
             pass
@@ -394,6 +436,10 @@ class VcTUI:
             elif ch in (curses.KEY_DOWN, ord("j")):
                 if self.selected_idx < len(self.ladder) - 1:
                     self.selected_idx += 1
+            elif ch in (ord("e"), ord("E")):
+                if not self.is_running:
+                    self.edit_stage(self.ladder[self.selected_idx])
+                    dirty = True
             elif ch in (ord("\t"),):  # Tab toggles backend
                 new_backend = "jax" if self.backend == "torch" else "torch"
                 self.backend = new_backend
