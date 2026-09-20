@@ -29,8 +29,8 @@ jobs:
       - name: Fetch solutions
         run: |
           git fetch origin solutions:refs/remotes/origin/solutions || true
-          for f in $(git show origin/solutions:.solutions/ 2>/dev/null | grep '\.py$'); do
-            mkdir -p .solutions
+          mkdir -p .solutions
+          for f in $(git ls-tree --name-only origin/solutions:.solutions 2>/dev/null | grep '\.py$'); do
             git show origin/solutions:.solutions/$f > .solutions/$f
           done
           cp .solutions/s06_blocks.py app/s06_blocks.py
@@ -57,6 +57,7 @@ jobs:
                            tests/stage_17_speculative_decoding \
                            tests/stage_19_guided_decoding \
                            tests/stage_20_tensor_parallel \
+                           --ignore-glob="*test_jax.py" \
                            -q --timeout=120 --backend torch
       - name: Run harness tests
         run: |
