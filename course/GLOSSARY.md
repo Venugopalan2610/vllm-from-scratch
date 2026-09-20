@@ -1363,3 +1363,50 @@ the end.
 **Check:** no
 
 **Taught in:** Part 5 `3_detokenize/`. Part 6 `1_async/`. Stage 15. Stage 27.
+
+---
+
+## 8. The frontier
+
+### LRU prefix eviction
+
+*Also:* prefix eviction, cache-aware admission
+
+Evicting the least recently used KV blocks that have a reference count of zero
+when GPU memory is constrained, preventing memory leaks while retaining warm
+prefixes for subsequent requests.
+
+**Like:** an LRU page cache in an operating system.
+
+**Check:** no
+
+**Taught in:** Stage 29.
+
+### Multi-LoRA
+
+*Also:* BGMV, batched GEMV, LoRA adapter
+
+Serving multiple distinct Low-Rank Adaptation (LoRA) adapters concurrently in a
+single batched engine step by routing individual request activations through their
+target rank matrices via a specialized batched GEMV kernel.
+
+**Like:** multi-tenant dynamic plugin dispatch.
+
+**Check:** no
+
+**Taught in:** Stage 30.
+
+### Multi-Head Latent Attention
+
+*Also:* MLA, KV compression, decode absorption
+
+An attention architecture introduced by DeepSeek that compresses Keys and Values
+into low-rank latent vectors with decoupled RoPE, and mathematically absorbs
+the uncompression projections into the Query and Output weights during decode
+attention to slash KV cache memory.
+
+**Like:** compressed column-store projection pushdown in database query engines.
+
+**Check:** no
+
+**Taught in:** Stage 31.

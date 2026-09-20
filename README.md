@@ -44,7 +44,7 @@ Inside this repository, two key companion documents guide your implementation:
 
 ## The Ladder: What You Build
 
-You build one complete, high-performance LLM serving system from first principles across 8 architectural arcs:
+You build one complete, high-performance LLM serving system from first principles across 9 architectural arcs:
 
 | Arc | Stages | What you build |
 | :--- | :--- | :--- |
@@ -56,6 +56,7 @@ You build one complete, high-performance LLM serving system from first principle
 | **A5: Production Serving** | 15–16 | Async worker loop, OpenAI-compatible HTTP server (`/v1/chat/completions`), and Prometheus telemetry (TTFT, ITL) |
 | **A6: Advanced Acceleration**| 17–20 | Tree-attention speculative decoding, quantization (**+ 18b, a custom Int8 GEMV CUDA kernel**), JSON grammar masking, and Megatron-style Tensor Parallelism |
 | **A7: The Capstone Engine** | 21–28 | **The integrated server**: paged model, scheduler, graphs with pinned staging buffers, int8 weights, FP8 KV cache (24b), tree speculation, zero-copy POSIX shared-memory IPC, and client disconnect abort |
+| **A8: The Frontier Extension** | 29–31 | **Advanced single-GPU serving**: LRU prefix cache eviction & cache-aware admission (29), Multi-LoRA serving with Batched GEMV (30), and DeepSeek Multi-Head Latent Attention (MLA) with decode weight absorption (31) |
 | **Capstone Practicums** | I, J, K | **Whole-system timeline profiling (`./vc nsys`)**, **hardware counters & bank conflict analysis (`./vc ncu`)**, and **TensorRT-LLM architecture synthesis** |
 
 ### Bare-Metal CUDA (Not Triton)
@@ -102,8 +103,10 @@ To ensure transparency when discussing your work in interviews, understand the e
 | Multi-process engine with zero-copy IPC | Built in Stage 27 (`SharedMemoryEventRing` binary struct) |
 | FlashAttention / FlashInfer backends | Educational CUDA kernels (coalesced, split-K, FP8) |
 | Multi-node distributed execution & NCCL | Single-node / CPU simulation (Gloo TP algebra in Stage 20) |
-| Model architectures | Qwen3 and Llama families (override via `VC_MODEL=...`) |
-| LoRA / multi-LoRA serving | Covered conceptually in LORE.md §11b |
+| Model architectures | Qwen3, Llama families, and DeepSeek MLA |
+| LoRA / multi-LoRA serving | Built in Stage 30 (Multi-LoRA & Batched GEMV dispatch; LORE.md §23) |
+| Prefix cache eviction under pressure | Built in Stage 29 (LRU Radix cache & cache-aware admission; LORE.md §22) |
+| Multi-Head Latent Attention (DeepSeek) | Built in Stage 31 (Low-Rank KV & Decode Weight Absorption; LORE.md §24) |
 | Mixture-of-Experts (MoE) routing | Global dense models only |
 | Dynamic memory pool sizing | Automatic GPU VRAM profiling via `auto_num_blocks` |
 | Speculative decoding algorithms | Multi-branch Tree-Attention + N-gram speculation |

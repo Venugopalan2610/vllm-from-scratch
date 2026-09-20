@@ -553,3 +553,48 @@ arcs:
           you what remains to win.
         deliver: "A benchmark that measures the engine against the roofline floor of its own steps."
         measure: "At least 30% of the floor, and at least 2x your stage 05 engine on the same requests."
+
+  - id: A8
+    name: "The Frontier Extension"
+    blurb: "Advanced single-GPU techniques: LRU eviction, multi-LoRA BGMV, and DeepSeek MLA."
+    stages:
+      - id: "29-lru-cache"
+        tracks: ["torch"]
+        file: "app/s29_lru_cache.py"
+        name: "LRU prefix eviction and cache-aware admission"
+        difficulty: 4
+        insight: >
+          Prefix caching without eviction either leaks blocks forever or pins
+          the pool when multiple long documents circulate. Retain blocks at
+          refcount 0 in an LRU order, reclaim them under memory pressure, and
+          order the waiting queue by prefix hit depth to maximize prefill reuse.
+        deliver: "An LRUPrefixCache and CacheAwareScheduler that evicts inactive blocks and prioritizes cache hits."
+        measure: "Zero leaks, deterministic LRU order under eviction, and hit-rate prioritized admission."
+
+      - id: "30-multi-lora"
+        tracks: ["torch"]
+        file: "app/s30_multi_lora.py"
+        name: "Multi-LoRA serving and batched GEMV"
+        difficulty: 4
+        insight: >
+          Serving 50 fine-tuned adapters simultaneously cannot afford 50 separate
+          forward passes. Batching them with standard GEMM fails because adapter
+          weights differ per request. Batched GEMV (BGMV) routes each sequence's
+          activations through its assigned adapter rank matrices in a single
+          launch, scaling multi-tenant serving at zero base-model overhead.
+        deliver: "A multi-LoRA dispatch engine and batched GEMV kernel simulation."
+        measure: "Correctness against unbatched LoRA passes and multi-adapter throughput scaling."
+
+      - id: "31-mla"
+        tracks: ["torch"]
+        file: "app/s31_mla.py"
+        name: "DeepSeek Multi-Head Latent Attention (MLA)"
+        difficulty: 5
+        insight: >
+          Full KV caches at 128k context consume hundreds of gigabytes. DeepSeek
+          compresses KV into low-rank latents with decoupled RoPE. During decode,
+          uncompression matrices are absorbed into query and output projections:
+          attention runs directly against the compressed cache without expanding
+          K and V in VRAM, saving over 80% of KV cache bandwidth with zero loss in precision.
+        deliver: "MLA compression, baseline unabsorbed attention, and the exact decode weight absorption trick."
+        measure: "Exact numerical equivalence to standard attention and >80% KV memory reduction."

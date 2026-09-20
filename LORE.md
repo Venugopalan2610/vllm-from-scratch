@@ -1165,4 +1165,71 @@ The architectures are twins expressed in different languages:
 
 Understanding `vllm-from-scratch` gives you the exact blueprint required to navigate, profile, and optimize both ecosystems.
 
+---
+
+## 22. LRU Prefix Eviction: Radix Trees Under Memory Pressure
+
+Prefix caching (Stage 09/10) enables multiple requests sharing a prompt prefix to reuse physical KV blocks without redundant prefill computation. However, a naive prefix cache faces a dilemma:
+
+1. **Immediate Freeing:** If blocks are freed when a sequence finishes, multi-turn chat sessions and popular system prompts lose their cached state immediately.
+2. **Permanent Caching:** If completed sequence blocks remain pinned in memory indefinitely, new requests with unfamiliar prompts will trigger `OutOfBlocks` errors and crash or stall the engine.
+
+The solution deployed in production vLLM is an **LRU Eviction Policy combined with Reference Counting**:
+
+- **Active Blocks (`ref_count > 0`):** Blocks currently assigned to running sequences. These are strictly protected from eviction.
+- **Cached Inactive Blocks (`ref_count == 0`):** Blocks whose requests have finished. Instead of being returned to the free list, they remain indexed in the prefix radix tree and enter a doubly-linked LRU queue.
+- **Eviction on Demand:** When `BlockAllocator.allocate()` cannot satisfy an allocation request, it calls `LRUPrefixCache.evict(needed_blocks)`. The cache pops the least recently accessed blocks with zero references, clears their cache mapping, and recycles their physical IDs back to the allocator.
+- **Cache-Aware Scheduling:** In high-concurrency environments, incoming requests in the waiting queue are sorted descending by their prefix cache hit length (`CacheAwareScheduler`). Prioritizing requests that hit warm cache blocks minimizes prefill time, drastically lowers Time-To-First-Token (TTFT), and maximizes system goodput.
+
+---
+
+## 23. Multi-LoRA Serving and Batched GEMV (BGMV)
+
+Enterprise inference often requires serving hundreds of customer-specific LoRA adapters (Low-Rank Adaptation) simultaneously. Hosting hundreds of distinct base models in GPU memory is impossible, but maintaining the base model while applying distinct adapter deltas per sequence is tractable.
+
+A LoRA adapter updates base weight $W_0$ with low-rank matrices $A$ and $B$:
+$$W = W_0 + \frac{\alpha}{r} (A \cdot B), \quad A \in \mathbb{R}^{d \times r}, \quad B \in \mathbb{R}^{r \times k}$$
+
+In an unbatched setting or naive grouping, requests for different adapters must run in separate forward passes, annihilating the throughput benefits of continuous batching.
+
+vLLM solves this using **Batched GEMV (BGMV)**:
+1. **Unified Base Matmul:** All sequences in the current batch (regardless of which adapter they use) are grouped into a single standard GEMM forward pass through the base model weights $W_0$:
+   $$Y_{base} = X \cdot W_0$$
+2. **Per-Sequence LoRA Dispatch:** For the adapter delta, decode tokens have a sequence length of 1 ($M=1$). Multiplying activation vector $x_i \in \mathbb{R}^{1 \times d}$ by low-rank matrices $A_i$ and $B_i$ is a Vector-Matrix product (GEMV).
+3. **The BGMV Kernel:** A specialized CUDA kernel takes the batch activations $X \in \mathbb{R}^{B \times d}$, an integer index array `adapter_indices[B]`, and adapter weight tables. Each CUDA thread block is assigned a sequence $i$, indexes into its assigned adapter matrices $A_{\text{adapter}}$ and $B_{\text{adapter}}$, computes the low-rank delta in registers, scales by $\frac{\alpha}{r}$, and accumulates into the base output:
+   $$Y_i = Y_{base, i} + \frac{\alpha_i}{r_i} (x_i \cdot A_i \cdot B_i)$$
+
+This enables 50+ fine-tuned adapters to run concurrently within a single inference batch with virtually zero latency degradation compared to base-model inference.
+
+---
+
+## 24. DeepSeek Multi-Head Latent Attention (MLA) and Decode Weight Absorption
+
+At long context lengths (e.g., 64k to 128k tokens), the KV cache becomes the primary memory bottleneck of modern LLMs. In standard Multi-Head Attention (MHA), each token stores $2 \cdot H_{kv} \cdot D$ elements. For a 70B parameter model with 128k context, the KV cache alone requires tens of gigabytes per sequence.
+
+DeepSeek-V2 and DeepSeek-V3 introduced **Multi-Head Latent Attention (MLA)** to break this memory wall through low-rank compression and mathematical projection absorption:
+
+### 1. KV Low-Rank Compression
+During prefill, input token hidden state $x_t$ is projected into a compressed latent KV vector $c_t^{KV}$:
+$$c_t^{KV} = x_t W_{DKV}^T \quad (d_c \ll H \cdot D)$$
+Because rotary positional embeddings (RoPE) cannot be cleanly applied to compressed latent representations without losing relative position invariance, MLA extracts a separate small decoupled RoPE key:
+$$k_t^R = x_t W_{KR}^T \quad (d_R \ll D)$$
+The KV cache stores **only** $(c_t^{KV}, k_t^R)$. For typical dimensions ($H=8, D=32, d_c=64, d_R=16$), the stored state shrinks from 512 floats to 80 floats per token—a **>84% memory reduction**.
+
+### 2. The Decode Weight Absorption Trick
+Naively decompressing $K = c^{KV} W_{UK}^T$ and $V = c^{KV} W_{UV}^T$ into memory during decode would defeat the purpose of compression, incurring massive memory bandwidth penalties.
+
+MLA exploits the associative property of matrix multiplication:
+$$Q \cdot K^T = Q (c^{KV} W_{UK}^T)^T = Q W_{UK} (c^{KV})^T = (Q W_{UK}) (c^{KV})^T$$
+
+During decode attention:
+1. **Absorb $W_{UK}$ into Query:**
+   $$Q_{\text{absorbed}} = Q_{\text{nope}} W_{UK}$$
+   Attention scores are computed directly between $Q_{\text{absorbed}}$ and the compressed latent cache $c^{KV}$ without ever materializing uncompressed keys in VRAM.
+2. **Absorb $W_{UV}$ into Output:**
+   Attention weights are multiplied directly by the compressed latent cache $c^{KV}$ to produce a compressed context vector $c_{\text{context}}$. The uncompression matrix $W_{UV}$ is then applied once to the aggregated context:
+   $$\text{Output} = c_{\text{context}} W_{UV}$$
+
+Decode attention executes directly against compressed latents with zero intermediate decompression and zero mathematical approximation error.
+
 
