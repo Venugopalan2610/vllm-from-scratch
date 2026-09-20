@@ -88,8 +88,9 @@ The Capstone (Stages 21–28) connects your parts into one engine and gates your
 | The whole engine, against roofline floor | 39% to 59% | 30% |
 | The whole engine, against Stage 05 naive batching | 3.2x to 4.6x | 2.0x |
 
-To benchmark and serve your capstone engine on your machine:
+To benchmark, inspect, and serve your engine on your machine:
 ```bash
+./vc tui        # launch the interactive terminal workbench (TUI)
 ./vc bench      # tok/s, the roofline floor, and hardware ceiling of your card
 ./vc serve      # launch your server on localhost:8000
 ./vc nsys       # profile end-to-end continuous batching under Nsight Systems

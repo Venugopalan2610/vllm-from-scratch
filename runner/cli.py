@@ -23,6 +23,7 @@
     vc peek [stage]  show the reference solution (from the solutions branch)
     vc peek [n] --apply   write it into the file of the stage
     vc reset <n>     go back to stage n (your code does not change)
+    vc tui           launch the interactive terminal workbench (TUI)
 """
 
 import json
@@ -714,8 +715,8 @@ def cmd_reset(ladder, progress, stage_id):
 SCRIPTS = {"info": "envinfo.py", "cliff": "cliff.py", "ncu": "ncu.py",
            "nsys": "nsys.py",
            "bench": "bench.py", "serve": "serve.py", "math": "timings.py",
-           "doctor": "doctor.py"}
-NO_ARGUMENTS = ("info", "cliff", "doctor", "nsys")
+           "doctor": "doctor.py", "tui": "tui.py", "ui": "tui.py"}
+NO_ARGUMENTS = ("info", "cliff", "doctor", "nsys", "tui", "ui")
 
 
 def run_script(command, arguments):
