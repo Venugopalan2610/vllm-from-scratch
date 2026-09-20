@@ -141,7 +141,7 @@ line on each.
 - [Part 5, Making It Fast](Part5_MakingItFast/): stages 12-14
 - [Part 6, The Server](Part6_TheServer/): stages 15-16
 - [Part 7, Modern vLLM](Part7_ModernVLLM/): stages 17-20, 18b
-- [Part 8, The Capstone](Part8_TheCapstone/): stages 21-28, 24b
+- [Part 8, The Capstone](Part8_TheCapstone/): stages 21-28, 24b, and Capstone Practicums I, J, K (Nsight timeline profiling, kernel hardware counters, and TensorRT-LLM architecture synthesis)
 
 ## The method
 
@@ -171,3 +171,98 @@ bytes. No amount of code reading tells you which.
 
 These notebooks use ASD-STE100 Simplified Technical English. Sentences are
 short. The voice is active. One word has one meaning.
+
+## Exercises beyond the stages
+
+These exercises go past the stages. They are not gated. Do them after the
+capstone, or skip them. Each one closes a gap between this engine and a
+production system.
+
+### Exercise A: Multi-turn conversation
+
+Send three turns of chat to your server. Each turn includes the full history.
+Measure the prefix cache hit rate on the second and third turn. If the hit
+rate is zero, your cache is not keying on the prompt correctly. If it is high,
+you just saw why prefix caching exists.
+
+```bash
+curl localhost:8000/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "What is 2+2?"}], "max_tokens": 20}'
+# Copy the assistant reply into the next request as a message.
+curl localhost:8000/metrics | grep hit
+```
+
+### Exercise B: Read the real vLLM scheduler
+
+Open the upstream vLLM scheduler:
+[`vllm/v1/core/sched/scheduler.py`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/sched/scheduler.py).
+
+Map it to your `Scheduler` class in `app/s22_engine.py`. Answer these
+questions:
+
+1. What data structure does upstream use for waiting vs running requests?
+2. How does upstream decide which request to preempt?
+3. How does upstream handle requests that need more blocks than the pool?
+4. What does upstream do with LoRA slots that your scheduler does not?
+5. Where does upstream enforce the token budget?
+
+List the five things upstream does that you do not. Explain why each one
+matters for a system that serves 1000 users.
+
+### Exercise C: Batch invariance
+
+Run the same prompt with the same seed at batch 1 and batch 32. Compare
+the tokens. If they differ, the cause is floating-point non-associativity:
+a different batch size changes the matmul reduction tree, which changes
+rounding. Count the positions that differ. This is a current, open problem.
+See LORE.md §12.
+
+### Exercise D: Failure modes
+
+Break your server on purpose:
+
+1. Send a prompt longer than `MAX_PROMPT_TOKENS`. Does the server reject it
+   or crash?
+2. Send 1000 concurrent requests. Does the engine OOM or does it preempt?
+3. Kill the client in the middle of a stream. Do the blocks leak?
+4. Feed NaN weights to the model. Does `check_logits` catch it?
+
+Each failure that crashes the server is a bug worth fixing.
+
+### Exercise E: Process Isolation & Goodput Under Load
+
+Benchmark the server in single-process mode vs multi-process mode:
+
+```bash
+# Run server with the engine loop isolated in its own child process
+./vc serve --multiprocess
+```
+
+Compare the p99 ITL (Inter-Token Latency) jitter between the two modes.
+Notice how separating Python GC and HTTP handling from the CUDA
+step loop stabilizes latency and eliminates execution bubbles.
+
+### Exercise F: Zero-Copy Shared-Memory IPC
+
+Inspect `SharedMemoryEventRing` in `app/s27_serve.py`.
+Standard Python `multiprocessing.Queue` runs `pickle.dumps` and `pickle.loads`
+on every event, consuming 30% of CPU time at 5,000 tokens/sec.
+Benchmark the latency of packing a fixed binary struct directly into POSIX
+shared memory versus Python `mp.Queue`. See LORE.md §13.
+
+### Exercise G: Tree-Attention Speculative Decoding
+
+Linear speculative drafting (stage 17) decays rapidly beyond 4 tokens.
+Open `build_tree_mask` in `app/s17_speculative.py` and trace how EAGLE and Medusa
+evaluate 16 draft hypotheses simultaneously in ONE forward pass.
+Prove that candidates in sibling branches never see each other's tokens,
+and evaluate the speedup on structured JSON generation. See LORE.md §17.
+
+### Exercise H: Virtual Memory Management with cuMemMap
+
+Read LORE.md §18. Explain why `torch.empty(20 * 1024**3, device="cuda")` fails
+when GPU memory is fragmented by weights and CUDA graphs.
+Trace `VirtualMemoryBlockManager` in `app/s06_blocks.py` and explain how
+`cuMemAddressReserve` and `cuMemMap` allow the KV cache pool to grow and shrink
+dynamically across requests without reallocating memory.
+

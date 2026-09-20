@@ -1,5 +1,12 @@
 """Stage 08 - the host side of your first CUDA kernel.
 
+**COMPARISON NOTE.** Your paged attention kernel gates at "faster than stage
+07". Against FlashAttention-3 or FlashInfer with a paged cache, this kernel
+is likely 3x to 10x slower. That gap is the point: a production kernel has
+bank-conflict-free shared memory, multi-stage pipelines, and months of
+tuning. A student who knows the size of the gap is useful. A student who
+thinks their kernel is production quality is not.
+
 `./vc lore 8` for the insight. `./vc test 8` to check yourself.
 
 The kernel is in app/cuda/s08_paged_attn.cu, and the stage is there. This

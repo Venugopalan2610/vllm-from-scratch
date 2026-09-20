@@ -8,8 +8,10 @@ import torch
 
 from app.s13_sampler import (
     SamplingParams,
+    apply_min_p,
     apply_repetition_penalty,
     apply_top_p,
+    check_logits,
     sample,
 )
 from tests.helpers import bench_ms
@@ -150,3 +152,32 @@ def test_sampler_is_vectorized_not_looped(device):
         f"{step_ms:.1f} ms for each sampling step is too slow. That is about "
         "a whole decode step. Sort one time for the batch, not one time for "
         "each request.")
+
+
+def test_check_logits_guards_against_nan(device):
+    """NaN logits must be caught immediately with a clear error message.
+    A bad quantization scale, a bad FP8 calibration or an overflow in
+    attention gives NaN logits. NaN is silent: only a check makes it loud."""
+    logits = torch.randn(2, 50, device=device)
+    logits[0, 5] = float("nan")
+    with pytest.raises(ValueError, match="NaN detected in logits"):
+        check_logits(logits)
+    with pytest.raises(ValueError, match="NaN detected in logits"):
+        sample(logits, [SamplingParams(), SamplingParams()])
+
+
+def test_min_p_filters_low_probability_relative_to_max(device):
+    """min_p scales the cutoff threshold relative to the TOP token's probability.
+    probs = [0.8, 0.15, 0.04, 0.01].
+    max_prob = 0.8.
+    min_p = 0.1 -> cutoff is 0.8 * 0.1 = 0.08.
+    Tokens with prob < 0.08 are masked (0.04 and 0.01).
+    Tokens kept: 0.8 and 0.15 (2 tokens)."""
+    probs = torch.tensor([[0.8, 0.15, 0.04, 0.01]], device=device)
+    logits = probs.log()
+    kept = _num_kept(apply_min_p(logits.clone(), torch.tensor([0.1], device=device)))
+    assert kept == 2
+    kept_005 = _num_kept(apply_min_p(logits.clone(), torch.tensor([0.05], device=device)))
+    assert kept_005 == 3
+    kept_1 = _num_kept(apply_min_p(logits.clone(), torch.tensor([1.0], device=device)))
+    assert kept_1 == 1

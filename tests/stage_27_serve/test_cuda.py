@@ -293,6 +293,34 @@ async def test_seed_makes_sampling_repeatable(nvcc, tmodel):
     assert first == second and first != other
 
 
+async def test_multi_turn_chat_shares_prefix(nvcc, tmodel):
+    """Three turns of chat. The prefix cache should reuse the earlier turns.
+    This is the workload that prefix caching, block reuse and cache-aware
+    scheduling exist for."""
+    async with Server(tmodel) as server:
+        messages = [{"role": "user", "content": "What is 2 + 2?"}]
+        r1 = await _chat(server.client, messages[0]["content"],
+                         max_tokens=20, temperature=0)
+        messages.append({"role": "assistant",
+                         "content": _message_text(r1)})
+        messages.append({"role": "user", "content": "Now add 3 to that."})
+        body2 = {"messages": messages, "max_tokens": 20, "temperature": 0}
+        r2 = (await server.client.post("/v1/chat/completions",
+                                        json=body2)).json()
+        messages.append({"role": "assistant",
+                         "content": _message_text(r2)})
+        messages.append({"role": "user", "content": "And subtract 1."})
+        body3 = {"messages": messages, "max_tokens": 20, "temperature": 0}
+        r3 = (await server.client.post("/v1/chat/completions",
+                                        json=body3)).json()
+    assert r1["usage"]["completion_tokens"] > 0
+    assert r2["usage"]["completion_tokens"] > 0
+    assert r3["usage"]["completion_tokens"] > 0
+    # Turn 2 prompt includes turn 1, so it should be longer
+    assert r2["usage"]["prompt_tokens"] > r1["usage"]["prompt_tokens"]
+    assert r3["usage"]["prompt_tokens"] > r2["usage"]["prompt_tokens"]
+
+
 @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
 def test_request_options_read_the_openai_fields():
     options = request_options({"temperature": 0.5, "top_p": 0.9, "seed": 3,
@@ -303,3 +331,155 @@ def test_request_options_read_the_openai_fields():
     assert tuple(options["stop"]) == ("x",) and options["json_mode"] is True
     assert "json_mode" not in request_options({}), (
         "an engine without stage 26 must still serve a plain request")
+
+
+async def test_server_enforces_limits(nvcc, tmodel):
+    """The server must reject requests exceeding max_tokens or prompt limits.
+    Without limits, a single request can exhaust memory or block the pool."""
+    async with Server(tmodel) as server:
+        res = await server.client.post("/v1/completions",
+                                       json={"prompt": "hi", "max_tokens": 5000})
+        assert res.status_code == 400
+        assert "exceeds limit" in res.json()["error"]["message"]
+
+
+async def test_goodput_under_concurrency(nvcc, tmodel):
+    """Goodput: output tokens / s that meet TTFT and ITL SLOs.
+    Batch 1 is a demo; real serving optimizes goodput under concurrency."""
+    async with Server(tmodel, max_num_seqs=16) as server:
+        prompts = [f"Explain item {i} concisely." for i in range(16)]
+        await run_load(server.client, prompts, rate_per_s=20, max_tokens=12)
+        good_requests = server.metrics.goodput(ttft_slo=5.0, itl_slo=1.0)
+        assert good_requests > 0
+        print(f"\n  goodput: {good_requests}/16 requests met TTFT < 5s, ITL < 1s")
+
+
+async def test_completions_returns_logprobs(nvcc, tmodel):
+    """The completions endpoint returns logprobs when requested."""
+    async with Server(tmodel) as server:
+        res = await server.client.post("/v1/completions", json={
+            "prompt": "The sky is", "max_tokens": 3, "temperature": 0,
+            "logprobs": 5
+        })
+        assert res.status_code == 200
+        choice_data = res.json()["choices"][0]
+        assert "logprobs" in choice_data
+        logprobs = choice_data["logprobs"]
+        assert len(logprobs["tokens"]) > 0
+        assert len(logprobs["token_logprobs"]) == len(logprobs["tokens"])
+        assert all(lp <= 0.0 for lp in logprobs["token_logprobs"])
+        assert len(logprobs["top_logprobs"]) == len(logprobs["tokens"])
+
+
+async def test_request_options_reads_min_p():
+    options = request_options({"min_p": 0.05})
+    assert options["params"].min_p == 0.05
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+async def test_process_engine_adapter_runs_out_of_process():
+    """vLLM V1 architecture: engine loop runs in an isolated process.
+    Commands travel across mp.Queue without GIL contention from the HTTP server."""
+    from app.s27_serve import ProcessEngineAdapter
+
+    class MockEngine:
+        def __init__(self):
+            self.queue = []
+
+        def add_request(self, rid, prompt, max_tokens, **kwargs):
+            self.queue.append((rid, prompt, max_tokens))
+
+        def abort(self, rid):
+            self.queue = [r for r in self.queue if r[0] != rid]
+
+        def has_work(self):
+            return bool(self.queue)
+
+        def clock(self):
+            return time.time()
+
+        def step(self):
+            events = []
+            for rid, prompt, max_tokens in self.queue:
+                events.append((rid, " hello", True))
+            self.queue.clear()
+            return events
+
+    engine = MockEngine()
+    adapter = ProcessEngineAdapter(engine)
+    adapter.start()
+    try:
+        adapter.add_request("proc1", "Paris", 3)
+        events = []
+        for _ in range(40):
+            events.extend(adapter.step())
+            if any(rid == "proc1" and fin for rid, _, fin in events):
+                break
+            await asyncio.sleep(0.05)
+        assert any(rid == "proc1" and text == " hello" for rid, text, _ in events)
+    finally:
+        adapter.stop()
+
+
+async def test_shared_memory_ipc_ring_transfers_events_zero_copy():
+    """SharedMemoryEventRing packs binary records directly into POSIX shared memory.
+    No pickle serialization overhead between frontend and engine process."""
+    from app.s27_serve import SharedMemoryEventRing
+
+    ring = SharedMemoryEventRing(capacity=64, create=True)
+    try:
+        ok1 = ring.put("req-001", "tokA", False)
+        ok2 = ring.put("req-002", "tokB", True)
+        assert ok1 and ok2
+
+        events = ring.get_all()
+        assert len(events) == 2
+        assert events[0] == ("req-001", "tokA", False)
+        assert events[1] == ("req-002", "tokB", True)
+
+        # Buffer is now empty
+        assert ring.get_all() == []
+    finally:
+        ring.close()
+        ring.unlink()
+
+
+async def test_client_disconnect_aborts_engine_and_frees_blocks(nvcc, tmodel):
+    """If a client drops connection mid-stream, the server detects disconnect,
+    aborts the request in the engine, and frees its KV cache blocks.
+    A server that keeps generating for abandoned sockets burns GPU capacity."""
+    from app.s27_serve import Completions
+
+    async with Server(tmodel, num_blocks=128) as server:
+        initial_free = server.engine.allocator.num_free
+
+        class MockRequest:
+            def __init__(self):
+                self.calls = 0
+
+            async def is_disconnected(self):
+                self.calls += 1
+                return self.calls >= 2
+
+        mock_req = MockRequest()
+        handler = Completions(server.app.state.serving, "test-model", is_chat=False)
+
+        chunks = []
+        async for chunk in handler.stream(
+            "Write a long story about space exploration and orbital mechanics.",
+            {"max_tokens": 64},
+            request=mock_req,
+        ):
+            chunks.append(chunk)
+            if len(chunks) >= 3:
+                break
+
+        # Allow background loop to process the abort
+        for _ in range(20):
+            if server.engine.allocator.num_free == initial_free:
+                break
+            await asyncio.sleep(0.05)
+
+        # All blocks must be freed back to the pool
+        assert server.engine.allocator.num_free == initial_free
+        assert len(server.engine.scheduler.running) == 0

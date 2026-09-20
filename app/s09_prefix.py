@@ -13,6 +13,12 @@ gives three features:
 
 The cost: you now need reference counts, and a copy-on-write before a write
 into a shared block. This is exactly `fork()` and a page table.
+
+**What this stage does NOT build.** LRU eviction under memory pressure
+(the cache evicts, but it does not choose which blocks to evict based on
+recency), and cache-aware scheduling (admitting the request whose prefix
+is already cached). In production, these two features decide your
+capacity and your hit rate under load.
 """
 
 
@@ -103,6 +109,8 @@ class PrefixCache:
         lookup(hashes) -> list[int]   the longest cached PREFIX. incref each hit.
         insert(hash, block_id)        the cache holds its own reference
         evict_all()
+        match_prefix_len(hashes) -> int  count matching prefix blocks without incref
+        evict_lru(count=1) -> int     evict oldest LRU blocks under pressure
 
     lookup must stop at the first miss. A cached block is valid only if every
     block before it also matched. The hash chain records that.

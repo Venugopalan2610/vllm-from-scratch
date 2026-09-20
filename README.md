@@ -1,5 +1,12 @@
 # Build Your Own vLLM
 
+> **Disclaimer.** This course is not affiliated with the
+> [vLLM project](https://github.com/vllm-project/vllm) (Apache-2.0). It
+> teaches the ideas behind vLLM V1's single-GPU architecture through a
+> clean-room implementation. The result is a teaching engine, not a
+> production system. See [What you did not build](#what-you-did-not-build)
+> below.
+
 > **Do not stop. Continue. Be better than before.**
 
 Stage 01 is the slowest inference engine that you will ever write. It is slow
@@ -113,6 +120,14 @@ minute. All of these are ratios, so they hold on any card:
 | the whole engine, against the roofline floor of its own steps | 39% to 59% | 30% |
 | the whole engine, against your stage 05 engine, same requests | 3.2x to 4.6x | 2x |
 
+
+> [!NOTE]
+> These measurements run at 128 to 2048 tokens. At 8k and above, the KV read
+> dominates the weight read, block tables grow, flash-decoding matters, the
+> prefix cache hit rate decides capacity, and the FP8 KV gain appears. A 0.6B
+> model at 16k is cheap. Try `VC_MODEL=Qwen/Qwen3-0.6B ./vc bench --seqs 4`
+> with long prompts to see the regime where your roofline argument flips.
+
 The ranges come from repeated runs on one laptop GPU. A laptop throttles, so
 the same code moves by 20% from run to run. That is why every gate compares
 two things that the check measures one after the other.
@@ -123,6 +138,30 @@ To see the absolute numbers for your card, finish the capstone and run:
 ./vc bench      # tok/s, the roofline floor, and the ceiling of your card
 ./vc serve      # your server on localhost:8000, for curl
 ```
+
+### What you did not build
+
+| Production vLLM feature | Status in this course |
+|---|---|
+| Multi-process engine with ZMQ | ❌ Engine runs in-process |
+| FlashAttention / FlashInfer backends | ❌ Your own CUDA kernel (slower) |
+| Dozens of model architectures | Qwen3 and Llama families only |
+| LoRA, multi-LoRA serving | ❌ Not covered |
+| Mixture-of-Experts (MoE), expert parallelism | ❌ Not covered |
+| Pipeline parallelism, multi-node | ❌ TP algebra only, simulated on one GPU |
+| Cache-aware scheduling | Partial — prefix cache, no LRU-guided admission |
+| Automatic memory profiling for pool sizing | ❌ Pool size is a manual constant |
+| Beam search, `n > 1` sampling | ❌ Copy-on-write built but not used in engine |
+| Logprobs, `min_p`, `bad_words`, tool calls | ❌ Not in the API |
+| EAGLE / MTP draft models | ❌ N-gram drafting only |
+| Sliding-window / MLA attention | ❌ Global attention only |
+| Robust error handling (OOM, timeouts, watchdog) | ❌ Not covered |
+| Batch-invariant decoding | ❌ Known to differ (see Criticism #10) |
+| Goodput measurement at concurrency | ❌ Benchmark uses batch-at-once |
+
+The course teaches the *ideas*. Production vLLM has hundreds of thousands of
+lines that make those ideas survive real traffic. If you say "I built vLLM" in
+an interview, name these gaps first.
 
 **Which models.** The capstone model (`tvllm/model.py`) runs the Qwen3 family
 and the Llama family. Set `VC_MODEL`. What fits depends on two numbers of your
@@ -137,20 +176,34 @@ card: VRAM, and read bandwidth.
   each token).** Qwen3-0.6B needs 112 KiB of KV for each token. Llama-3.2-1B
   needs 32 KiB. So at long context the larger Llama model serves more tokens.
 
+**Why two families matter.** Qwen3-0.6B has GQA 16:8, head_dim 128 and tied
+embeddings. Llama-3.2-1B has GQA 32:8, head_dim 64 and an untied lm_head.
+Running `VC_MODEL=meta-llama/Llama-3.2-1B ./vc test` on your capstone finds
+bugs that one config hides: hardcoded head_dim, wrong GQA ratio in the kernel,
+and a cache layout that only one shape proves. If your code passes on both,
+the shapes are parametric.
+
 ## Start with no installation
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Venugopalan2610/vllm-from-scratch/blob/master/colab.ipynb)
 
-Use a free Colab T4. There is no local setup, and stage 1 is approximately three
-minutes away. Colab also puts the GPU stages (8, 8b, 8c, 12, 18, 18b, 21-28) into reach
-of a machine that cannot run them. Colab has a CUDA toolkit, and the kernel
-stages need one.
+Colab gives you a CUDA toolkit and a GPU, so the kernel stages compile.
+A **free T4** (sm_75) runs the pure-logic and CUDA stages but has **no native
+bf16 tensor cores and no FP8 hardware**, so the capstone speed gates are
+unreliable and stage 24b (FP8 KV) will not run. For the full capstone, use
+a **Colab L4** (sm_89) or **A100** (sm_80) runtime. Stage 1 is approximately
+three minutes away on any tier.
 
 A Colab runtime is temporary, so your work dies with the session. The last two
 cells of the notebook save it. They download it, or they push it to your fork.
 After approximately stage 5, work locally instead.
 
 ## Or start locally
+
+**Budget.** The course needs approximately **40 to 60 hours** of focused work,
+a GPU with `nvcc` (CUDA toolkit), **≥ 10 GB of VRAM** for the capstone, and
+**≈ 5 GB of disk** for the venv, model weights and build cache. A free Colab
+GPU is enough for the first half. The capstone speed gates need at least an L4.
 
 **Fork this repo**, then clone your fork. You want your own copy. `./vc submit`
 commits your work, and you need a place to push it to.
@@ -250,6 +303,13 @@ Why do this, if the ideas are the same? Because the sameness of the ideas is the
 finding. A bucket for each shape is not a CUDA trick. You find the same idea again on
 the JAX track, for a completely different reason. And the nine shared stages measure how
 much of an inference engine is framework code. The answer is: not much.
+
+
+> [!NOTE]
+> The JAX track is valuable for the "shapes are frozen" insight, but vLLM
+> is torch. Maintaining two tracks (92 notebooks, two test ladders) is
+> expensive. If you have limited time, do the torch track and the nine
+> shared stages. The JAX track adds understanding, not coverage.
 
 ## What a guide looks like
 

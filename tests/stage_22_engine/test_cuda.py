@@ -6,7 +6,7 @@ The spec is in app/s22_engine.py. The checks compare tokens in fp32 with HF.
 import pytest
 
 from app.s13_sampler import SamplingParams
-from app.s22_engine import LLMEngine
+from app.s22_engine import LLMEngine, auto_num_blocks
 from tests.helpers import CAPSTONE_PROMPTS, hf_greedy
 
 OUTPUT_LENS = [30, 8, 45, 20, 60, 12]
@@ -174,3 +174,88 @@ def test_last_step_counts_the_work(nvcc, tmodel_exact):
     engine.step()
     assert (engine.last_step.tokens,
             engine.last_step.context_tokens) == (1, prompt_len + 1)
+
+
+def test_batch_invariance_is_a_known_gap(nvcc, tmodel):
+    """The same prompt, same seed, at batch 1 and batch 32. Floating-point
+    addition is not associative: a different batch size changes the reduction
+    tree inside a matmul, which changes rounding, which can flip the argmax.
+    This test documents the problem. It does NOT gate on equality, because
+    that would require deterministic reductions that torch does not guarantee.
+    If the tokens differ, this test prints why. That print is the lesson."""
+    prompt = CAPSTONE_PROMPTS[0]
+    # Batch 1: alone
+    engine1 = LLMEngine(tmodel, 128)
+    engine1.add_request("solo", prompt, 20, ignore_eos=True)
+    solo = engine1.run_to_completion()["solo"]
+    # Batch 32: the same prompt buried in 31 others
+    engine32 = LLMEngine(tmodel, 512, max_num_seqs=32, token_budget=512)
+    engine32.add_request("target", prompt, 20, ignore_eos=True)
+    for i in range(31):
+        engine32.add_request(f"pad{i}", CAPSTONE_PROMPTS[i % 6], 20,
+                             ignore_eos=True)
+    batch = engine32.run_to_completion()["target"]
+    differ = sum(1 for a, b in zip(solo, batch) if a != b)
+    rate = differ / len(solo) if solo else 0
+    print(f"\n  batch-invariance: {differ}/{len(solo)} tokens differ "
+          f"({100 * rate:.0f}%)")
+    if differ > 0:
+        print("  This is expected. Floating-point addition is not associative.")
+        print("  A different batch size changes the reduction tree in matmul,")
+        print("  which changes rounding, which can flip the argmax at ~2% of")
+        print("  positions. Users report this as 'the same prompt gives")
+        print("  different text when the server is busy.' There is no simple fix.")
+    # NOT a gate: we assert only that the engine ran without error
+    assert len(solo) == 20 and len(batch) == 20
+
+
+def test_auto_num_blocks_profiles_memory(nvcc, tmodel):
+    """Real engines derive the block pool size dynamically from free VRAM.
+    This test verifies that auto_num_blocks profiles memory and computes
+    a realistic positive block count based on model.kv_bytes_per_token()."""
+    num_blocks = auto_num_blocks(tmodel, block_size=16, reserve_bytes=1e9)
+    assert isinstance(num_blocks, int)
+    assert num_blocks > 0
+    assert num_blocks * 16 >= 1024
+
+
+def test_fork_request_shares_blocks_for_n_greater_than_one(nvcc, tmodel):
+    """n > 1 sampling forks the request after prefill so children share
+    the prompt's KV blocks via refcounts (stage 09) without recomputing."""
+    engine = LLMEngine(tmodel, 64, prefix_cache_blocks=0)
+    prompt = "In 1969, humans first walked on the"
+    engine.add_request("p", prompt, 10, ignore_eos=True)
+    engine.step()
+    engine.fork_request("p", "c1", params=SamplingParams(temperature=0.7, seed=1))
+    engine.fork_request("p", "c2", params=SamplingParams(temperature=0.7, seed=2))
+    for b in engine.seqs["p"].blocks:
+        assert engine.allocator.ref_count(b) == 3
+    outputs = engine.run_to_completion()
+    assert len(outputs["p"]) == 10
+    assert len(outputs["c1"]) == 10
+    assert len(outputs["c2"]) == 10
+    assert engine.allocator.num_free == 64
+
+
+def test_cache_aware_scheduling_prioritizes_prefix_hits(nvcc, tmodel_exact):
+    """Cache-aware scheduling: when multiple requests wait in queue, the
+    scheduler admits the request with the longest cached prefix match first,
+    rather than strict FCFS. This minimizes TTFT and saves prefill compute."""
+    system_prompt = "You are a helpful assistant who gives very concise answers. " * 10
+    engine = LLMEngine(tmodel_exact, 256, max_num_seqs=1, token_budget=256)
+    engine.add_request("warmup", system_prompt + "What is 1+1?", 2)
+    engine.run_to_completion()
+    assert engine.blocks.prefix_cache.num_cached > 0
+
+    # Add two requests: first has no cache, second matches the long prefix
+    engine.add_request("unrelated_first", "Tell me about medieval architecture in Europe.", 2)
+    engine.add_request("cached_second", system_prompt + "What is 2+2?", 2)
+
+    # Scheduler should prioritize cached_second
+    engine.step()
+    running_rids = [s.rid for s in engine.scheduler.running]
+    assert "cached_second" in running_rids, (
+        "cache-aware scheduler should admit the request that hits the prefix cache first!"
+    )
+    engine.run_to_completion()
+

@@ -83,6 +83,28 @@ class CapturedGraph:
     logits: torch.Tensor
 
 
+@dataclass
+class StagingBuffers:
+    """Pre-allocated pinned host memory buffers for asynchronous zero-copy transfers.
+    Allocating host tensors on every step thrashes the CPU memory allocator and
+    forces synchronous pageable transfers."""
+    token_ids: torch.Tensor
+    positions: torch.Tensor
+    slot_mapping: torch.Tensor
+    context_lens: torch.Tensor
+    block_tables: torch.Tensor
+
+    @classmethod
+    def create(cls, batch_size, max_blocks):
+        return cls(
+            token_ids=torch.empty(batch_size, dtype=torch.long, pin_memory=True),
+            positions=torch.empty(batch_size, dtype=torch.long, pin_memory=True),
+            slot_mapping=torch.empty(batch_size, dtype=torch.long, pin_memory=True),
+            context_lens=torch.empty(batch_size, dtype=torch.int32, pin_memory=True),
+            block_tables=torch.empty((batch_size, max_blocks), dtype=torch.int32, pin_memory=True),
+        )
+
+
 def warm_up(run, times=3):
     """Run once on a side stream, so that the first-call allocations of
     cuBLAS happen before the capture and not inside it."""

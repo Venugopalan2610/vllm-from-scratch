@@ -130,3 +130,36 @@ def capacity_paged(vram_bytes: int, kv_bytes_per_token: int,
     order until the next one does not fit. Return the number that fit.
     """
     raise NotImplementedError("stage 06: implement capacity_paged")
+
+
+class VirtualMemoryBlockManager:
+    """Architectural demonstration of CUDA Driver Virtual Memory Management (cuMemMap).
+
+    In real vLLM V1, pre-allocating a contiguous PyTorch tensor (e.g. 20GB) causes severe
+    VRAM fragmentation and limits dynamic KV cache pool resizing.
+    Instead, production engines use low-level CUDA driver VMM APIs:
+      1. cuMemAddressReserve: Reserves a large contiguous VIRTUAL address space
+         (e.g., 128 GB) without committing physical GPU memory.
+      2. cuMemCreate: Allocates physical memory chunks in fixed 2MB OS pages.
+      3. cuMemMap: Maps physical pages to arbitrary virtual address ranges.
+      4. cuMemSetAccess: Sets read/write permissions for the device.
+      5. cuMemUnmap / cuMemRelease: Decouples and frees physical pages without
+         moving data or re-allocating tensors.
+    """
+
+    def __init__(self, virtual_capacity_blocks: int, page_size_blocks: int = 16):
+        self.virtual_capacity_blocks = virtual_capacity_blocks
+        self.page_size_blocks = page_size_blocks
+        self.virtual_address_reserved = True
+        self.mapped_physical_pages = {}
+        self.next_handle_id = 1
+
+    def map_page(self, virtual_page_idx: int) -> int:
+        raise NotImplementedError("stage 06: implement map_page")
+
+    def unmap_page(self, virtual_page_idx: int) -> None:
+        raise NotImplementedError("stage 06: implement unmap_page")
+
+    @property
+    def physical_pages_in_use(self) -> int:
+        raise NotImplementedError("stage 06: implement physical_pages_in_use")

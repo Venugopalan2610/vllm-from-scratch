@@ -46,6 +46,16 @@ WHAT THE RATIO TELLS YOU
   - Well below: some part of the step does not move bytes. Find it. The
     usual causes are prefill steps that run eager, host time between steps,
     and many small kernels. LORE.md section 11 lists a stretch goal for each.
+
+WHAT THIS DOES NOT MEASURE
+
+  This benchmark sends all requests at t=0 and measures raw tok/s. A
+  production metric is GOODPUT: output tokens per second at a fixed p99
+  TTFT and ITL, measured at batch 32 and 128 with Poisson arrivals. The
+  server in stage 27 has the machinery for that measurement (run_load,
+  MetricsCollector), but this stage does not gate on it. The reason:
+  goodput depends on the clock and the thermal state of the card, and a
+  gate that fails from a hot GPU teaches nothing.
 """
 
 import time
@@ -82,6 +92,11 @@ def run_benchmark(engine, requests, hardware):
     """requests: [(rid, prompt_ids, max_tokens)], all at t=0, EOS ignored so
     that every run makes the same number of tokens."""
     raise NotImplementedError("stage 28: implement run_benchmark")
+
+
+def run_goodput_benchmark(engine, requests, hardware, ttft_slo=2.0, itl_slo=0.2):
+    """Measure goodput: output tokens per second meeting TTFT and ITL SLOs."""
+    raise NotImplementedError("stage 28: implement run_goodput_benchmark")
 
 
 def report(result):

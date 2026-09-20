@@ -1,9 +1,10 @@
-"""./vc serve [--port 8000] [--model NAME] [--no-int8] [--bf16-kv] [--no-spec]
+"""./vc serve [--port 8000] [--model NAME] [--no-int8] [--bf16-kv] [--no-spec] [--multiprocess]
 
 Start YOUR capstone server (stage 27) on the real model, with every part that
 you built. That is int8 weights (24), an FP8 KV cache (24b), speculative
-decoding (25) and JSON mode (26). Each flag turns one part off, so that you
-can measure what it buys. Then, from another terminal:
+decoding (25) and JSON mode (26). --multiprocess runs the engine in its own
+child process isolated from the HTTP event loop (vLLM V1 architecture).
+Each flag turns one part off, so that you can measure what it buys.
 
     curl localhost:8000/v1/chat/completions -H 'content-type: application/json' \\
       -d '{"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 32}'
@@ -25,7 +26,8 @@ def parse_args(argv):
     options = {"port": 8000, "model": None,
                "int8": "--no-int8" not in argv,
                "fp8_kv": "--bf16-kv" not in argv,
-               "speculate": "--no-spec" not in argv}
+               "speculate": "--no-spec" not in argv,
+               "multiprocess": "--multiprocess" in argv}
     for index, arg in enumerate(argv[:-1]):
         if arg == "--port":
             options["port"] = int(argv[index + 1])
@@ -78,7 +80,8 @@ def main(argv):
     engine = GuidedEngine(model, num_blocks, runner=runner, metrics=metrics,
                           num_speculative=NUM_SPECULATIVE if options["speculate"]
                           else 0)
-    app = build_app(engine, metrics, model_name=model.config.name)
+    app = build_app(engine, metrics, model_name=model.config.name,
+                    multiprocess=options["multiprocess"])
     kv_format = "FP8" if options["fp8_kv"] else "bf16"
     print(f"{model.config.name}: {num_blocks * 16:,} tokens of {kv_format} KV. "
           f"http://localhost:{options['port']}/v1")

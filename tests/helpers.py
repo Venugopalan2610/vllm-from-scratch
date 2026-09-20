@@ -121,6 +121,18 @@ def bench_ms(function, iters=30, warmup=5):
     return (time.perf_counter() - start) / iters * 1000
 
 
+def bench_spread(function, rounds=3, iters=30, warmup=5):
+    """Run `rounds` separate timings. -> (median_ms, min_ms, max_ms, spread_pct).
+    Laptops and power-limited GPUs throttle: reporting median and spread
+    tells the student whether a failed gate is noise or a real problem."""
+    times = [bench_ms(function, iters=iters, warmup=warmup) for _ in range(rounds)]
+    times.sort()
+    median_ms = times[len(times) // 2]
+    min_ms, max_ms = times[0], times[-1]
+    spread_pct = ((max_ms - min_ms) / median_ms * 100) if median_ms > 0 else 0.0
+    return median_ms, min_ms, max_ms, spread_pct
+
+
 # ---- CUDA tools -----------------------------------------------------
 
 

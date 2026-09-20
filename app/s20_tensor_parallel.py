@@ -7,6 +7,14 @@ make the sharding and the collective logic correct, and you learn exactly
 where the communication occurs. That second part decides if TP is worth its
 cost.
 
+**Scope.** This stage teaches the SHAPE of tensor parallelism: which
+weights split, where the all-reduce goes, and how many bytes it moves.
+It does NOT teach the system: NCCL, overlapping communication with
+compute, sequence parallelism for the norms, and non-deterministic
+reductions. If you have two GPUs, the optional exercise at the end runs
+real NCCL. Otherwise, know that the algebra is correct and the
+engineering is a separate project.
+
 The pattern, and the reason for only ONE all-reduce in each block:
 
     MLP:  out = W2 @ act(W1 @ x)

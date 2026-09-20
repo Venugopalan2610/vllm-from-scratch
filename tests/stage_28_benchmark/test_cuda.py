@@ -21,6 +21,7 @@ from app.s28_bench import (
     model_cost,
     report,
     run_benchmark,
+    run_goodput_benchmark,
     step_floor,
 )
 from tests.helpers import elapsed_ms
@@ -62,6 +63,19 @@ def test_floor_adds_the_kv_reads():
     assert step_floor(EXAMPLE_COST, EXAMPLE_CARD, tokens=4,
                       context_tokens=2000) == pytest.approx(
                           1e9 / 1e11 + 2000 * 1e5 / 1e11)
+
+
+def test_floor_at_16k_context_flips_roofline_to_kv_bound():
+    """At 16k context, KV reads dominate the weight read.
+    weight_read = 1e9 / 1e11 = 0.01s
+    kv_read = 16384 * 1e5 / 1e11 = 0.016384s > weight_read!
+    This is the regime where the roofline argument flips sign."""
+    floor_1k = step_floor(EXAMPLE_COST, EXAMPLE_CARD, tokens=1, context_tokens=1024)
+    floor_16k = step_floor(EXAMPLE_COST, EXAMPLE_CARD, tokens=1, context_tokens=16384)
+    assert floor_16k > 2 * floor_1k
+    kv_read_16k = 16384 * EXAMPLE_COST.kv_bytes_per_token / EXAMPLE_CARD.read_bandwidth
+    weight_read = EXAMPLE_COST.weight_bytes / EXAMPLE_CARD.read_bandwidth
+    assert kv_read_16k > weight_read
 
 
 class FakeModel:
@@ -155,3 +169,18 @@ def test_the_engine_beats_your_stage_05(nvcc, hf, tmodel):
     print(f"\n  stage 05: {stage05_tok_s:.0f} tok/s   capstone: "
           f"{result['tok_s']:.0f} tok/s = {result['tok_s'] / stage05_tok_s:.1f}x")
     assert result["tok_s"] >= 2 * stage05_tok_s
+
+
+def test_the_engine_gates_on_goodput_at_concurrency(nvcc, tmodel):
+    """The headline benchmark gate: measure GOODPUT under concurrency at batch 32.
+    Batch 1 is a toy; production serving gates on output tokens per second
+    that meet TTFT and ITL SLOs."""
+    engine = _capstone(tmodel, 32)
+    requests = _token_requests(tmodel.tokenizer)
+    result = run_goodput_benchmark(engine, requests, _this_card(), ttft_slo=5.0, itl_slo=0.5)
+    print("\n  " + report(result))
+    assert result["goodput_tok_s"] > 0
+    assert result["goodput_ratio"] >= 0.50, (
+        f"only {100 * result['goodput_ratio']:.0f}% of tokens met the SLO. "
+        "Real serving requires high goodput under concurrency."
+    )

@@ -890,3 +890,279 @@ already has money behind it, and the chips already ship.
 
 The KV cache kills the pure version. It scales with the context, and not with
 the parameters. So it refuses to disappear.
+
+---
+
+## 11b. Reading the real vLLM source
+
+The strongest exercise at the end of this course is not another benchmark. It
+is: open the upstream vLLM scheduler, map it to the class you wrote, and list
+what upstream does that you do not.
+
+Start here:
+[`vllm/v1/core/sched/scheduler.py`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/sched/scheduler.py)
+
+Your `Scheduler` in `app/s22_engine.py` is about 100 lines. The upstream
+scheduler is about 600. The difference is not complexity for its own sake.
+Every extra line handles a case that a single-GPU teaching engine does not
+see:
+
+- **LoRA slot management.** A LoRA adapter uses GPU memory. The scheduler must
+  know which adapters are loaded and swap them.
+- **Priority scheduling.** Some requests pay more. The scheduler must admit
+  them first.
+- **Encoder-decoder models.** The encoder output has a different shape and
+  different memory. The scheduler tracks both.
+- **Multi-step scheduling.** The scheduler plans multiple decode steps ahead
+  to amortize the Python overhead.
+- **Structured output state.** The grammar state of a guided-decoding request
+  travels with the request through preemption and resumption.
+
+Send one small patch to the upstream project. A typo fix, a docstring, a test.
+That is how a course about vLLM should end.
+
+---
+
+## 12. The batch-invariance problem
+
+Two bf16 runs that differ only in the order of additions (because the batch
+size changed) disagree at about 2% of token positions. Users report this as
+"the same prompt gives different text when the server is busy."
+
+This is a current, open problem. Floating-point addition is not associative:
+`(a + b) + c ≠ a + (b + c)` in general. When the batch size changes, the
+reduction tree inside a matmul changes, and the rounding changes with it.
+The difference is tiny in logits (≈ 1e-6) but large enough to flip the
+argmax at about 2% of positions.
+
+**Why this matters for a serving engine.** A user who sends the same prompt
+twice, with the same seed, expects the same text. If the server was busier on
+the second call, a different batch size means a different reduction order,
+which means different logits, which means different tokens. This breaks
+reproducibility, and there is no simple fix.
+
+**What you can do.** Measure it: run the same prompt at batch 1 and batch 32
+with the same seed. Count the positions that differ. If the rate is above zero,
+you now know why, and you can explain it in an interview.
+
+---
+
+## 13. The Engine Process Split (vLLM V1)
+
+In early serving engines (including vLLM v0 and stage 15/27 in single-process mode),
+the HTTP server (FastAPI/Uvicorn), detokenizer, and GPU execution loop share
+a single Python interpreter. Even with worker threads, the Python Global Interpreter
+Lock (GIL) and garbage collection create execution bubbles:
+
+1. **GIL Contention:** Serializing a large JSON response or decoding token strings
+   in the event loop blocks the worker thread from submitting the next GPU step.
+2. **GC Pauses:** Allocation and cleanup of thousands of request objects pauses
+   all Python threads, starving the GPU and dropping SM utilization.
+
+vLLM V1 moved the engine loop into a completely isolated child process communicating
+over non-blocking IPC queues. The main process handles HTTP connections, request
+parsing, and token streaming, while the child process runs CUDA graph steps without
+interruption. You can run this mode via `./vc serve --multiprocess` or inspect
+`ProcessEngineWorker` in `app/s27_serve.py`.
+
+---
+
+## 14. Cache-Aware Scheduling and Goodput
+
+Two concepts distinguish production engines from toys:
+
+- **Cache-Aware Scheduling:** Standard Orca-style schedulers admit waiting requests
+  strictly FIFO (First-Come, First-Served). But when a prefix cache is present,
+  different waiting requests hit different amounts of precomputed KV blocks.
+  Admitting a request with a 100-token cached prefix costs 1/10th the prefill time
+  and requires fewer fresh blocks than a cold request. Cache-aware admission scores
+  candidates in the queue and schedules prefix hits first, maximizing overall
+  cluster capacity.
+- **Goodput over Raw Throughput:** Benchmarking batch-at-once raw tokens/sec ignores
+  real user service level objectives (SLOs). Goodput measures output tokens per second
+  that actually arrive within target Time-To-First-Token (TTFT) and Inter-Token-Latency (ITL)
+  deadlines. If an engine delivers 10,000 tok/s but every client experiences 5-second
+  jitters, the goodput is 0. Stage 28 gates on goodput under continuous load.
+
+---
+
+## 15. CUDA Graphs vs. Prefix Caching: The Replay Hazard and Staging Buffers
+
+CUDA Graphs (stage 23) eliminate CPU kernel launch overhead by baking an entire execution graph
+of thousands of GPU operations into hardware command buffers. But combining CUDA Graphs with
+dynamic prefix caching (stage 09/22) introduces a critical memory hazard:
+
+### The Replay Hazard
+At graph capture time, tensor memory addresses are permanently fixed. During decoding,
+different requests share or acquire physical KV blocks dynamically via prefix caching.
+If you pass the new block tables into the graph's static input tensors:
+1. **The Block 0 Corruption Trap:** Padded batch rows MUST have `slot_mapping = -1` and
+   `context_len = 0`. If a padding row accidentally writes to slot `0` or references block `0`,
+   the graph kernel will write garbage KV entries into block 0, which belongs to a live sequence!
+   This corrupts other users' cached prefixes silently.
+2. **Race Conditions & Stale Pointers:** If host-to-device transfers are dispatched asynchronously
+   without stream synchronization, `graph.replay()` will launch immediately and execute
+   attention against stale, half-copied block table indices.
+
+### Persistent Pinned Staging Buffers
+In naive implementations:
+```python
+host = torch.tensor([token_ids, positions, slots, context_lens])
+device_tensor.copy_(host, non_blocking=True)
+```
+Every step calls the CPU memory allocator to create a brand new unpinned host tensor.
+Because the memory is unpinned (pageable), the CUDA driver cannot perform asynchronous DMA;
+it falls back to a synchronous copy that stalls the CPU worker thread.
+Production engines use **pre-allocated pinned host memory staging buffers** (`pin_memory=True`):
+```python
+staging.token_ids.copy_(token_ids)
+device.token_ids.copy_(staging.token_ids, non_blocking=True)
+torch.cuda.current_stream().synchronize()  # Guarantee visibility before graph.replay()
+```
+This guarantees zero CPU allocations during decode, true asynchronous DMA transfer,
+and complete memory safety before graph execution.
+
+---
+
+## 16. Chunked Prefill, Decode Interference, and SM Partitioning
+
+Mixed batching (running prefill and decode simultaneously in one step) solves the prefill bubble
+problem, but introduces a severe hardware contention problem: **Streaming Multiprocessor (SM) Starvation**.
+
+### The Arithmetic Asymmetry
+- **Prefill:** Compute-bound matrix multiplication (GEMM: $M \times K \times N$ where $M$ is prompt length).
+  High arithmetic intensity ($\approx 100\text{ FLOP/byte}$). Prefill kernels launch hundreds of
+  thread blocks that saturate all SMs and Tensor Cores for tens of milliseconds.
+- **Decode:** Memory-bandwidth-bound matrix-vector multiplication (GEMV: $M = 1$).
+  Low arithmetic intensity ($\approx 1\text{ FLOP/byte}$). Decode requests are latency-critical:
+  users expect Inter-Token Latency (ITL) under 20-30 ms.
+
+### The Interference Trap
+When a 2,048-token prefill shares a step with 16 decode streams:
+The prefill GEMM waves occupy every SM on the GPU. The small decode thread blocks are queued
+behind prefill waves in the hardware scheduler. Decode tokens that normally take 2 ms to compute
+are delayed by 50-100 ms, causing massive ITL spikes (p99 latency collapse).
+
+### How Production Engines Fix It
+1. **Chunked Prefill (Stage 21/22):** Break long prefills into chunks capped by a strict `token_budget`
+   (e.g., 512 tokens). No single prefill wave can monopolize the GPU indefinitely.
+2. **SM Partitioning (CUDA Green Contexts / MPS):** Modern GPUs allow dividing hardware SMs
+   into isolated partitions. For example, reserve 20% of SMs exclusively for decode kernels
+   so decode ITL is completely immune to prefill compute storms.
+3. **Disaggregated Prefill-Decode (Splitwise / Mooncake):** Separate physical GPU clusters for prefill
+   and decode, transferring KV blocks across nodes over high-speed RDMA InfiniBand networks.
+
+---
+
+## 17. Tree-Attention Speculative Decoding (EAGLE & Medusa)
+
+Stage 17 demonstrated linear speculative decoding: draft $K$ tokens in a sequence, verify them
+in one target forward pass. But linear drafting suffers from exponential decay:
+$$\text{Expected accepted tokens} = \sum_{i=1}^K a^i$$
+If per-token acceptance rate $a = 0.6$, the probability of accepting 5 consecutive tokens is $0.6^5 \approx 7.7\%$.
+Beyond $K=4$, linear drafting pays compute to generate draft tokens that are almost always discarded.
+
+### Multi-Branch Tree Speculation
+Modern speculative engines (Medusa, EAGLE, SpecInfer) propose a **tree of candidate hypotheses**
+rather than a single chain. For example, propose 3 candidates for token 1, and 2 candidates for
+each branch of token 2, creating a tree of 16 candidate tokens.
+All 16 candidate tokens are verified simultaneously in **ONE target model forward pass**!
+
+### The 2D Tree Attention Mask
+To evaluate multiple branching hypotheses without cross-branch interference, the target model
+uses a custom 2D attention mask:
+- Candidate token $i$ can attend to candidate token $j$ if and only if $j$ is an ancestor of $i$
+  in the draft tree (or $j == i$).
+- Sibling branches cannot attend to each other ($M[i, j] = 0$).
+- All candidate tokens attend to the full shared prompt prefix.
+The target model verifies all candidate paths in parallel and accepts the longest valid path,
+emitting the accepted tokens plus one bonus token from the winning leaf.
+
+---
+
+## 18. Virtual Memory Management with `cuMemMap` (vLLM V1)
+
+In stage 06, we built a `BlockAllocator` managing logical blocks within a contiguous PyTorch tensor:
+```python
+kv_cache = torch.empty((num_layers, 2, num_blocks, block_size, num_kv_heads, head_dim), device="cuda")
+```
+This is how vLLM v0 worked. In production, this static contiguous allocation has severe limitations:
+
+### The Fragmentation Bottleneck
+1. **Contiguous Allocation Failure:** Allocating a 30 GB contiguous tensor at startup requires a single
+   unbroken slab of virtual and physical VRAM. If weight loading or CUDA runtime initialization
+   fragments VRAM, the allocation fails with CUDA OOM even if 35 GB of VRAM is free!
+2. **Static Pool Sizing:** You cannot dynamically expand the KV cache pool without reallocating
+   the entire tensor and copying gigabytes of existing KV data.
+
+### Low-Level Driver VMM Architecture
+vLLM V1 rebuilt memory management using CUDA low-level Virtual Memory Management driver APIs:
+1. **`cuMemAddressReserve`:** Reserve a huge contiguous range of *virtual address space*
+   (e.g., 128 GB) at zero physical memory cost. (Virtual address space is 48-bit and practically infinite).
+2. **`cuMemCreate`:** Allocate physical memory chunks in fixed 2MB pages (`CUmemGenericAllocationHandle`).
+3. **`cuMemMap`:** Map physical pages into arbitrary virtual address ranges on demand.
+4. **`cuMemSetAccess`:** Set GPU read/write permissions for the mapped ranges.
+5. **`cuMemUnmap`:** Decouple physical pages from virtual address space instantly when blocks are freed.
+
+This architecture completely decouples virtual addresses from physical GPU memory. The KV cache
+can grow and shrink page by page, physical pages can be remapped without copying data, and contiguous
+memory fragmentation is eliminated entirely.
+
+---
+
+## 19. GPU Profiling with Nsight Systems & Nsight Compute
+
+In a production engine, you do not optimize based on intuition. You optimize based on hardware counters.
+
+### Whole-System Timelines: `./vc nsys` (Nsight Systems)
+Nsight Systems exposes the **interaction between CPU runtime and GPU hardware queues**:
+1. **Launch Latency Bubbles:** If the CPU scheduler takes 2 ms between steps, the GPU timeline
+   shows an empty gap. Even if your kernel is 100% optimal, the card is idle.
+2. **Transfer Synchronization:** Asynchronous host-to-device transfers must happen on a stream.
+   If unpinned memory is passed, the transfer becomes synchronous and halts the event loop.
+
+### Kernel Deep-Dives: `./vc ncu` (Nsight Compute)
+Nsight Compute inspects SM internal execution. Five counters define a kernel:
+- `dram__bytes.sum.per_second`: Achieved memory bandwidth.
+- `smsp__average_data_bytes_per_sector_mem_global_op_ld.pct`: Global memory coalescing efficiency.
+- `sm__warps_active.avg.pct_of_peak_sustained_active`: Achieved occupancy.
+- `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`: Shared memory bank serialization.
+- `smsp__warp_issue_stalled_barrier_pct`: Warps waiting at synchronization points.
+
+---
+
+## 20. Modern C++ & Tensor Cores (CUTLASS vs. Hand-Written CUDA)
+
+Stage 08 implemented paged attention using scalar arithmetic on CUDA cores. In production AI
+infrastructure, almost all matrix multiplications run on **Tensor Cores**.
+
+### SIMT vs. Cooperative Matrix Multiply
+- **CUDA Cores:** Thread-independent scalar operations. Each thread issues its own arithmetic.
+- **Ampere / Ada Tensor Cores (HMMA):** 32 threads in a warp collaborate to execute matrix multiplication
+  via `mma.sync.aligned.m16n8k16` in hardware registers.
+- **Hopper / Blackwell Tensor Cores (WGMMA):** 128 threads in a Warp Group execute asynchronous
+  matrix multiplications (`wgmma.mma_async`), reading directly from shared memory without register staging.
+
+### Why Systems Engineers Use CUTLASS
+Writing raw PTX for Tensor Cores requires manual software pipelining and bank conflict resolution.
+NVIDIA's **CUTLASS** library decouples these using C++ templates:
+- **Tiling:** Divides GEMMs into Threadblock-level, Warp-level, and Instruction-level tiles.
+- **Collective Pipelines:** Automates multi-stage shared memory buffering.
+- **Epilogues:** Fuses activation functions, bias additions, and scaling directly into the output pass.
+
+---
+
+## 21. TensorRT-LLM vs. vLLM: The Dual-Engine Universe
+
+When deploying models on NVIDIA silicon, two systems dominate the landscape:
+**vLLM** (open-source Python/C++ engine) and **TensorRT-LLM** (NVIDIA's specialized C++ inference engine).
+
+The architectures are twins expressed in different languages:
+- `vLLM Scheduler` corresponds to TensorRT-LLM's `GptManager` and `BatchingManager`.
+- `vLLM BlockManager` corresponds to TensorRT-LLM's `KvCacheManager`.
+- `vLLM PagedAttention` corresponds to TensorRT-LLM's `PagedKvCache` and masked attention plugins.
+- `vLLM CUDA Graphs` corresponds to TensorRT's compiled `.engine` execution plan.
+
+Understanding `vllm-from-scratch` gives you the exact blueprint required to navigate, profile, and optimize both ecosystems.
+
+

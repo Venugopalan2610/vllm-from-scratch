@@ -13,6 +13,7 @@ from app.s06_blocks import (
     BlockAllocator,
     BlockTable,
     OutOfBlocks,
+    VirtualMemoryBlockManager,
     capacity_contiguous,
     capacity_paged,
 )
@@ -207,3 +208,29 @@ def test_internal_waste_is_under_one_block(hf):
           f"{used_slots} slots used")
     print(f"  waste: {waste} tokens = {waste / len(seq_lens):.1f} for each "
           f"sequence (the limit is block_size-1 = {block_size - 1})")
+
+
+def test_virtual_memory_cu_mem_map_lifecycle():
+    """vLLM V1 architecture: dynamic physical page mapping (cuMemMap).
+    Virtual address space is reserved up-front, while physical GPU pages are mapped/unmapped
+    dynamically on demand without tensor reallocation or VRAM fragmentation."""
+    # Reserve a 64-block virtual space
+    vmm = VirtualMemoryBlockManager(virtual_capacity_blocks=64, page_size_blocks=16)
+    assert vmm.virtual_address_reserved is True
+    assert vmm.physical_pages_in_use == 0
+
+    # Dynamically allocate and map physical pages to virtual slots 0 and 5
+    h0 = vmm.map_page(0)
+    h5 = vmm.map_page(5)
+    assert h0 != h5
+    assert vmm.physical_pages_in_use == 2
+
+    # Mapping same virtual page returns the existing physical allocation handle
+    assert vmm.map_page(0) == h0
+
+    # Unmap virtual page 0 (simulates cuMemUnmap and freeing physical page)
+    vmm.unmap_page(0)
+    assert vmm.physical_pages_in_use == 1
+
+    # Virtual slot 5 remains valid and mapped
+    assert 5 in vmm.mapped_physical_pages

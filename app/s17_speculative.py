@@ -12,6 +12,13 @@ target, and accept the longest correct prefix.
 The important part: this is LOSSLESS. Modified rejection sampling makes the
 distribution of the output exactly that of the target model, however bad
 the draft is. A bad draft costs speed, never quality.
+
+**Limitation.** This stage uses n-gram drafting, which works well on copy
+tasks and repetitive text. Real deployments use a draft model, EAGLE, or
+MTP heads, and the hard parts are batched speculation with a paged cache,
+KV rollback on rejection, and interaction with chunked prefill and
+preemption. The 1.5x speedup on a copy task does not predict deployment
+gains on diverse traffic.
 """
 
 import torch
@@ -88,3 +95,18 @@ def expected_speedup(acceptance_rate, num_draft, draft_cost_ratio=0.0):
     because the 8th token needs 8 acceptances in sequence.
     """
     raise NotImplementedError("stage 17: implement expected_speedup")
+
+
+def build_tree_mask(tree_parents, prefix_len=0, device="cpu"):
+    """Construct a 2D causal attention mask for tree-based speculative decoding (e.g. Medusa, EAGLE).
+
+    In tree speculation, draft tokens form a tree of candidate hypotheses rather than a
+    linear chain. All candidate tokens in the tree are evaluated simultaneously in ONE
+    target model forward pass.
+    """
+    raise NotImplementedError("stage 17: implement build_tree_mask")
+
+
+def verify_tree_greedy(logits_rows, tree_tokens, tree_parents):
+    """Greedy verification for tree speculative decoding."""
+    raise NotImplementedError("stage 17: implement verify_tree_greedy")

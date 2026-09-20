@@ -6,21 +6,38 @@ cd "$(dirname "$0")"
 # One list for both paths below, so that local and hosted setups stay the
 # same.
 #
-# transformers has a minimum version because Qwen3 needs 4.51+, and a hosted
-# notebook can have an older one. The other packages accept the version that
-# they find.
+# THE VERSIONS ARE PINNED ON PURPOSE. The checks of stages 01, 02, 17 and 25
+# compare your tokens with `model.generate` of transformers, and that API and
+# its cache classes change between releases. An unpinned course breaks for a
+# learner who starts it six months later, and the failure looks like their
+# code. These are the versions that the check counts in README.md come from.
+#
+#   ./setup.sh --latest     take the newest of everything instead
+#
 # ninja is necessary: torch.utils.cpp_extension runs it to build the CUDA
 # stages. Without it, stages 08, 08b, 08c, 18b and 24b cannot compile.
-DEPS=(torch "transformers>=4.51" accelerate safetensors numpy ninja
-      pytest pytest-timeout pytest-asyncio pyyaml rich
-      fastapi uvicorn httpx sse-starlette huggingface_hub
-      matplotlib matplotlib-inline jupyterlab nbformat nbclient ipykernel)
+PINNED=(torch==2.13.0 transformers==5.14.1 accelerate==1.14.0
+        safetensors==0.8.0 numpy==2.5.1 ninja==1.13.2 pytest==9.1.1
+        matplotlib==3.11.2 nbformat==5.11.1 nbclient==0.11.0 rich==15.0.0)
+UNPINNED=(pytest-timeout==2.3.1 pytest-asyncio==1.0.0 pyyaml==6.0.2
+          fastapi==0.115.12 uvicorn==0.34.3 httpx==0.28.1
+          sse-starlette==2.3.6 huggingface_hub==0.33.0
+          matplotlib-inline==0.1.7 jupyterlab==4.4.3 ipykernel==6.30.0)
+DEPS=("${PINNED[@]}" "${UNPINNED[@]}")
+for argument in "$@"; do
+  if [ "$argument" = "--latest" ]; then
+    DEPS=(torch "transformers>=4.51" accelerate safetensors numpy ninja
+          "${UNPINNED[@]}" pytest matplotlib nbformat nbclient rich)
+    echo "==> --latest: the versions are not pinned. A check that fails may be"
+    echo "    a change in a library, not your code."
+  fi
+done
 
 # The JAX track is optional: `./setup.sh --jax`. It is about 400MB more, and
 # half the ladder (allocator, scheduler, detokenizer, ...) uses no framework
 # and needs none of it. cuda13 matches the torch wheel of this repo. On an
 # older driver, use jax[cuda12].
-JAX_DEPS=("jax[cuda13]")
+JAX_DEPS=("jax[cuda13]==0.11.0")
 WANT_JAX=0
 for argument in "$@"; do [ "$argument" = "--jax" ] && WANT_JAX=1; done
 
@@ -99,6 +116,10 @@ kind = compat.pallas_backend()
 print(f"   pallas backend: {kind or 'NONE: stage 08 skips'}")
 PY
 fi
+
+echo
+echo "==> what this machine can run"
+.venv/bin/python runner/doctor.py || true
 
 echo
 echo "Done.  Start with:   ./vc"

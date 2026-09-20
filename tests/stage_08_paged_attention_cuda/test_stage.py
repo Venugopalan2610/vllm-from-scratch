@@ -186,3 +186,55 @@ def test_how_much_of_the_card_you_are_using(nvcc, device):
     print("  32 threads of a warp ask for 32 scattered rows at one time. The")
     print("  bytes arrive. The requests are what you spent too much of.")
     print("  Stage 08b.\033[0m")
+
+
+def test_compare_with_flash_attention(nvcc, device):
+    """Print-only comparison with torch SDPA (which uses FlashAttention or
+    efficient attention under the hood). Your kernel is a teaching kernel.
+    A production kernel (FlashAttention-3, FlashInfer) is 3x to 10x faster.
+    A student who knows the size of this gap is useful. A student who thinks
+    their kernel is production quality is not."""
+    import torch.nn.functional as F
+
+    num_seqs, num_heads, num_kv_heads, head_dim = 32, 16, 8, 128
+    context_len = 1024
+    query, keys, values, paged_cache = paged_problem(
+        num_seqs, num_heads, num_kv_heads, head_dim, context_len, 16,
+        device, torch.float16)
+    cuda_ms = bench_ms(lambda: paged_attention_cuda(query, *paged_cache))
+    # Dense SDPA as a proxy for FlashAttention
+    q = query.unsqueeze(2)               # (seqs, heads, 1, D)
+    k = keys.unsqueeze(1).expand(-1, num_heads // num_kv_heads, -1, -1, -1)
+    k = k.reshape(num_seqs, num_heads, context_len, head_dim)
+    v = values.unsqueeze(1).expand(-1, num_heads // num_kv_heads, -1, -1, -1)
+    v = v.reshape(num_seqs, num_heads, context_len, head_dim)
+    sdpa_ms = bench_ms(lambda: F.scaled_dot_product_attention(
+        q, k, v, is_causal=False))
+    ratio = cuda_ms / sdpa_ms
+    print(f"\n  your kernel:    {cuda_ms:.3f} ms")
+    print(f"  torch SDPA:     {sdpa_ms:.3f} ms  (uses FlashAttention/efficient)")
+    print(f"  gap:            {ratio:.1f}x slower")
+    print("  This is expected. A production paged-attention kernel has")
+    print("  bank-conflict-free shared memory, multi-stage pipelines, and")
+    print("  months of tuning. The gap is the point of this comparison.")
+    # NOT a gate: this is informational only
+
+
+@pytest.mark.parametrize("model_name,num_heads,num_kv_heads,head_dim", [
+    ("Qwen3-0.6B", 16, 8, 128),
+    ("Llama-3.2-1B", 32, 8, 64),
+])
+def test_architecture_shapes_qwen_and_llama(nvcc, device, model_name,
+                                            num_heads, num_kv_heads, head_dim):
+    """Parametrize over both Qwen3-0.6B (head_dim 128, GQA 16/8) and
+    Llama-3.2-1B (head_dim 64, GQA 32/8). Production breaks on shapes that
+    a single model hides."""
+    query, keys, values, paged_cache = paged_problem(
+        2, num_heads, num_kv_heads, head_dim, 64, 16, device, torch.float16)
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               paged_attention(query, *paged_cache),
+                               **KERNEL_TOLERANCE)
+    torch.testing.assert_close(paged_attention_cuda(query, *paged_cache),
+                               reference_attention(query, keys, values),
+                               rtol=3e-3, atol=3e-3)
+

@@ -16,8 +16,8 @@
     vc lore [stage]  the one-paragraph insight of a stage
     vc info          the roofline of your GPU
     vc math [B] [n]  read and compute times, with every division shown
-    vc cliff         the bandwidth cliff between L2 and VRAM
     vc ncu [stage]   the hardware counters of the kernel of a CUDA stage
+    vc nsys          timeline trace of the engine using NVIDIA Nsight Systems
     vc bench         your capstone engine against the roof of this card
     vc serve         your capstone server, on localhost:8000
     vc peek [stage]  show the reference solution (from the solutions branch)
@@ -465,7 +465,8 @@ def commit_stage(stage, progress):
 def cmd_submit(ladder, progress):
     stage = current_stage(ladder, progress)
     if not stage:
-        print("\n" + paint("All stages complete. You built vLLM.", "bold") + "\n")
+        print("\n" + paint("All stages complete. You built a single-GPU "
+                           "inference engine inspired by vLLM.", "bold") + "\n")
         return 0
     print_run_header("Submission: stage", stage, progress)
     return_code, passed, failed, output, result = run_and_record(stage, progress)
@@ -711,8 +712,10 @@ def cmd_reset(ladder, progress, stage_id):
 
 # The commands that run a script of their own, with the other arguments.
 SCRIPTS = {"info": "envinfo.py", "cliff": "cliff.py", "ncu": "ncu.py",
-           "bench": "bench.py", "serve": "serve.py", "math": "timings.py"}
-NO_ARGUMENTS = ("info", "cliff")
+           "nsys": "nsys.py",
+           "bench": "bench.py", "serve": "serve.py", "math": "timings.py",
+           "doctor": "doctor.py"}
+NO_ARGUMENTS = ("info", "cliff", "doctor", "nsys")
 
 
 def run_script(command, arguments):

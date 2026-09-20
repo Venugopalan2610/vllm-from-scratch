@@ -175,7 +175,8 @@ def after_peek():
 
 def finished(progress):
     total_runs = sum(record["runs"] for record in records(progress).values())
-    return [("You built vLLM. Every stage passes.", ("bold", "green")),
+    return [("Every stage passes. You built a single-GPU inference engine "
+             "inspired by vLLM.", ("bold", "green")),
             (f"{total_runs} runs of the checks. Each stage was better than the "
              "one before it.", ()),
             (MOTTO, ("cyan",))]
