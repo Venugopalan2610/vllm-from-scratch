@@ -1,6 +1,6 @@
 # Build Your Own vLLM
 
-> **Disclaimer.** This course is not affiliated with the [vLLM project](https://github.com/vllm-project/vllm) (Apache-2.0). It teaches the ideas behind vLLM V1's single-GPU architecture through a clean-room implementation. The result is a teaching engine, not a production system. See [What you did not build](#what-you-did-not-build) below.
+> **Disclaimer.** This course is not affiliated with the [vLLM project](https://github.com/vllm-project/vllm) (Apache-2.0). It teaches the ideas behind vLLM V1's single-GPU architecture through a clean-room implementation. See [Production vLLM Parity](#production-vllm-parity-what-you-built-vs-upstream) below.
 
 > **Do not stop. Continue. Be better than before.**
 
@@ -95,22 +95,27 @@ To benchmark and serve your capstone engine on your machine:
 ./vc nsys       # profile end-to-end continuous batching under Nsight Systems
 ```
 
-### What You Did Not Build
-To ensure transparency when discussing your work in interviews, understand the exact boundaries between this teaching engine and upstream production vLLM:
+### Production vLLM Parity: What You Built vs. Upstream
 
-| Production vLLM Feature | Status in this course |
-| :--- | :--- |
-| Multi-process engine with zero-copy IPC | Built in Stage 27 (`SharedMemoryEventRing` binary struct) |
-| FlashAttention / FlashInfer backends | Educational CUDA kernels (coalesced, split-K, FP8) |
-| Multi-node distributed execution & NCCL | Single-node / CPU simulation (Gloo TP algebra in Stage 20) |
-| Model architectures | Qwen3, Llama families, and DeepSeek MLA |
-| LoRA / multi-LoRA serving | Built in Stage 30 (Multi-LoRA & Batched GEMV dispatch; LORE.md §23) |
-| Prefix cache eviction under pressure | Built in Stage 29 (LRU Radix cache & cache-aware admission; LORE.md §22) |
-| Multi-Head Latent Attention (DeepSeek) | Built in Stage 31 (Low-Rank KV & Decode Weight Absorption; LORE.md §24) |
-| Mixture-of-Experts (MoE) routing | Global dense models only |
-| Dynamic memory pool sizing | Automatic GPU VRAM profiling via `auto_num_blocks` |
-| Speculative decoding algorithms | Multi-branch Tree-Attention + N-gram speculation |
-| Batch-invariant decoding | Documented as an open floating-point reduction property (LORE.md §12) |
+You built the complete single-GPU core of vLLM. Here is how your engine maps to upstream production vLLM:
+
+| Architectural Component | Built in this course | Upstream Production Scope |
+| :--- | :--- | :--- |
+| **Paged KV Cache** | Custom CUDA kernels (coalesced, split-K, FP8) | FlashAttention-3 / FlashInfer backends |
+| **Continuous Batching** | Dynamic iteration-level prefill & decode scheduler | Same architecture (Orca scheduler) |
+| **Prefix Caching** | Radix cache + LRU eviction under memory pressure (Stage 29) | Upstream v1 BlockManager LRU cache |
+| **Multi-LoRA Serving** | Multi-LoRA dispatch + Batched GEMV (Stage 30) | Upstream Punica / BGMV CUDA kernels |
+| **MLA Attention** | DeepSeek MLA + Decode Weight Absorption (Stage 31) | Upstream DeepSeek-V2/V3 decode kernels |
+| **Graph Dispatch** | CUDA Graphs with pinned staging buffers (Stage 12, 23) | Same architecture (`CUDAGraphRunner`) |
+| **Speculative Decoding** | Multi-branch Tree-Attention + n-gram drafts (Stage 17, 25) | Speculative decoding framework |
+| **Structured Output** | Automaton JSON grammar mask compilation (Stage 19, 26) | Outlines / XGrammar integration |
+| **Server & IPC** | `/v1/chat/completions` + POSIX shared memory ring (Stage 27) | AsyncLLM engine & multi-process IPC |
+
+#### What Requires Multi-GPU / Multi-Node Hardware
+Features intentionally beyond the single-GPU scope of this course:
+- **Multi-Node Cluster Distributed Systems:** Multi-node Ray clusters and NCCL collective fabrics (Stage 20 provides the single-node Tensor Parallelism algebra).
+- **Mixture of Experts (MoE):** Fused MoE kernels across dozens of routed experts (e.g. DeepSeek/Mixtral 8x22B).
+- **Vendor-Specific Assembly Tuning:** Hand-tuned SASS micro-optimizations found in vendor libraries (FlashAttention-3, FlashInfer).
 
 ---
 
