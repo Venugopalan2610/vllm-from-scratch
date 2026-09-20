@@ -230,6 +230,8 @@ class VcTUI:
         curses.endwin()
         try:
             subprocess.run(cmd)
+        except KeyboardInterrupt:
+            pass
         except Exception as e:
             self.console_lines.append(f"Error launching editor {editor}: {e}")
         finally:

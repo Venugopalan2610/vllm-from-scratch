@@ -722,45 +722,51 @@ NO_ARGUMENTS = ("info", "cliff", "doctor", "nsys", "tui", "ui")
 def run_script(command, arguments):
     extra = [] if command in NO_ARGUMENTS else arguments
     script = ROOT / "runner" / SCRIPTS[command]
-    return subprocess.run([str(PYTHON), str(script)] + extra,
-                          cwd=ROOT).returncode
+    try:
+        return subprocess.run([str(PYTHON), str(script)] + extra,
+                              cwd=ROOT).returncode
+    except KeyboardInterrupt:
+        return 130
 
 
 def main():
-    arguments = sys.argv[1:]
-    command = arguments[0] if arguments else "status"
-    if command in SCRIPTS:
-        sys.exit(run_script(command, arguments[1:]))
+    try:
+        arguments = sys.argv[1:]
+        command = arguments[0] if arguments else "status"
+        if command in SCRIPTS:
+            sys.exit(run_script(command, arguments[1:]))
 
-    stage_id = next((a for a in arguments[1:] if not a.startswith("-")), None)
-    progress = load_progress()
-    # `--jax` or `--torch` on a command: use the other track for this command
-    # ONLY. Useful for `./vc test 8 --jax` while you work in torch.
-    for backend in BACKENDS:
-        if f"--{backend}" in arguments:
-            set_backend(progress, backend)
-    # Each track has its own ladder: the CUDA stages are not on the JAX one.
-    _, ladder = load_stages(progress["backend"])
+        stage_id = next((a for a in arguments[1:] if not a.startswith("-")), None)
+        progress = load_progress()
+        # `--jax` or `--torch` on a command: use the other track for this command
+        # ONLY. Useful for `./vc test 8 --jax` while you work in torch.
+        for backend in BACKENDS:
+            if f"--{backend}" in arguments:
+                set_backend(progress, backend)
+        # Each track has its own ladder: the CUDA stages are not on the JAX one.
+        _, ladder = load_stages(progress["backend"])
 
-    commands = {
-        "backend": lambda: cmd_backend(ladder, progress, stage_id),
-        "status": lambda: cmd_status(ladder, progress),
-        "guide": lambda: cmd_guide(ladder, progress, stage_id),
-        "start": lambda: cmd_guide(ladder, progress, stage_id),
-        "test": lambda: cmd_test(ladder, progress, stage_id),
-        "submit": lambda: cmd_submit(ladder, progress),
-        "list": lambda: cmd_list(ladder, progress),
-        "ls": lambda: cmd_list(ladder, progress),
-        "lore": lambda: cmd_lore(ladder, progress, stage_id),
-        "peek": lambda: (cmd_peek_apply(ladder, progress, stage_id)
-                         if "--apply" in arguments
-                         else cmd_peek(ladder, progress, stage_id)),
-        "reset": lambda: cmd_reset(ladder, progress, stage_id),
-    }
-    if command not in commands:
-        print(__doc__)
-        sys.exit(1)
-    sys.exit(commands[command]() or 0)
+        commands = {
+            "backend": lambda: cmd_backend(ladder, progress, stage_id),
+            "status": lambda: cmd_status(ladder, progress),
+            "guide": lambda: cmd_guide(ladder, progress, stage_id),
+            "start": lambda: cmd_guide(ladder, progress, stage_id),
+            "test": lambda: cmd_test(ladder, progress, stage_id),
+            "submit": lambda: cmd_submit(ladder, progress),
+            "list": lambda: cmd_list(ladder, progress),
+            "ls": lambda: cmd_list(ladder, progress),
+            "lore": lambda: cmd_lore(ladder, progress, stage_id),
+            "peek": lambda: (cmd_peek_apply(ladder, progress, stage_id)
+                             if "--apply" in arguments
+                             else cmd_peek(ladder, progress, stage_id)),
+            "reset": lambda: cmd_reset(ladder, progress, stage_id),
+        }
+        if command not in commands:
+            print(__doc__)
+            sys.exit(1)
+        sys.exit(commands[command]() or 0)
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":
