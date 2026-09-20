@@ -21,7 +21,6 @@ from runner.cli import (
     BACKENDS,
     checks_for,
     commit_stage,
-    is_completed,
     load_progress,
     load_stages,
     run_checks,
@@ -31,6 +30,10 @@ from runner.cli import (
     stage_name,
 )
 from runner.glossary import terms_for_stage
+
+
+def is_completed(stage, progress):
+    return stage["id"] in progress["completed"]
 
 
 def get_gpu_info():
@@ -73,23 +76,35 @@ class VcTUI:
                 break
 
     def init_colors(self):
-        curses.start_color()
-        curses.use_default_colors()
-        # Pair IDs:
-        # 1: Cyan / default (active/headers)
-        # 2: Green / default (completed/success)
-        # 3: Yellow / default (warning/stars)
-        # 4: Red / default (failed/error)
-        # 5: Magenta / default (arcs)
-        # 6: Black / Cyan (selected row highlight)
-        # 7: Dim text
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_GREEN, -1)
-        curses.init_pair(3, curses.COLOR_YELLOW, -1)
-        curses.init_pair(4, curses.COLOR_RED, -1)
-        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
-        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(7, curses.COLOR_WHITE, -1)
+        if not curses.has_colors():
+            return
+        try:
+            curses.start_color()
+        except Exception:
+            pass
+        try:
+            curses.use_default_colors()
+            bg = -1
+        except Exception:
+            bg = curses.COLOR_BLACK
+
+        pairs = [
+            (1, curses.COLOR_CYAN, bg),
+            (2, curses.COLOR_GREEN, bg),
+            (3, curses.COLOR_YELLOW, bg),
+            (4, curses.COLOR_RED, bg),
+            (5, curses.COLOR_MAGENTA, bg),
+            (6, curses.COLOR_BLACK, curses.COLOR_CYAN),
+            (7, curses.COLOR_WHITE, bg),
+        ]
+        for pair_id, fg, b in pairs:
+            try:
+                curses.init_pair(pair_id, fg, b)
+            except Exception:
+                try:
+                    curses.init_pair(pair_id, fg, curses.COLOR_BLACK)
+                except Exception:
+                    pass
 
     def draw_box(self, y, x, h, w, title=""):
         """Draw a sleek box with optional title."""
@@ -335,15 +350,21 @@ class VcTUI:
                 self.stdscr.addstr(content_y + i, left_w + 2, line[:inner_w], color)
 
         # 3. Footer Bar
-        self.stdscr.addstr(max_y - 2, 2, self.status_message[: max_x - 4], curses.color_pair(3) | curses.A_BOLD)
-        help_bar = " [↑/↓/j/k] Select · [t] Test · [s] Submit · [1-5] Tab · [Tab] Backend · [q] Quit"
-        self.stdscr.addstr(max_y - 1, 0, help_bar[:max_x], curses.color_pair(6))
+        try:
+            self.stdscr.addstr(max_y - 2, 2, self.status_message[: max_x - 4], curses.color_pair(3) | curses.A_BOLD)
+            help_bar = " [↑/↓/j/k] Select · [t] Test · [s] Submit · [1-5] Tab · [Tab] Backend · [q] Quit"
+            self.stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(6))
+        except curses.error:
+            pass
 
         self.stdscr.refresh()
 
     def run(self):
         self.init_colors()
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
         self.stdscr.timeout(100)  # non-blocking for responsive UI/threads
 
         while True:
