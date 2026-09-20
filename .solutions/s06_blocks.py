@@ -89,3 +89,43 @@ def capacity_paged(vram_bytes: int, kv_bytes_per_token: int,
         free_slots -= slots_needed
         num_fit += 1
     return num_fit
+
+
+class VirtualMemoryBlockManager:
+    """Architectural demonstration of CUDA Driver Virtual Memory Management (cuMemMap).
+
+    In real vLLM V1, pre-allocating a contiguous PyTorch tensor (e.g. 20GB) causes severe
+    VRAM fragmentation and limits dynamic KV cache pool resizing.
+    Instead, production engines use low-level CUDA driver VMM APIs:
+      1. cuMemAddressReserve: Reserves a large contiguous VIRTUAL address space
+         (e.g., 128 GB) without committing physical GPU memory.
+      2. cuMemCreate: Allocates physical memory chunks in fixed 2MB OS pages.
+      3. cuMemMap: Maps physical pages to arbitrary virtual address ranges.
+      4. cuMemSetAccess: Sets read/write permissions for the device.
+      5. cuMemUnmap / cuMemRelease: Decouples and frees physical pages without
+         moving data or re-allocating tensors.
+    """
+
+    def __init__(self, virtual_capacity_blocks: int, page_size_blocks: int = 16):
+        self.virtual_capacity_blocks = virtual_capacity_blocks
+        self.page_size_blocks = page_size_blocks
+        self.virtual_address_reserved = True
+        self.mapped_physical_pages = {}  # virtual_page_idx -> physical_handle
+        self.next_handle_id = 1
+
+    def map_page(self, virtual_page_idx: int) -> int:
+        """Simulate cuMemCreate + cuMemMap: allocate a physical page and map it."""
+        if virtual_page_idx in self.mapped_physical_pages:
+            return self.mapped_physical_pages[virtual_page_idx]
+        handle = self.next_handle_id
+        self.next_handle_id += 1
+        self.mapped_physical_pages[virtual_page_idx] = handle
+        return handle
+
+    def unmap_page(self, virtual_page_idx: int) -> None:
+        """Simulate cuMemUnmap + cuMemRelease: unmap physical page from virtual space."""
+        self.mapped_physical_pages.pop(virtual_page_idx, None)
+
+    @property
+    def physical_pages_in_use(self) -> int:
+        return len(self.mapped_physical_pages)

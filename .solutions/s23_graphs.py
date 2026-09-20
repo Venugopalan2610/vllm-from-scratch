@@ -46,6 +46,28 @@ class CapturedGraph:
     logits: torch.Tensor
 
 
+@dataclass
+class StagingBuffers:
+    """Pre-allocated pinned host memory buffers for asynchronous zero-copy transfers.
+    Allocating host tensors on every step thrashes the CPU memory allocator and
+    forces synchronous pageable transfers."""
+    token_ids: torch.Tensor
+    positions: torch.Tensor
+    slot_mapping: torch.Tensor
+    context_lens: torch.Tensor
+    block_tables: torch.Tensor
+
+    @classmethod
+    def create(cls, batch_size, max_blocks):
+        return cls(
+            token_ids=torch.empty(batch_size, dtype=torch.long, pin_memory=True),
+            positions=torch.empty(batch_size, dtype=torch.long, pin_memory=True),
+            slot_mapping=torch.empty(batch_size, dtype=torch.long, pin_memory=True),
+            context_lens=torch.empty(batch_size, dtype=torch.int32, pin_memory=True),
+            block_tables=torch.empty((batch_size, max_blocks), dtype=torch.int32, pin_memory=True),
+        )
+
+
 def warm_up(run, times=3):
     """Run once on a side stream, so that the first-call allocations of
     cuBLAS happen before the capture and not inside it."""
@@ -65,6 +87,7 @@ class GraphedModelRunner(ModelRunner):
         self.max_blocks = blocks_for(max_model_len, block_size)
         self.buckets = sorted(buckets)
         self.graphs = {}
+        self.staging = {b: StagingBuffers.create(b, self.max_blocks) for b in self.buckets}
         self.replays = 0
         self.eager_steps = 0
 
@@ -104,7 +127,7 @@ class GraphedModelRunner(ModelRunner):
                 and all(c.is_decode for c in chunks)
                 and self.bucket_for(len(chunks)) is not None)
 
-    def _fill(self, inputs, chunks):
+    def _fill(self, inputs, chunks, staging=None):
         """Copy one decode step into the static tensors. A padding row writes
         to slot -1 and reads an empty context. A zero slot writes into block
         0, which belongs to a real sequence."""
@@ -117,18 +140,34 @@ class GraphedModelRunner(ModelRunner):
                         + [PADDING_CONTEXT] * padding)
         block_tables = pad_rows([c.block_ids for c in chunks] + [[]] * padding,
                                 self.max_blocks)
-        host = torch.tensor([token_ids, positions, slots, context_lens])
-        on_device = host.to(self.device, non_blocking=True)
-        inputs.token_ids.copy_(on_device[0])
-        inputs.positions.copy_(on_device[1])
-        inputs.slot_mapping.copy_(on_device[2])
-        inputs.context_lens.copy_(on_device[3])
-        inputs.block_tables.copy_(torch.tensor(block_tables, dtype=torch.int32),
-                                  non_blocking=True)
+        if staging is not None:
+            staging.token_ids.copy_(torch.tensor(token_ids, dtype=torch.long))
+            staging.positions.copy_(torch.tensor(positions, dtype=torch.long))
+            staging.slot_mapping.copy_(torch.tensor(slots, dtype=torch.long))
+            staging.context_lens.copy_(torch.tensor(context_lens, dtype=torch.int32))
+            staging.block_tables.copy_(torch.tensor(block_tables, dtype=torch.int32))
+
+            inputs.token_ids.copy_(staging.token_ids, non_blocking=True)
+            inputs.positions.copy_(staging.positions, non_blocking=True)
+            inputs.slot_mapping.copy_(staging.slot_mapping, non_blocking=True)
+            inputs.context_lens.copy_(staging.context_lens, non_blocking=True)
+            inputs.block_tables.copy_(staging.block_tables, non_blocking=True)
+        else:
+            host = torch.tensor([token_ids, positions, slots, context_lens])
+            on_device = host.to(self.device, non_blocking=True)
+            inputs.token_ids.copy_(on_device[0])
+            inputs.positions.copy_(on_device[1])
+            inputs.slot_mapping.copy_(on_device[2])
+            inputs.context_lens.copy_(on_device[3])
+            inputs.block_tables.copy_(torch.tensor(block_tables, dtype=torch.int32),
+                                      non_blocking=True)
 
     def _replay(self, chunks):
-        captured = self.graphs[self.bucket_for(len(chunks))]
-        self._fill(captured.inputs, chunks)
+        bucket = self.bucket_for(len(chunks))
+        captured = self.graphs[bucket]
+        staging = self.staging.get(bucket)
+        self._fill(captured.inputs, chunks, staging=staging)
+        torch.cuda.current_stream().synchronize()
         captured.graph.replay()
         self.replays += 1
         return captured.logits[:len(chunks)].clone()   # the next replay overwrites

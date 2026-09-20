@@ -154,3 +154,20 @@ class PrefixCache:
     def evict_all(self):
         while self.block_of_hash:
             self._evict_oldest()
+
+    def match_prefix_len(self, hashes):
+        """Count consecutive prefix block matches without taking references."""
+        count = 0
+        for block_hash in hashes:
+            if block_hash not in self.block_of_hash:
+                break
+            count += 1
+        return count
+
+    def evict_lru(self, count=1):
+        """Evict the oldest LRU blocks under memory pressure."""
+        evicted = 0
+        while self.block_of_hash and evicted < count:
+            self._evict_oldest()
+            evicted += 1
+        return evicted

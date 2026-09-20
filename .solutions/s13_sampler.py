@@ -12,12 +12,23 @@ class SamplingParams:
     temperature: float = 1.0
     top_k: int = 0            # 0 = off
     top_p: float = 1.0        # 1.0 = off
+    min_p: float = 0.0        # 0.0 = off
     repetition_penalty: float = 1.0
     seed: int | None = None
+    logprobs: int | None = None  # None or number of top logprobs to return
 
     @property
     def greedy(self):
         return self.temperature == 0.0
+
+
+def check_logits(logits):
+    """Assert that no logit is NaN."""
+    if torch.isnan(logits).any():
+        raise ValueError(
+            "NaN detected in logits. Common causes: bad quantization scale, "
+            "FP8 calibration overflow, or attention overflow. Check your "
+            "weights and KV cache.")
 
 
 def apply_repetition_penalty(logits, prev_tokens, penalties):
@@ -59,6 +70,20 @@ def apply_top_p(logits, p):
     return logits.masked_fill(remove, float("-inf"))
 
 
+def apply_min_p(logits, min_p):
+    """Filter out tokens whose probability is less than min_p * max_prob.
+    min_p is (rows,). 0.0 turns it off."""
+    if (min_p <= 0).all():
+        return logits
+    probs = torch.softmax(logits, dim=-1)
+    max_prob = probs.max(dim=-1, keepdim=True).values
+    threshold = max_prob * min_p.unsqueeze(1) - 1e-6
+    mask = (probs < threshold) & (min_p.unsqueeze(1) > 0)
+    # Always keep the top token
+    mask.scatter_(1, probs.argmax(dim=-1, keepdim=True), False)
+    return logits.masked_fill(mask, float("-inf"))
+
+
 def row_values(params, field, device, dtype=torch.float32):
     return torch.tensor([getattr(p, field) for p in params], device=device,
                         dtype=dtype)
@@ -84,6 +109,7 @@ def gumbel_noise(uniform):
 
 def sample(logits, params, prev_tokens=None):
     """logits (rows, vocab) -> (rows,) token ids, in one vectorized pass."""
+    check_logits(logits)
     device = logits.device
     scores = logits.float().clone()
     if prev_tokens is not None:
@@ -95,6 +121,7 @@ def sample(logits, params, prev_tokens=None):
     scores = scores / torch.where(greedy, 1.0, temperature).unsqueeze(1)
     scores = apply_top_k(scores, row_values(params, "top_k", device, torch.long))
     scores = apply_top_p(scores, row_values(params, "top_p", device))
+    scores = apply_min_p(scores, row_values(params, "min_p", device))
 
     # Gumbel-max: argmax(logits + Gumbel noise) is an exact categorical draw.
     # It vectorizes. torch.multinomial with a generator for each row does not.

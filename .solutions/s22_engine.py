@@ -9,11 +9,22 @@ import torch
 
 from app.s06_blocks import OutOfBlocks
 from app.s09_prefix import PrefixCache, RefCountedAllocator, block_hashes
-from app.s13_sampler import SamplingParams, sample
+from app.s13_sampler import SamplingParams, check_logits, sample
 from app.s14_detokenizer import IncrementalDetokenizer
 from app.s21_paged_runner import ModelRunner, SeqChunk
 
 WAITING, RUNNING, FINISHED = "waiting", "running", "finished"
+
+
+def auto_num_blocks(model, block_size=16, reserve_bytes=1.5e9):
+    """Profile the GPU and derive the block count from what is free.
+
+    A real engine does this at startup: the pool uses whatever VRAM the
+    model did not take. The tests use a fixed num_blocks so the checks are
+    reproducible, but production code should call this."""
+    free_bytes, _ = torch.cuda.mem_get_info()
+    return int((free_bytes - reserve_bytes)
+               / (model.kv_bytes_per_token() * block_size))
 
 
 class Sequence:
@@ -35,6 +46,7 @@ class Sequence:
         self.draft = []              # stage 25: draft tokens for this step
         self.status = WAITING
         self.finish_reason = None
+        self.output_logprobs = []
 
     @property
     def all_ids(self):
@@ -79,9 +91,13 @@ class KVBlockManager:
         return math.ceil(num_tokens / self.block_size)
 
     def _allocate(self, count):
-        """Drop the prefix cache before you drop work."""
+        """Evict oldest blocks from prefix cache under pressure before dropping all."""
         if count > self.allocator.num_free and self.prefix_cache is not None:
-            self.prefix_cache.evict_all()
+            needed = count - self.allocator.num_free
+            if hasattr(self.prefix_cache, "evict_lru"):
+                self.prefix_cache.evict_lru(needed)
+            if count > self.allocator.num_free:
+                self.prefix_cache.evict_all()
         return self.allocator.allocate(count)
 
     def grow(self, seq, num_tokens):
@@ -189,14 +205,29 @@ class Scheduler:
         return plan, budget
 
     def _admit_one(self, budget):
-        seq = self.waiting[0]
+        # Cache-aware admission: prioritize the request with the longest cached prefix match
+        best_index = 0
+        if self.blocks.prefix_cache is not None and len(self.waiting) > 1:
+            best_hits = -1
+            for i, candidate in enumerate(self.waiting):
+                if candidate.blocks:
+                    hits = candidate.num_cached_blocks
+                else:
+                    usable = (candidate.num_tokens - 1) // self.blocks.block_size * self.blocks.block_size
+                    hashes = block_hashes(candidate.all_ids[:usable], self.blocks.block_size)
+                    hits = (self.blocks.prefix_cache.match_prefix_len(hashes)
+                            if hasattr(self.blocks.prefix_cache, "match_prefix_len") else 0)
+                if hits > best_hits:
+                    best_hits = hits
+                    best_index = i
+        seq = self.waiting[best_index]
         if not seq.blocks:
             self.blocks.take_cached_prefix(seq)
         num_tokens = min(seq.num_pending, budget)
         if not self.blocks.grow(seq, seq.num_computed + num_tokens):
             self.blocks.release(seq)          # give back the cache hits
             return None
-        self.waiting.popleft()
+        del self.waiting[best_index]
         seq.status = RUNNING
         self.running.append(seq)
         if self.on_admit:
@@ -327,6 +358,26 @@ class LLMEngine:
     def output(self, rid):
         return self.seqs[rid].output_ids
 
+    def fork_request(self, parent_rid, child_rid, params=None):
+        """Fork parent_rid into child_rid for n > 1 sampling.
+        Shares physical blocks via reference counting (stage 09). The child
+        shares the computed prefix blocks without recomputing the prompt."""
+        parent = self.seqs[parent_rid]
+        child = Sequence(child_rid, list(parent.prompt_ids), parent.max_tokens,
+                         params or parent.params,
+                         IncrementalDetokenizer(self.tokenizer,
+                                                parent.detokenizer.stop_strings),
+                         parent.ignore_eos, parent.arrival)
+        child.blocks = list(parent.blocks)
+        for b in child.blocks:
+            self.allocator.incref(b)
+        child.num_computed = parent.num_computed
+        child.num_cached_blocks = parent.num_cached_blocks
+        child.status = WAITING
+        self.seqs[child_rid] = child
+        self.scheduler.waiting.append(child)
+        return child
+
     # ------------------------------------------------------------ hooks
     # Stage 25 (speculation) and stage 26 (JSON mode) override these.
 
@@ -374,6 +425,7 @@ class LLMEngine:
 
     def _sample(self, seqs, logits):
         logits = torch.stack([self._mask(s, row) for s, row in zip(seqs, logits)])
+        check_logits(logits)
         if all_greedy(seqs):
             return logits.argmax(-1).tolist()   # no sampler to run
         previous = None
@@ -396,7 +448,16 @@ class LLMEngine:
                 ready_rows.append(first_row + num_rows - 1)
         if ready:
             rows = torch.tensor(ready_rows, device=logits.device)
-            sampled = self._sample(ready, logits.index_select(0, rows))
+            sub_logits = logits.index_select(0, rows)
+            sampled = self._sample(ready, sub_logits)
+            if any(getattr(s.params, "logprobs", None) for s in ready):
+                log_probs = torch.log_softmax(sub_logits, dim=-1)
+                for idx, (s, token) in enumerate(zip(ready, sampled)):
+                    if getattr(s.params, "logprobs", None):
+                        k = s.params.logprobs
+                        top_vals, top_idx = log_probs[idx].topk(k)
+                        top_dict = {int(i): float(v) for i, v in zip(top_idx, top_vals)}
+                        s.output_logprobs.append((token, float(log_probs[idx, token]), top_dict))
             new += [(seq, [token]) for seq, token in zip(ready, sampled)]
         return new
 

@@ -60,9 +60,70 @@ def run_benchmark(engine, requests, hardware):
             "preemptions": engine.num_preemptions}
 
 
+def run_goodput_benchmark(engine, requests, hardware, ttft_slo=2.0, itl_slo=0.2):
+    """Measure goodput: output tokens per second meeting TTFT and ITL SLOs."""
+    cost = model_cost(engine.model)
+    arrivals = {}
+    token_times = {}
+    for rid, prompt_ids, max_tokens in requests:
+        now = time.perf_counter()
+        arrivals[rid] = now
+        token_times[rid] = []
+        engine.add_request(rid, prompt_ids, max_tokens, ignore_eos=True, arrival=now)
+    floor_seconds = 0.0
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    while engine.has_work():
+        events = engine.step()
+        now = time.perf_counter()
+        for rid, text, _ in events:
+            if text:
+                token_times[rid].append(now)
+        work = engine.last_step
+        if work.tokens:
+            floor_seconds += step_floor(cost, hardware, work.tokens,
+                                        work.context_tokens)
+    torch.cuda.synchronize()
+    seconds = time.perf_counter() - start
+    output_tokens = sum(len(engine.output(rid)) for rid, _, _ in requests)
+
+    met_tokens = 0
+    good_reqs = 0
+    for rid, _, _ in requests:
+        times = token_times.get(rid, [])
+        num_tok = len(engine.output(rid))
+        if not times:
+            continue
+        ttft = times[0] - arrivals[rid]
+        itls = [t2 - t1 for t1, t2 in zip(times, times[1:])]
+        max_itl = max(itls) if itls else 0.0
+        if ttft <= ttft_slo and max_itl <= itl_slo:
+            good_reqs += 1
+            met_tokens += num_tok
+
+    goodput_tok_s = met_tokens / seconds if seconds > 0 else 0.0
+    return {"output_tokens": output_tokens, "seconds": seconds,
+            "tok_s": output_tokens / seconds if seconds > 0 else 0.0,
+            "goodput_tok_s": goodput_tok_s,
+            "goodput_ratio": met_tokens / output_tokens if output_tokens > 0 else 0.0,
+            "good_requests": good_reqs,
+            "total_requests": len(requests),
+            "steps": engine.num_steps,
+            "floor_seconds": floor_seconds,
+            "efficiency": floor_seconds / seconds if seconds > 0 else 0.0,
+            "preemptions": engine.num_preemptions}
+
+
 def report(result):
-    return (f"{result['output_tokens']} tokens in {result['seconds']:.2f} s = "
+    text = (f"{result['output_tokens']} tokens in {result['seconds']:.2f} s = "
             f"{result['tok_s']:.0f} tok/s over {result['steps']} steps. The "
             f"roofline floor for the same steps is {result['floor_seconds']:.2f} "
             f"s, so the engine runs at {100 * result['efficiency']:.0f}% of the "
             f"roof.")
+    if "goodput_tok_s" in result:
+        text += (f" Goodput: {result['goodput_tok_s']:.0f} tok/s "
+                 f"({result['good_requests']}/{result['total_requests']} requests met SLO, "
+                 f"{100 * result['goodput_ratio']:.0f}%).")
+    if result.get('preemptions'):
+        text += f" ({result['preemptions']} preemptions.)"
+    return text
