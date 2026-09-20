@@ -19,9 +19,9 @@ cd "$(dirname "$0")"
 PINNED=(torch==2.13.0 transformers==5.14.1 accelerate==1.14.0
         safetensors==0.8.0 numpy==2.5.1 ninja==1.13.2 pytest==9.1.1
         matplotlib==3.11.2 nbformat==5.11.1 nbclient==0.11.0 rich==15.0.0)
-UNPINNED=(pytest-timeout==2.3.1 pytest-asyncio==1.0.0 pyyaml==6.0.2
+UNPINNED=(pytest-timeout==2.4.0 pytest-asyncio==1.4.0 pyyaml==6.0.3
           fastapi==0.115.12 uvicorn==0.34.3 httpx==0.28.1
-          sse-starlette==2.3.6 huggingface_hub==0.33.0
+          sse-starlette==2.3.6 huggingface_hub==1.26.0
           matplotlib-inline==0.1.7 jupyterlab==4.4.3 ipykernel==6.30.0)
 DEPS=("${PINNED[@]}" "${UNPINNED[@]}")
 for argument in "$@"; do
