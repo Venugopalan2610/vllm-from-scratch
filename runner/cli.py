@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 from runner import momentum  # noqa: E402
 from runner.glossary import terms_for_stage  # noqa: E402
+from runner.notebooks import notebooks_for_stage  # noqa: E402
 from runner.style import paint  # noqa: E402  (needs ROOT on the path)
 
 PROGRESS_FILE = ROOT / ".progress.json"
@@ -354,6 +355,16 @@ def print_files(stage, progress):
                            "dim"))
 
 
+def print_notebooks(stage):
+    label = stage_label(stage)
+    nbs = notebooks_for_stage(label)
+    if not nbs:
+        return
+    heading("PREPARATION NOTEBOOKS")
+    for nb in nbs:
+        print("  " + paint(nb, "underline"))
+
+
 def print_checks(stage, progress):
     checks = checks_for(stage, progress)
     if not checks:
@@ -393,6 +404,7 @@ def cmd_guide(ladder, progress, stage_id=None):
     if progress["backend"] == "jax" and stage.get("jax_insight"):
         heading("WHAT CHANGES IN JAX")
         print(wrap(" ".join(stage["jax_insight"].split())))
+    print_notebooks(stage)
     heading("WHAT YOU ARE BUILDING")
     print(wrap(stage_text(stage, progress, "deliver")))
     print_files(stage, progress)
