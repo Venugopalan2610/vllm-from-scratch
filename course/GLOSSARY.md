@@ -76,7 +76,7 @@ token. One call of the function is a forward pass.
 *Also:* parameters, params, parameter count
 
 The numbers that the model learned in training. At inference nothing changes
-them: they are read-only data. A 0.6B model has 0.6 billion of them.
+them: they are read-only data. A 1.7B model has 1.7 billion of them.
 
 **Like:** a large read-only lookup table that each call reads from start to end.
 

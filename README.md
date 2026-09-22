@@ -133,14 +133,16 @@ A free Google Colab T4 GPU (sm_75) runs all pure-logic stages and CUDA kernel st
 
 ### Option B: Run Locally on Linux
 
-**Requirements:** Linux, an NVIDIA GPU with $\ge 10\text{ GB}$ VRAM, the CUDA Toolkit (`nvcc`), Python 3.12, and $\approx 5\text{ GB}$ of disk space.
+**Requirements:** Linux, an NVIDIA GPU with $\ge 10\text{ GB}$ VRAM, the CUDA Toolkit (`nvcc`), Python 3.12, and $\approx 9\text{ GB}$ of disk space.
+
+The notebooks use Qwen3-1.7B. The graded checks use Qwen3-0.6B, because many checks hold the model in bf16 and in fp32 at the same time, and 1.7B does not fit twice on a 12 GB card. With 24 GB or more, run the checks on 1.7B with `VC_MODEL=Qwen/Qwen3-1.7B`.
 
 ```bash
 # 1. Clone your fork
 git clone https://github.com/Venugopalan2610/vllm-from-scratch.git
 cd vllm-from-scratch
 
-# 2. Run setup (~3-5 minutes, creates .venv and prepares the model)
+# 2. Run setup (~3-5 minutes, creates .venv and prepares the models)
 ./setup.sh
 
 # 3. Inspect your GPU's physical roofline limits

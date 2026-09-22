@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from runner import capability  # noqa: E402
 from runner.style import paint  # noqa: E402
 
-MODEL_GB = 1.5          # Qwen3-0.6B in bf16, plus the tokenizer files
+MODEL_GB = 5.0          # Qwen3-1.7B and Qwen3-0.6B in bf16, plus the tokenizers
 WORK_GB = 4.0           # the venv, the build cache and room for the KV pool
 NEEDED_VRAM_GB = 6.0    # the capstone at its default pool size
 
@@ -71,12 +71,12 @@ def check_disk():
     line(free_gb >= MODEL_GB + WORK_GB,
          f"{free_gb:.0f} GB free in the repo",
          "" if free_gb >= MODEL_GB + WORK_GB else
-         f"The model needs about {MODEL_GB} GB, and the build cache and the "
+         f"The models need about {MODEL_GB} GB, and the build cache and the "
          f"venv about {WORK_GB} GB.")
     cache = Path.home() / ".cache" / "huggingface"
     line(cache.exists(), f"HuggingFace cache at {cache}",
-         "" if cache.exists() else "The first run downloads the model, "
-         "about 1.5 GB.")
+         "" if cache.exists() else "The first run downloads the models, "
+         "about 5 GB.")
 
 
 def main():

@@ -18,7 +18,7 @@ from runner.style import paint  # noqa: E402
 BYTES_PER_BF16 = 2
 HEAT_SECONDS = 3.0
 # (name, GB of weights in bf16) for the size comparisons
-EXAMPLE_MODELS = [("0.6B", 1.2), ("1B", 2.0), ("7B", 14.0), ("8B (fp8)", 8.0)]
+EXAMPLE_MODELS = [("1.7B", 3.4), ("1B", 2.0), ("7B", 14.0), ("8B (fp8)", 8.0)]
 
 
 def print_device(properties):
@@ -89,7 +89,7 @@ def print_comparison(ridge):
 def print_cache_argument(l2_bytes, gbs):
     print("\n" + paint("Why the weights cannot stay in the cache", "bold"))
     print(f"  L2 cache on this GPU   {l2_bytes / 1e6:>8,.0f} MB")
-    for name, weight_gb in [("Qwen3-0.6B bf16", 1.2), ("7B bf16", 14.0)]:
+    for name, weight_gb in [("Qwen3-1.7B bf16", 3.4), ("7B bf16", 14.0)]:
         print(f"  {name:<22} {weight_gb * 1000:>8,.0f} MB   "
               + paint(f"-> {weight_gb * 1e9 / l2_bytes:.0f}x too big", "dim"))
     print(paint("  So the weights are in VRAM, and 'read them from VRAM' IS\n"

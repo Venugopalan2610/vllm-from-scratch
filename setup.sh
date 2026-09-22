@@ -73,11 +73,14 @@ else
   fi
 fi
 
-echo "==> model (Qwen3-0.6B, ~1.2GB)"
+# The notebooks use Qwen3-1.7B. The checks use Qwen3-0.6B: many of them hold
+# the model in bf16 and in fp32 at the same time, and 1.7B does not fit twice
+# on a 12GB card.
+echo "==> models (Qwen3-1.7B ~3.4GB for the notebooks, Qwen3-0.6B ~1.2GB for the checks)"
 .venv/bin/python - <<'PY'
 from huggingface_hub import snapshot_download
-snapshot_download("Qwen/Qwen3-0.6B",
-                  allow_patterns=["*.json", "*.safetensors", "*.txt"])
+for name in ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-0.6B"):
+    snapshot_download(name, allow_patterns=["*.json", "*.safetensors", "*.txt"])
 print("ok")
 PY
 

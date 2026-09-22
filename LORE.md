@@ -165,7 +165,7 @@ free to read, and the weights are much too large for the cache:
 ```
 L2 cache on this GPU       50 MB
 7B model in bf16       14,000 MB   ->  278x too big
-Qwen3-0.6B in bf16      1,200 MB   ->   24x too big
+Qwen3-1.7B in bf16      3,400 MB   ->   68x too big
 ```
 
 So the weights live in **VRAM**, and "read 14 GB from VRAM" *is* the 37 ms.
