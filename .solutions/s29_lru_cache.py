@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 
 class LRUPrefixCache:
-    """A Radix/Prefix cache with LRU eviction under memory pressure."""
+    """A prefix cache keyed by chained block hashes, with LRU eviction under memory pressure."""
 
     def __init__(self, block_allocator):
         self.allocator = block_allocator

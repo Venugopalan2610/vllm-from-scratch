@@ -92,11 +92,13 @@ def capacity_paged(vram_bytes: int, kv_bytes_per_token: int,
 
 
 class VirtualMemoryBlockManager:
-    """Architectural demonstration of CUDA Driver Virtual Memory Management (cuMemMap).
+    """A Python model of the CUDA driver's virtual memory API (cuMemMap).
 
-    In real vLLM V1, pre-allocating a contiguous PyTorch tensor (e.g. 20GB) causes severe
-    VRAM fragmentation and limits dynamic KV cache pool resizing.
-    Instead, production engines use low-level CUDA driver VMM APIs:
+    It calls no driver function. It counts pages, so that you can reason about a
+    design where the address of the KV cache stays fixed and the memory behind it
+    grows and shrinks. The engine of this course, like vLLM, preallocates its KV
+    cache and pages it in software, through the block table. LORE.md section 18
+    says which systems use the real API. The real API has these calls:
       1. cuMemAddressReserve: Reserves a large contiguous VIRTUAL address space
          (e.g., 128 GB) without committing physical GPU memory.
       2. cuMemCreate: Allocates physical memory chunks in fixed 2MB OS pages.
