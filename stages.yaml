@@ -481,7 +481,7 @@ arcs:
           Measure the crossover in the real graphed step, not on one matrix:
           one matrix of a small model fits in L2, and the result is wrong.
         deliver: "Int8 weights in every matmul, with a dispatch to bf16 above a measured crossover."
-        measure: "At least 1.3x at batch 1, no loss at batch 32, KL from bf16 at most 0.015 nats."
+        measure: "At least 1.2x at batch 1, no loss at batch 32, KL from bf16 at most 0.015 nats."
 
       - id: "24b-fp8-kv-cache"
         tracks: ["torch"]
@@ -555,8 +555,11 @@ arcs:
         measure: "At least 30% of the floor, and at least 2x your stage 05 engine on the same requests."
 
   - id: A8
-    name: "The Frontier Extension"
-    blurb: "Advanced single-GPU techniques: LRU eviction, multi-LoRA BGMV, and DeepSeek MLA."
+    name: "Beyond the Capstone"
+    blurb: >
+      Stage 29 is core: the prefix cache of stage 22 needs eviction. Stages 30
+      and 31 are optional extensions. Their checks are thin, and no
+      measurement of the core ladder asks for them.
     stages:
       - id: "29-lru-cache"
         tracks: ["torch"]
@@ -573,6 +576,7 @@ arcs:
 
       - id: "30-multi-lora"
         tracks: ["torch"]
+        extension: true
         file: "app/s30_multi_lora.py"
         name: "Multi-LoRA serving and batched GEMV"
         difficulty: 4
@@ -587,6 +591,7 @@ arcs:
 
       - id: "31-mla"
         tracks: ["torch"]
+        extension: true
         file: "app/s31_mla.py"
         name: "DeepSeek Multi-Head Latent Attention (MLA)"
         difficulty: 5
@@ -598,17 +603,3 @@ arcs:
           K and V in VRAM, saving over 80% of KV cache bandwidth with zero loss in precision.
         deliver: "MLA compression, baseline unabsorbed attention, and the exact decode weight absorption trick."
         measure: "Exact numerical equivalence to standard attention and >80% KV memory reduction."
-
-      - id: "32-jev"
-        tracks: ["torch"]
-        file: "app/s32_jev.py"
-        name: "TypeSafe Jev: Non-autoregressive System 1 decisions"
-        difficulty: 4
-        insight: >
-          Autoregressive generation generates tokens sequentially at high memory-bandwidth
-          cost. Many automation decisions (routing, grading, guardrails) do not require
-          prose: they require typed, probabilistic decisions. TypeSafe AI's Jev model
-          computes typed primitives (Choice, Score, Noul) in a single non-autoregressive
-          forward pass with zero KV cache allocation, operating 50x-200x faster than an LLM.
-        deliver: "A Jev typed decision engine supporting Choice, Score, and Noul primitives with front-door router integration."
-        measure: "Single-pass execution (zero KV cache blocks consumed), typed schema conformance, and sub-millisecond guardrail routing."

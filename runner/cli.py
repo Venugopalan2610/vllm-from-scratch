@@ -69,6 +69,30 @@ def load_stages(backend="torch"):
     return data, ladder
 
 
+def is_extension(stage):
+    """An extension stage is optional. It has `extension: true` in
+    stages.yaml, because its checks are still thin or because no measurement
+    of the core ladder asks for it. The counts of progress leave it out."""
+    return bool(stage.get("extension"))
+
+
+def progress_counts(ladder, progress):
+    """-> (core done, core total, extensions done, extensions total)."""
+    done = set(progress["completed"])
+    core = [stage for stage in ladder if not is_extension(stage)]
+    extra = [stage for stage in ladder if is_extension(stage)]
+    return (sum(stage["id"] in done for stage in core), len(core),
+            sum(stage["id"] in done for stage in extra), len(extra))
+
+
+def count_text(ladder, progress):
+    done, total, extra_done, extra_total = progress_counts(ladder, progress)
+    text = f"{done}/{total} stages"
+    if extra_total:
+        text += f", {extra_done}/{extra_total} extensions"
+    return text
+
+
 def stage_file(stage, progress):
     """The file that the learner edits for this stage, on the active track.
 
@@ -316,12 +340,15 @@ def say(lines):
 
 
 def print_stage_banner(stage, progress, total):
+    """`total` is the number of core stages."""
     stars = "*" * stage["difficulty"] + "." * (5 - stage["difficulty"])
     already = ("   (already completed)"
                if stage["id"] in progress["completed"] else "")
     rule = paint("=" * 74, "bold", "cyan")
     print("\n" + rule)
-    print(paint(f"  Stage {stage_label(stage)} of {total}   "
+    where = (f"Extension stage {stage_label(stage)}" if is_extension(stage)
+             else f"Stage {stage_label(stage)} of {total}")
+    print(paint(f"  {where}   "
                 f"{stage_name(stage, progress)}", "bold", "cyan")
           + "   " + paint(f"[{stars}]", "dim"))
     print(paint(f"  {stage['arc_id']} - {stage['arc']}   "
@@ -397,7 +424,7 @@ def cmd_guide(ladder, progress, stage_id=None):
     stage = resolve_or_report(ladder, progress, stage_id)
     if not stage:
         return 1
-    print_stage_banner(stage, progress, len(ladder))
+    print_stage_banner(stage, progress, progress_counts(ladder, progress)[1])
     print_terms(ladder, stage)
     heading("WHY THIS STAGE EXISTS")
     print(wrap(" ".join(stage["insight"].split())))
@@ -493,8 +520,8 @@ def cmd_submit(ladder, progress):
     commit_stage(stage, progress)
     progress["completed"].append(stage["id"])
     save_progress(progress)
-    done, total = len(progress["completed"]), len(ladder)
-    print(f"\n  {progress_bar(done, total)}  {done}/{total} stages\n")
+    done, total = progress_counts(ladder, progress)[:2]
+    print(f"\n  {progress_bar(done, total)}  {count_text(ladder, progress)}\n")
     say(momentum.after_submit(momentum.stage_record(progress, stage["id"]),
                               stage_label(stage)))
     following = current_stage(ladder, progress)
@@ -527,12 +554,14 @@ def print_momentum(stage, progress):
 
 def cmd_status(ladder, progress):
     stage = current_stage(ladder, progress)
-    done, total = len(progress["completed"]), len(ladder)
+    done, total = progress_counts(ladder, progress)[:2]
     other = "jax" if progress["backend"] == "torch" else "torch"
-    other_total = len(load_stages(other)[1])
-    print(f"\n  {progress_bar(done, total)}  {done}/{total} stages complete  "
+    other_ladder = load_stages(other)[1]
+    other_done, other_total = progress_counts(
+        other_ladder, dict(progress, completed=progress["tracks"][other]))[:2]
+    print(f"\n  {progress_bar(done, total)}  {count_text(ladder, progress)} complete  "
           + paint(f"[{progress['backend']}]", "dim"))
-    print("  " + paint(f"{other}: {len(progress['tracks'][other])}"
+    print("  " + paint(f"{other}: {other_done}"
                        f"/{other_total}   (./vc backend {other})", "dim"))
     if not stage:
         print()
@@ -561,9 +590,9 @@ def print_backends(progress):
     print("\n  backend: " + paint(progress["backend"], "bold"))
     for backend in BACKENDS:
         marker = ">" if backend == progress["backend"] else " "
-        total = len(load_stages(backend)[1])
-        print(f"  {marker} {backend:<6} "
-              f"{len(progress['tracks'][backend])}/{total} stages")
+        track_ladder = load_stages(backend)[1]
+        print(f"  {marker} {backend:<6} " + count_text(
+            track_ladder, dict(progress, completed=progress["tracks"][backend])))
     print("\n  " + paint("./vc backend jax   change the track   |   "
                          "./vc test --jax   one time only", "dim") + "\n")
 
@@ -603,12 +632,12 @@ def cmd_list(ladder, progress):
         name = stage_name(stage, progress)
         if is_current:
             name = paint(name, "bold")
-        tag = ""
+        tag = "  " + paint("extension, optional", "dim") if is_extension(stage) else ""
         if progress["backend"] == "jax":
             tag = "  " + paint("shared" if is_shared(stage) else "jax", "dim")
         print(f"  {marker} {stage_label(stage):>3} {stage['id']:<26} {name}  "
               + paint("*" * stage["difficulty"], "dim") + tag)
-    print("\n" + paint(f"{len(progress['completed'])}/{len(ladder)} complete "
+    print("\n" + paint(f"{count_text(ladder, progress)} complete "
                        f"on the {progress['backend']} track", "dim") + "\n")
     return 0
 

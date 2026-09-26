@@ -1,0 +1,505 @@
+# The incident file of Part 3. dev/build_incident_files.py builds the two
+# notebooks from this file, and the /incident skill reads it.
+part: 3
+part_name: PagedAttention
+folder: course/Part3_PagedAttention/5_incidents
+intro: |
+  You finished Part 3. The KV cache now lives in blocks, a page table maps each
+  sequence to its blocks, a kernel reads through that table, and blocks can be
+  shared. Each of these gives a new way to fail. Most of them do not crash.
+
+  Each ticket gives you a **symptom** and some **evidence**. Some of the
+  evidence is noise. Write four lines for each ticket:
+
+  1. **Root cause.** One sentence.
+  2. **The number that proves it.** Not "it looks like". A computation.
+  3. **The fix.**
+  4. **The guard.** A test, an assert or an alert that catches it next time.
+
+  Four rules:
+
+  - The tickets are **not** in the order of the notebooks.
+  - At least one ticket is **not a bug**. "Nothing is broken" is a valid answer
+    only if a number proves it.
+  - Write your answer **before** you open the solution.
+  - Every ticket has a scratch cell.
+
+  Do this section after stage 09. This notebook needs no GPU.
+reference: |
+  ### The reference sheet
+
+  | GPU | SMs | Bandwidth | bf16 compute |
+  |---|---|---|---|
+  | L40S | 142 | 864 GB/s | 362 TFLOP/s |
+  | A100 SXM 80GB | 108 | 2,039 GB/s | 312 TFLOP/s |
+
+  | Model | Layers | Attention heads | KV heads | head_dim | KV bytes per token |
+  |---|---|---|---|---|---|
+  | Qwen3-1.7B | 28 | 16 | 8 | 128 | 114,688 (112 KiB) |
+
+  - The block size is 16 tokens, unless the ticket says otherwise.
+  - A DRAM sector is 32 bytes. A full memory transaction is 128 bytes.
+  - One kernel launch costs about 5 µs.
+  - With random lengths, the last block of a sequence is on average half
+    empty: `(block_size - 1) / 2` empty slots.
+tickets:
+  - id: "3.1"
+    title: "Ticket 1: the pool that shrinks every night"
+    ticket: |
+      # Ticket 1: the pool that shrinks every night
+
+      **Severity:** high, in about a week. **Reported by:** the SRE team.
+
+      > We check the free blocks at 04:00 each night, when no request is
+      > active. The number goes down every day. At this rate the server stops
+      > admitting requests in 9 days.
+
+      **Evidence**
+
+      - The pool has 20,000 blocks. The free blocks at 04:00: 20,000 on day 1,
+        18,160 on day 2, 16,318 on day 3.
+      - The requests end in two ways. `finish()` runs when a request ends
+        normally. `abort()` runs when a client disconnects or times out:
+
+        ```python
+        def finish(self, seq):
+            self.allocator.free(seq.block_table)
+            self.running.remove(seq)
+
+        def abort(self, seq):
+            self.running.remove(seq)
+        ```
+
+      - About 115 requests end with `abort()` each day. At the moment of the
+        abort, a request has about 256 tokens.
+      - An engineer says: "Memory fragmentation grows over time. We must
+        restart every week."
+    probes:
+      - ask: How many requests end with `finish()` each day?
+        answer: About 41,000.
+      - ask: Do the free blocks go back up during the day?
+        answer: They go up and down with the traffic. The value at 04:00 only goes down.
+      - ask: What happens to the free blocks when we abort 100 requests in a test?
+        answer: They drop by 1,600 and do not come back.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `abort()` removes the sequence and forgets to free its
+        blocks. Nothing points to those blocks any more, so they are lost
+        until a restart.
+      - **The number.** The pool loses 1,840 blocks each day, then 1,842.
+        115 aborts x 16 blocks (256 tokens / 16) = 1,840. The leak for each
+        abort equals the blocks of one aborted request.
+      - **The fix.** Free the blocks in `abort()`. Better: one `release(seq)`
+        function that both paths call, so that no path can forget.
+      - **The guard.** An invariant at every idle moment: free + cached +
+        in use = total. A test that aborts a request in the middle of decode
+        and checks that the free count comes back.
+
+      **The noise.** Fragmentation. Paging has no external fragmentation:
+      every free block is as good as every other. A pool that loses a fixed
+      number each day has a leak.
+    code: |
+      free = [20_000, 18_160, 16_318]
+      print('lost each day:', [a - b for a, b in zip(free, free[1:])])
+      print('115 aborts x 16 blocks =', 115 * 256 // 16)
+      print('days until empty:', 16_318 / 1_840)
+
+  - id: "3.2"
+    title: "Ticket 2: one request in sixteen"
+    ticket: |
+      # Ticket 2: one request in sixteen
+
+      **Severity:** critical. Two users are affected at a time. **Reported
+      by:** users.
+
+      > Some answers turn into nonsense after a few tokens. At the same time,
+      > another user in the same batch gets strange text.
+
+      **Evidence**
+
+      - 6.2% of the requests go bad.
+      - The prompt lengths of 12 bad requests: 48, 160, 32, 96, 64, 240, 128,
+        176, 80, 32, 112, 224.
+      - The code that adds a token to a sequence:
+
+        ```python
+        def append_token(seq, token):
+            seq.num_tokens += 1
+            if seq.num_tokens % BLOCK_SIZE == 0:
+                seq.block_table.append(allocator.allocate())
+            write_kv(seq, position=seq.num_tokens - 1)
+        ```
+
+      - The prefill allocates `ceil(prompt_len / 16)` blocks.
+      - The block tables go to the GPU as one tensor. Short tables are padded
+        with 0.
+      - The bad requests are a little longer than the average request.
+    probes:
+      - ask: Which block does the second user, the victim, have?
+        answer: The victim always has block 0 in its block table.
+      - ask: Does the kernel raise an error for a missing block?
+        answer: No. The kernel reads the padded tensor and finds block 0.
+      - ask: What happens with a prompt of 33 tokens?
+        answer: It works.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The check allocates a block when the sequence **fills**
+        a block, one step before the next block is needed. That works when the
+        prompt ends inside a block. When the prompt length is a multiple of 16,
+        the prefill fills the last block exactly, and the first decode token
+        needs a new block at once. The check says no, because
+        `(L + 1) % 16 != 0`. The write goes to the padded entry of the table,
+        which is 0, so it overwrites block 0 of another sequence.
+      - **The number.** All 12 bad prompt lengths are multiples of 16. With
+        random lengths, 1 in 16 is a multiple of 16: 6.25%, and the ticket
+        says 6.2%.
+      - **The fix.** Allocate before the write, when the position needs it:
+        `if position // 16 == len(seq.block_table): allocate`.
+      - **The guard.** Assert `position // 16 < len(block_table)` before each
+        write. Pad the block tables with -1, not 0, so that a bad index
+        writes nowhere, or fails. Test the prompt lengths 16, 32 and 48.
+
+      **The noise.** "The bad requests are longer". Multiples of 16 skew a
+      little long in a short sample. The length itself does not matter; the
+      remainder does.
+    code: |
+      bad = [48, 160, 32, 96, 64, 240, 128, 176, 80, 32, 112, 224]
+      print('remainders mod 16:', [n % 16 for n in bad])
+      print(f'expected fraction: 1/16 = {1 / 16:.2%}')
+
+  - id: "3.3"
+    title: "Ticket 3: the cooking bot that talks about law"
+    ticket: |
+      # Ticket 3: the cooking bot that talks about law
+
+      **Severity:** critical. **Reported by:** a customer of ChefBot.
+
+      > I asked ChefBot for a risotto recipe. It told me that "the parties
+      > agree to the terms above", and it used the language of a contract.
+
+      **Evidence**
+
+      - One server hosts two products, LegalBot and ChefBot, with automatic
+        prefix caching. Each product has its own system prompt. The two system
+        prompts end with the same safety paragraph of 64 tokens.
+      - The hash of a block:
+
+        ```python
+        def block_hash(tokens):
+            return hash(tuple(tokens))
+        ```
+
+      - The prefix cache hit rate is 71%. The team expected about 40%.
+      - The debug log of one ChefBot request: block 0 miss, block 1 miss, ...,
+        block 11 miss, block 12 hit, block 13 hit, block 14 hit, block 15 hit.
+      - LegalBot traffic doubled that week.
+    probes:
+      - ask: Where are the safety paragraphs in the two system prompts?
+        answer: |
+          In the ChefBot prompt, at tokens 192 to 255, which is blocks 12 to 15.
+          In the LegalBot prompt, at other positions, but also aligned to blocks.
+      - ask: Does the bug happen when the cache is empty?
+        answer: No. A ChefBot request on an empty cache is correct.
+      - ask: Does the lookup stop at the first miss?
+        answer: No. It checks every block of the prompt.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The hash covers only the 16 tokens of the block. But a
+        KV block depends on **every token before it**, because each layer mixes
+        the whole prefix into K and V. The safety paragraph after the LegalBot
+        prompt has other K and V than the same paragraph after the ChefBot
+        prompt. The cache treats them as the same block, and ChefBot reads the
+        K and V that LegalBot computed.
+      - **The number.** The log shows hits at blocks 12 to 15 after a miss at
+        block 0. A correct prefix cache can only hit a prefix: after the first
+        miss, every later block must miss. A hit after a miss is impossible
+        unless the hash ignores the prefix. The hit rate of 71% instead of 40%
+        is the same fact, measured in bulk.
+      - **The fix.** Chain the hash: `hash((parent_hash, tuple(tokens)))`.
+        Stop the lookup at the first miss.
+      - **The guard.** Assert that the hits of a lookup form a prefix. Test the
+        same 16 tokens after two different prefixes: they must not share a
+        block. This is the trap of the stage 09 challenge.
+
+      **The noise.** The LegalBot traffic. It filled the cache with LegalBot
+      blocks, so the bug showed more often. It did not cause the bug.
+    code: ''
+
+  - id: "3.4"
+    title: "Ticket 4: the prefix cache that never hits"
+    ticket: |
+      # Ticket 4: the prefix cache that never hits
+
+      **Severity:** medium. It costs money. **Reported by:** the performance
+      team.
+
+      > We enabled prefix caching. Every request starts with the same system
+      > prompt of 1,200 tokens. The time to the first token did not change.
+      > The hit rate is 0.0%.
+
+      **Evidence**
+
+      - The hash is chained, as it must be.
+      - The average user message has 300 tokens.
+      - The system prompt is a template. Its first line:
+
+            You are the assistant of Acme. Session: {session_id}. Today is {date}.
+
+      - The team doubled the size of the prefix cache. The hit rate stayed at
+        0.0%.
+    probes:
+      - ask: What is `session_id`?
+        answer: A new random string of 8 hex characters for each request.
+      - ask: How many tokens are before the session id?
+        answer: 9 tokens. The session id starts in block 0.
+      - ask: What is the hit rate if we remove the session id in a test?
+        answer: 79.8%.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The session id is new for each request, and it is in
+        block 0. With a chained hash, a different block 0 gives a different
+        hash for **every** block after it. So no two requests share any block.
+      - **The number.** The expected hit fraction is
+        1,200 / (1,200 + 300) = 80% of the prompt tokens. The measured rate is
+        0.0%. A cache that is too small gives a low rate; it does not give
+        exactly zero, and twice the size would change it. Zero, and no change
+        at twice the size, means that no two prompts start with the same block.
+      - **The fix.** Put the fixed text first and the variable text last. Move
+        the session id and the date to the end of the system prompt, or into
+        the user message.
+      - **The guard.** Monitor the hit rate against the rate that the template
+        predicts. A test: two requests with the same system prompt must share
+        `1200 // 16 = 75` blocks.
+
+      **The noise.** The cache size. The team changed it, and nothing moved.
+      That result is evidence: it rules out the capacity.
+    code: |
+      system, user = 1200, 300
+      print(f'expected hit fraction: {system / (system + user):.0%}')
+      print('blocks that two requests must share:', system // 16)
+
+  - id: "3.5"
+    title: "Ticket 5: the kernel with a great L1 hit rate"
+    ticket: |
+      # Ticket 5: the kernel with a great L1 hit rate
+
+      **Severity:** low. **Reported by:** the kernel team.
+
+      > Our paged attention kernel reaches only 190 GB/s on an L40S, 22% of
+      > the bandwidth. The L1 hit rate is 91%, so the memory is fine. The
+      > `exp()` in the softmax must be the problem.
+
+      **Evidence**
+
+      - The kernel gives one thread to one position. Each thread walks the 128
+        values of its key row, one bf16 value at a time.
+      - The [Nsight Compute](../../GLOSSARY.md#nsight-compute) counters:
+
+        | counter | value |
+        |---|---|
+        | DRAM throughput | 190 GB/s |
+        | L1 hit rate | 91% |
+        | bytes used for each 32-byte sector | 6.3% |
+        | compute pipe utilization | 4% |
+    probes:
+      - ask: How many bytes does one load instruction of the warp request?
+        answer: 64 bytes, 2 bytes for each of the 32 threads.
+      - ask: How many sectors does that instruction touch?
+        answer: 32 sectors, one for each thread.
+      - ask: How many `exp()` does the kernel compute?
+        answer: One for each position for each head.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The 32 threads of a warp read value `d` of 32 different
+        rows. The rows are 256 bytes apart, so each 2-byte load touches its own
+        32-byte sector. The warp uses 2 of 32 bytes of each sector. This is
+        the uncoalesced pattern of stage 08.
+      - **The number.** 2 / 32 = 6.25%, and the counter says 6.3%. The load
+        units handle 16 times more sectors than the data needs. The compute
+        pipe is at 4%, so `exp()` is not the limit.
+      - **The fix.** Turn the mapping sideways (stage 08b): the threads
+        cooperate along `head_dim`, with 16-byte loads. Then 16 threads read
+        one full row of 256 bytes, and each sector is used completely.
+      - **The guard.** Put the bytes-used-per-sector counter in the kernel
+        review. Aim for more than 90%.
+
+      **The noise.** The L1 hit rate. It is high **because** of the bad
+      pattern: thread 5 reads sector S for value 0, then reads the same sector
+      again for values 1 to 15. Many hits to the same sector are a symptom.
+    code: |
+      bytes_per_load, sector = 2, 32
+      print(f'sector efficiency: {bytes_per_load / sector:.2%}')
+      print(f'sectors per warp load: 32, needed: {32 * bytes_per_load // sector}')
+
+  - id: "3.6"
+    title: "Ticket 6: the kernel that is slow only for one user"
+    ticket: |
+      # Ticket 6: the kernel that is slow only for one user
+
+      **Severity:** medium. Every interactive request is batch 1. **Reported
+      by:** the kernel team.
+
+      > At batch 64 our decode attention reaches 610 GB/s on an L40S, 71% of
+      > the bandwidth. At batch 1 with 4,096 tokens of context it reaches
+      > 70 GB/s, 8%. The batch-1 path must have a bug.
+
+      **Evidence**
+
+      - The kernel is stage 08b: one thread block for each (sequence, query
+        head). Qwen3-1.7B has 16 query heads.
+      - The L40S has 142 SMs.
+      - A colleague says: "At batch 1 the launch overhead dominates."
+      - The batch-1 path and the batch-64 path run the same kernel.
+    probes:
+      - ask: How many thread blocks does the batch-1 launch have?
+        answer: 16.
+      - ask: How long does the kernel take at batch 1 for one layer?
+        answer: About 240 µs.
+      - ask: What does Nsight Compute say about the SMs at batch 1?
+        answer: 126 of the 142 SMs have no active warp for the whole kernel.
+    solution: |
+      ### Solution
+
+      - **Root cause.** At batch 1 the grid has 1 x 16 = 16 thread blocks. A
+        block runs on one SM, so 16 of the 142 SMs work and 126 wait. One SM
+        cannot pull the bandwidth of the whole card.
+      - **The number.** 16 / 142 = 11% of the SMs. The efficiency at batch 1
+        relative to batch 64 is 8% / 71% = 11%. The two ratios agree.
+      - **The fix.** Split-K (stage 08c): cut the context into chunks, give
+        each chunk its own block, and merge the partial softmax states. With
+        16 chunks of 256 tokens, the grid has 256 blocks.
+      - **The guard.** Report the kernel at batch 1, not only at large batch.
+        Compare the number of blocks with the number of SMs.
+
+      **The noise.** The launch overhead. One layer reads
+      4,096 x 8 x 128 x 2 x 2 = 16.8 MB and takes about 240 µs. A launch costs
+      about 5 µs, or 2% of that.
+    code: |
+      blocks, sms = 1 * 16, 142
+      print(f'SMs with work: {blocks / sms:.0%}, measured efficiency ratio: {(70 / 864) / (610 / 864):.0%}')
+      layer_bytes = 4096 * 8 * 128 * 2 * 2
+      print(f'one layer reads {layer_bytes / 1e6:.1f} MB, {layer_bytes / 70e9 * 1e6:.0f} µs at 70 GB/s; launch = 5 µs')
+
+  - id: "3.7"
+    title: "Ticket 7: the faster kernel that holds fewer users"
+    ticket: |
+      # Ticket 7: the faster kernel that holds fewer users
+
+      **Severity:** medium. **Reported by:** the capacity team.
+
+      > The kernel team changed the block size from 16 to 256, because the
+      > kernel is 9% faster with large blocks. Since then, the server holds
+      > 23% fewer concurrent requests before the pool is full.
+
+      **Evidence**
+
+      - The average sequence has about 400 tokens, and the lengths are
+        spread out.
+      - The pool has the same number of bytes as before.
+      - The kernel team says: "A block size cannot change the number of
+        tokens. The capacity team must have changed something else."
+    probes:
+      - ask: What fraction of the allocated KV slots hold a token?
+        answer: 76% with blocks of 256. It was 98% with blocks of 16.
+      - ask: Did the capacity team change anything else?
+        answer: No. The only change in that release is the block size.
+      - ask: How much faster is a whole decode step with the new kernel?
+        answer: About 3%. The attention is one part of the step.
+    solution: |
+      ### Solution: a trade, and a bad one
+
+      - **Root cause.** The last block of each sequence is partly empty. On
+        average it has `(block_size - 1) / 2` empty slots: 7.5 slots with
+        blocks of 16, and 127.5 slots with blocks of 256. The pool pays for the
+        empty slots.
+      - **The number.** One sequence costs 400 + 7.5 = 407.5 slots before, and
+        400 + 127.5 = 527.5 slots after. 407.5 / 527.5 = 0.77, so the pool
+        holds 23% fewer sequences. That is the measured loss.
+      - **The fix.** Go back to 16, or try 32, where the waste is 3.7%. A 9%
+        faster kernel, which is about 3% of the step, does not pay for 23%
+        fewer sequences in the batch.
+      - **The guard.** Report the KV utilization (the fraction of the
+        allocated slots that hold tokens) next to every kernel change.
+
+      **The noise.** "A block size cannot change the number of tokens". True
+      for the tokens. False for the slots.
+    code: |
+      mean = 400
+      for block in (16, 32, 256):
+          waste = (block - 1) / 2
+          print(f'block {block:3d}: {waste:5.1f} empty slots per sequence, {waste / (mean + waste):5.1%} of the pool')
+      print(f'sequences, 256 against 16: {(mean + 7.5) / (mean + 127.5):.2f}')
+
+  - id: "3.8"
+    title: "Ticket 8: three of four samples are strange"
+    ticket: |
+      # Ticket 8: three of four samples are strange
+
+      **Severity:** high. **Reported by:** the team of the writing assistant.
+
+      > With `n=4`, the API returns four answers for one prompt. Often three of
+      > the four are incoherent, and the last one is fine. With `n=1` every
+      > answer is fine.
+
+      **Evidence**
+
+      - The four samples share the blocks of the prompt. The reference count
+        of those blocks is 4.
+      - The write of a new token does not check the reference count of its
+        block.
+      - The bug never happens when the prompt length is a multiple of 16.
+      - The team suspects that the four samples share one random seed.
+    probes:
+      - ask: Do the four samples use different seeds?
+        answer: Yes. Each sample has its own generator, and the first tokens differ.
+      - ask: Which physical block holds the first new token of each sample, for a prompt of 37 tokens?
+        answer: The same block for all four samples, block 2 of the prompt.
+      - ask: Is the fourth sample always the good one?
+        answer: The sample that writes last in each step is the good one. That is usually sample 4.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The last block of the prompt is partly full, and it is
+        shared. Each sample writes its first new tokens into the free slots of
+        that **shared** block. All four write the same slot in each step, and
+        the last writer wins. The other three then attend to the K and V of
+        the tokens of sample 4, not to their own.
+      - **The number.** When the prompt length is a multiple of 16, the last
+        block is full, and each sample gets its own new block. Then nothing is
+        shared, and the bug cannot happen. That is 1 length in 16. The good
+        sample is always the last writer.
+      - **The fix.** Copy-on-write (stage 09): before a write into a block
+        with a reference count above 1, copy the block, and give the writer
+        its own copy.
+      - **The guard.** Assert that the reference count of a block is 1 before
+        each write. Test `n=4` with a prompt of 37 tokens: each sample must
+        match the same sample run alone with the same seed.
+
+      **The noise.** The seed theory. The four samples have different first
+      tokens, so their seeds differ.
+    code: ''
+outro: |
+  ### Before you open the solution
+
+  Go back to each ticket and write one more line: **which piece of evidence was
+  noise, and why did it look relevant?**
+patterns: |
+  ### The pattern in the tickets
+
+  | The shape of the number | What it usually means | Tickets |
+  |---|---|---|
+  | A loss that equals the count of one event x a block count | A leak on one code path | 1 |
+  | Failures only at lengths that are a multiple of the block size | A boundary of a block | 2, 8 |
+  | A hit after a miss | A hash that ignores the prefix | 3 |
+  | Exactly zero, and no change after a large change | A structural cause, not a capacity | 4 |
+  | A counter at 2/32 or 16/142 | The shape of the work, not its amount | 5, 6 |
+  | A waste fraction that the formula predicts | Nothing is broken, but the trade is bad | 7 |
+
+  Blocks make the KV cache efficient. They also add boundaries, and most bugs of
+  this Part live at a boundary: the end of a block, the end of a prefix, the end
+  of a request.

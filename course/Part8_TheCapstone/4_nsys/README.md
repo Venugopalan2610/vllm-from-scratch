@@ -1,34 +1,32 @@
-# Capstone Practicum I: Whole-System Timeline Profiling with Nsight Systems
+# Capstone Practicum I: read the timeline
 
-> *"You do not guess where latency comes from. You measure the machine."*
+> *You do not guess where latency comes from. You measure the machine.*
 
-## Objective
-Profile your complete Capstone continuous-batching engine under real load using NVIDIA Nsight Systems (`nsys`). Measure CPU dispatch bubbles, CUDA stream concurrency, Host-to-Device memory copy overheads, and NVTX execution ranges.
+## The notebook
 
-## Command
-Run the built-in timeline profiler:
-```bash
-./vc nsys
-```
-This generates `.cudacache/engine_profile.nsys-rep`. Open it in the Nsight Systems GUI:
-```bash
-nsys-ui .cudacache/engine_profile.nsys-rep
-```
+Open [`part8_nsys_1_CCreadTheTimeline_helper.ipynb`](part8_nsys_1_CCreadTheTimeline_helper.ipynb).
+It profiles a real decode loop of Qwen3-1.7B with Nsight Systems (`nsys`), and
+you read the trace with plain SQL. You find which side limits a step, the CPU
+or the GPU, and you predict what CPU work costs in two loops: one that waits
+for the GPU and then works, and one that works while the GPU runs. The checks
+at the end test the machine and your model. Nsight Systems needs no special
+permission. The notebook takes about ten minutes.
 
-## What You Must Inspect & Verify
+## Then your engine (after stage 28)
 
-### 1. The CPU Execution Bubble (Dispatch Overhead)
-- Locate two consecutive decode steps on the GPU timeline.
-- Measure the time delta between the end of step $N$'s attention kernel and the launch of step $N+1$'s GEMM.
-- **Analysis:** If the GPU timeline shows an idle gap >100 µs between iterations, CPU work (Python GIL contention, FastAPI deserialization, or detokenization) is starving the GPU.
-- **Verification:** Explain how Stage 27's `ProcessEngineWorker` and zero-copy shared-memory IPC (`SharedMemoryEventRing`) eliminate this gap.
+    ./vc nsys
+    nsys export --type sqlite .cudacache/engine_profile.nsys-rep
 
-### 2. Stream Concurrency & Memory Staging
-- Zoom into the CUDA compute stream and transfer streams.
-- Check if Host-to-Device copies (e.g. `slot_mapping`, `block_tables`) block kernel execution.
-- **Verification:** Confirm that pinned host staging buffers (`StagingBuffers` in `app/s23_graphs.py`) allow PCIe transfers to execute asynchronously without stalling the CPU thread.
+The profile marks each step of the engine with an NVTX range named
+`engine_step_<n>`. Use the functions of the notebook on it, and answer:
 
-### 3. NVTX Range Spans
-- Expand the NVTX row in `nsys-ui`.
-- Inspect the annotations: `engine_step_X`, `schedule`, `model_forward`, `sample`.
-- Calculate the percentage of iteration time spent in the PyTorch model forward pass versus Python scheduling logic.
+1. What fraction of the window is the GPU idle between the steps?
+2. Which side is slower at the load of the profile? What would change the
+   answer?
+3. Where do the copies of the block tables and the slot mapping run? Do they
+   block the kernels, and does the CPU wait for them? (Stage 23 stages them in
+   pinned buffers.)
+
+Open the report in the GUI to see the same data as a picture:
+
+    nsys-ui .cudacache/engine_profile.nsys-rep

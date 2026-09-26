@@ -11,31 +11,31 @@ into the engine. The Part 7 notebooks teach those features.
 
 | | |
 |---|---|
-| [`1_engine/`](1_engine/) | Why the parts never met, and the flat batch that lets them. One scheduler rule for every case. Then build that scheduler. **The challenge needs no GPU.** |
+| [`1_engine/`](1_engine/) | Why the parts never met, and the flat batch that lets them. One scheduler rule for every case. Then design the engine yourself, before you read the given split, and build its scheduler. **The two challenges need no GPU.** |
 | [`2_graphs/`](2_graphs/) | A thousand small kernels in each step, against the weight-read floor. The padding row that overwrites block 0. |
 | [`3_roof/`](3_roof/) | The floor of a step, in tokens for each GB/s, and why a larger model can serve more tokens. Then measure a real step against it. |
-| [`4_nsys/`](4_nsys/) | **Capstone Practicum I: Timeline Profiling with Nsight Systems.** Trace `./vc nsys`, measure CPU dispatch bubbles, and verify stream concurrency and NVTX step markers. |
-| [`5_ncu/`](5_ncu/) | **Capstone Practicum J: Kernel Micro-Architecture with Nsight Compute.** Run `./vc ncu 8 64`, extract the 5 golden hardware counters, measure DRAM throughput vs theoretical peak, and eliminate bank conflicts. |
-| [`6_trtllm/`](6_trtllm/) | **Capstone Practicum K: Dual-Engine Architecture Synthesis.** Map your `Scheduler`, `KVBlockManager`, and custom CUDA kernels into NVIDIA TensorRT-LLM's C++ `GptManager` and `KvCacheManager`. |
+| [`4_nsys/`](4_nsys/) | **Capstone Practicum I: read the timeline.** Profile a real decode loop with Nsight Systems, read the trace with SQL, find the slower side, and predict what CPU work costs on each side. A notebook with checks. Then `./vc nsys` on your engine. |
+| [`5_ncu/`](5_ncu/) | **Capstone Practicum J: read the counters.** Measure three kernels with a clock, then read their Nsight Compute counters: sector use, bank conflicts, DRAM throughput. A notebook with checks. The counter checks need a driver permission that the notebook explains. Then `./vc ncu 8 64` on your kernels. |
+| [`6_trtllm/`](6_trtllm/) | **Capstone Practicum K (optional reading):** map your `Scheduler`, `KVBlockManager` and kernels onto the C++ runtime of NVIDIA TensorRT-LLM. No check. |
+| [`7_incidents/`](7_incidents/) | Seven tickets at the seams of the whole engine: a ratio above the roof, idle gaps, a race in the staging buffers, and a budget that starves. Then break working code on purpose, and find three hidden faults from their behaviour. Do this section after stage 28. **The tickets need no GPU. The second notebook needs one.** |
 
 **When it gets hard:** [four things to try](../README.md#when-it-gets-hard).
 Do not stop. Continue. Be better than before.
 
 ## Capstone Practicums: Profiling, Hardware Counters & Production Synthesis
 
-The capstone is not complete when the Python tests pass. An industrial inference engine
-must be verified against physical silicon, CPU launch overheads, and production C++ architectures.
-These three practicums are integral requirements of Part 8:
+The checks of the stages prove that the engine is correct and fast enough. The
+practicums teach you to see why it is fast or slow, with the tools that real teams
+use. Practicums I and J are notebooks with checks. Practicum K and the items after
+it are optional: reading and exercises, with no check.
 
-1. **Practicum I (`4_nsys/`): Whole-System Timeline Profiling (`./vc nsys`)**
-   Trace continuous batching execution with NVTX annotations. Quantify CPU dispatch bubbles
-   between decode iterations and verify pinned memory staging buffer concurrency.
-2. **Practicum J (`5_ncu/`): Kernel Micro-Architecture Profiling (`./vc ncu 8 64`)**
-   Profile your Stage 08 paged-attention kernel under Nsight Compute. Measure achieved DRAM
-   throughput against your card's roofline ceiling and verify bank-conflict-free shared memory access.
-3. **Practicum K (`6_trtllm/`): TensorRT-LLM Architecture Synthesis**
-   Map your scheduler, block allocator, and attention kernels directly into NVIDIA TensorRT-LLM's
-   C++ `GptManager` and `KvCacheManager`.
+1. **Practicum I (`4_nsys/`): read the timeline.** A real decode loop under Nsight
+   Systems. Find the slower side, CPU or GPU, and predict what CPU work costs on
+   each side. Then run `./vc nsys` on your engine.
+2. **Practicum J (`5_ncu/`): read the counters.** Three kernels, measured with a
+   clock and with the Nsight Compute counters: sector use, bank conflicts, DRAM
+   throughput. Then run `./vc ncu 8 64` on your kernels.
+3. **Practicum K (`6_trtllm/`, optional): map your engine onto TensorRT-LLM.**
 4. **Multi-turn serving & Prefix Caching:** Send multi-turn requests to your
    server and observe the prefix cache hit rate on consecutive turns.
 5. **Batch Invariance:** Measure token differences between batch 1 and batch 32
@@ -43,9 +43,9 @@ These three practicums are integral requirements of Part 8:
 6. **Long Context Roofline:** Measure your engine at 16k context where KV reads
    overtake weight reads, flipping the roofline constraint.
 7. **Upstream Source Study:** Read `vllm/v1/core/sched/scheduler.py` in the
-   upstream repository and map the five major production capabilities
-   (LoRA allocation, multi-step scheduling, priority queues, guided grammar
-   state, and memory profiling).
+   upstream repository. List what it does that your scheduler does not, and
+   why each one matters for a server with a thousand users (Exercise B of the
+   course README).
 
 ---
 
@@ -100,9 +100,9 @@ and systems engineering behind high-performance LLM serving:
 ### Q1: "Why is LLM decode memory-bandwidth bound, and what does that imply for GPU hardware utilization?"
 **Your Defense:** In autoregressive decode, the sequence generates one token per step ($M=1$). The GPU must read all model weights (e.g. 14 GB for a 7B bf16 model) from HBM to registers to perform a single GEMV operation. The arithmetic intensity is:
 $$\text{Arithmetic Intensity} = \frac{2 \times 7\times 10^9 \text{ FLOPs}}{14\times 10^9 \text{ Bytes}} = 1.0\text{ FLOP/byte}$$
-On an H100 with 3.35 TB/s HBM3 bandwidth and 2,000 TFLOPs FP16 compute, the hardware roofline ceiling at batch 1 is:
+On an H100 SXM with 3.35 TB/s HBM3 bandwidth and about 989 TFLOP/s of dense bf16 compute, the hardware roofline ceiling at batch 1 is:
 $$\text{Max Throughput} = 3.35\times 10^{12}\text{ B/s} \times 1.0\text{ FLOP/B} = 3.35\text{ TFLOP/s}$$
-That is less than **0.2% of the GPU's compute capability**. The GPU compute units sit idle waiting for memory. To increase compute utilization, you must batch requests together so weights are read once and reused across $B$ tokens.
+That is about **0.3% of the GPU's dense compute**. The GPU compute units sit idle waiting for memory. To increase compute utilization, you must batch requests together so weights are read once and reused across $B$ tokens.
 
 ### Q2: "What causes a shared memory bank conflict, and how do you diagnose and resolve it?"
 **Your Defense:** Shared memory is organized into 32 banks, each 4 bytes (32 bits) wide. Successive 32-bit words map to successive banks. A bank conflict occurs when two or more threads in the same warp access different memory addresses within the same bank simultaneously. When this happens, the hardware serializes the memory accesses, multiplying latency.
@@ -133,7 +133,7 @@ PagedAttention mimics OS virtual memory:
 ### Q6: "Why does Python multiprocessing matter for an LLM serving engine, and what is the bottleneck of `mp.Queue`?"
 **Your Defense:** In Python, the Global Interpreter Lock (GIL) prevents multiple native threads from executing Python bytecodes simultaneously. If FastAPI request deserialization, detokenization, and the GPU step loop run in the same process, detokenizing a large batch blocks the thread from launching the next GPU step, creating execution bubbles on the GPU timeline.
 Separating the engine into a child OS process (`ProcessEngineWorker`) isolates the GPU step loop.
-However, standard Python `mp.Queue` serializes every object using `pickle`. At 5,000 tokens/sec, `pickle.dumps` and `loads` eat 30-50% CPU. In production, we eliminate `pickle` by writing fixed-size binary structs directly into POSIX `SharedMemory` ring buffers (`SharedMemoryEventRing`) or using ZeroMQ IPC.
+Standard Python `mp.Queue` serializes every object with `pickle` and sends it through a pipe. For small token events that is cheap: about 2.4 µs for each event on a laptop, or 1% of one core at 5,000 events each second. It grows with the size and the number of events. Engines avoid it with fixed-size binary records in shared memory (`SharedMemoryEventRing`) or with ZeroMQ and a compact encoding. Measure it before you choose.
 
 ### Q7: "What is the difference between Time-To-First-Token (TTFT) and Inter-Token-Latency (ITL), and how does Chunked Prefill balance them?"
 **Your Defense:** TTFT is the latency from request arrival until the first token is emitted (dominated by the compute-bound prefill pass over the entire prompt). ITL is the latency between consecutive emitted tokens during decode (memory-bandwidth bound).

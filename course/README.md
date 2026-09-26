@@ -141,7 +141,8 @@ line on each.
 - [Part 5, Making It Fast](Part5_MakingItFast/): stages 12-14
 - [Part 6, The Server](Part6_TheServer/): stages 15-16
 - [Part 7, Modern vLLM](Part7_ModernVLLM/): stages 17-20, 18b
-- [Part 8, The Capstone](Part8_TheCapstone/): stages 21-28, 24b, and Capstone Practicums I, J, K (Nsight timeline profiling, kernel hardware counters, and TensorRT-LLM architecture synthesis)
+- [Part 8, The Capstone](Part8_TheCapstone/): stages 21-28, 24b, and Capstone Practicums I and J (timeline profiling and kernel counters, with checks) and K (optional reading on TensorRT-LLM)
+- Beyond the capstone: stage 29 (LRU prefix eviction), and the optional extensions 30 (multi-LoRA) and 31 (MLA). They have no notebooks.
 
 ## The method
 
@@ -246,9 +247,10 @@ step loop stabilizes latency and eliminates execution bubbles.
 
 Inspect `SharedMemoryEventRing` in `app/s27_serve.py`.
 Standard Python `multiprocessing.Queue` runs `pickle.dumps` and `pickle.loads`
-on every event, consuming 30% of CPU time at 5,000 tokens/sec.
-Benchmark the latency of packing a fixed binary struct directly into POSIX
-shared memory versus Python `mp.Queue`. See LORE.md §13.
+on every event, and sends it through a pipe. Measure the cost for each event, on your
+machine, for a small event and for a large one (with log-probabilities). Then measure
+packing a fixed binary struct directly into POSIX shared memory. At what rate of events,
+and at what size, does the difference matter? See LORE.md §13.
 
 ### Exercise G: Tree-Attention Speculative Decoding
 
@@ -260,9 +262,9 @@ and evaluate the speedup on structured JSON generation. See LORE.md §17.
 
 ### Exercise H: Virtual Memory Management with cuMemMap
 
-Read LORE.md §18. Explain why `torch.empty(20 * 1024**3, device="cuda")` fails
-when GPU memory is fragmented by weights and CUDA graphs.
-Trace `VirtualMemoryBlockManager` in `app/s06_blocks.py` and explain how
-`cuMemAddressReserve` and `cuMemMap` allow the KV cache pool to grow and shrink
-dynamically across requests without reallocating memory.
+Read LORE.md §18. `VirtualMemoryBlockManager` in `app/s06_blocks.py` is a model of
+the CUDA virtual-memory API in Python. It calls no driver function. Explain what
+`cuMemAddressReserve` and `cuMemMap` would let a KV cache do that a preallocated
+tensor cannot, and what it would cost. Then read the current vLLM source, and find
+where it uses the real API, and where it does not.
 

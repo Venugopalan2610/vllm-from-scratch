@@ -1,0 +1,645 @@
+# The incident file of Part 0. dev/build_incident_files.py builds the two
+# notebooks from this file, and the /incident skill reads it.
+part: 0
+part_name: From a Program to a Model
+folder: course/Part0_FromAProgramToAModel/4_incidents
+intro: |
+  You finished Part 0. You know that a model is a function, what the loop
+  does with it, what attention computes, and what a GPU is good at. Now use
+  that knowledge from the outside, with only the symptoms.
+
+  Each ticket below is a real class of failure. Each ticket gives you a
+  **symptom** and some **evidence**. Some of the evidence is noise, as in a
+  real incident. Write four lines for each ticket:
+
+  1. **Root cause.** One sentence.
+  2. **The number that proves it.** Not "it looks like". A computation.
+  3. **The fix.**
+  4. **The guard.** A test, an assert or an alert that catches it next time.
+
+  Four rules:
+
+  - The tickets are **not** in the order of the notebooks. First you must find
+    which idea the ticket needs.
+  - At least one ticket is **not a bug**. "Nothing is broken" is a valid answer
+    only if a number proves it.
+  - Write your answer **before** you open the solution.
+  - Every ticket has a scratch cell. Most tickets need one computation.
+
+  This notebook needs no GPU.
+reference: |
+  ### The reference sheet
+
+  | GPU | Memory | Bandwidth | bf16 compute |
+  |---|---|---|---|
+  | A100 SXM 80GB | 80 GB | 2,039 GB/s | 312 TFLOP/s |
+  | L40S | 48 GB | 864 GB/s | 362 TFLOP/s |
+  | a 24 GB card | 24 GB | | |
+
+  | Model | Layers | Attention heads | KV heads | head_dim | hidden | MLP | vocab | parameters |
+  |---|---|---|---|---|---|---|---|---|
+  | Qwen3-1.7B | 28 | 16 | 8 | 128 | 2048 | 6144 | 151,936 | 1.72 B |
+  | Llama-3-8B | 32 | 32 | 8 | 128 | 4096 | 14336 | 128,256 | 8.03 B |
+
+  | Number format | Bytes | Largest value |
+  |---|---|---|
+  | float32 | 4 | 3.4 x 10^38 |
+  | bfloat16 | 2 | 3.4 x 10^38 |
+  | float16 | 2 | 65,504 |
+
+  In the Qwen3 vocabulary, token 0 is `!`.
+
+  Two facts from Part 0:
+
+      ridge point (FLOP/byte) = compute / bandwidth
+      a kernel is fast when it reaches the roof that limits it: bytes/s OR FLOP/s
+tickets:
+  - id: "0.1"
+    title: "Ticket 1: the model speaks in tongues"
+    ticket: |
+      # Ticket 1: the model speaks in tongues
+
+      **Severity:** high. **Reported by:** the QA team.
+
+      > Since the upgrade, every answer is a mix of random words in five
+      > languages. Sometimes the service crashes.
+
+      **Evidence**
+
+      - The team moved from an old Llama-2 model to Qwen3-1.7B. The config file
+        has two keys, `model_path` and `tokenizer_path`. The upgrade changed
+        `model_path`.
+      - A sample answer:
+
+            Paris Unterstützung obtener 那么 tijdens ._ Vorlage
+
+      - The crash, one time in about twenty requests:
+
+            IndexError: piece id is out of range.
+
+      - The logs also show a warning at every start:
+
+            Setting `pad_token_id` to `eos_token_id` for open-end generation.
+
+      - The largest token id in the logged outputs of one hour is 151,398.
+    probes:
+      - ask: What is `len(tokenizer)` and what is `model.config.vocab_size`?
+        answer: "`len(tokenizer)` is 32,000. `model.config.vocab_size` is 151,936."
+      - ask: What does `tokenizer_path` contain?
+        answer: "`/models/llama-2-7b-chat/`"
+      - ask: What token ids does the tokenizer make for "Hello world"?
+        answer: |
+          `[1, 15043, 3186]`. The Qwen3 tokenizer makes `[9707, 1879]` for the
+          same text.
+      - ask: Did the warning about `pad_token_id` appear before the upgrade?
+        answer: Yes. It appeared at every start for the last year.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The upgrade changed the model and kept the old
+        tokenizer. The ids from the Llama-2 tokenizer mean other words to
+        Qwen3. The model reads nonsense, and writes ids that the old tokenizer
+        maps to random pieces.
+      - **The number.** The largest output id is 151,398. The old tokenizer has
+        only 32,000 entries. A tokenizer cannot produce an id that it does not
+        have, so the model and the tokenizer do not belong together. The crash
+        is the same fact: `IndexError` when the model writes an id above
+        31,999.
+      - **The fix.** Load both from the same path. Better: remove the second
+        key, and derive the tokenizer from the model path.
+      - **The guard.** At startup, assert that `len(tokenizer)` is not more
+        than `model.config.vocab_size`, and that a known text gives the known
+        ids. Put one golden prompt in the deploy test, with its expected answer.
+
+      **The noise.** The warning about `pad_token_id`. It is harmless, and it
+      appeared for a year before the incident.
+
+      **The lesson.** The model is a function of token ids, not of text. The
+      tokenizer is half of the model's interface.
+    code: |
+      tokenizer_vocab, model_vocab, largest_output_id = 32_000, 151_936, 151_398
+      print('the largest id that the tokenizer can make:', tokenizer_vocab - 1)
+      print('the largest id that the model wrote:       ', largest_output_id)
+      print('fraction of the model vocabulary that the tokenizer covers:',
+            f'{tokenizer_vocab / model_vocab:.0%}')
+
+  - id: "0.2"
+    title: "Ticket 2: the answer is only exclamation marks"
+    ticket: |
+      # Ticket 2: the answer is only exclamation marks
+
+      **Severity:** medium. **Reported by:** a research engineer.
+
+      > I wrote my own attention to learn how it works, and I run the model in
+      > float16 to save memory. Short prompts work. Long prompts return
+      > `!!!!!!!!!!!!!!!!`.
+
+      **Evidence**
+
+      - The attention code:
+
+        ```python
+        scores = q @ k.transpose(-1, -2) / math.sqrt(head_dim)
+        weights = torch.exp(scores)
+        weights = weights / weights.sum(-1, keepdim=True)
+        out = weights @ v
+        ```
+
+      - The model is a small model that the team trained with the Qwen3
+        tokenizer. The HF attention in float16 works on the same long prompts.
+      - A debug print of the largest score in the first layer: 9.8 for a short
+        prompt, 14.2 for a long prompt.
+      - The failing prompts contain source code. The engineer thinks that the
+        tokenizer handles code badly.
+      - For the long prompts, every value of the logits is `nan`.
+    probes:
+      - ask: What does `torch.exp(scores)` contain for the long prompt?
+        answer: Some values are `inf`. There are none in the short prompt.
+      - ask: What does `torch.argmax` return for a row of only `nan`?
+        answer: "`0`. We tried it: `torch.tensor([float('nan')] * 5).argmax()` gives 0."
+      - ask: What happens in bfloat16?
+        answer: The same code in bfloat16 gives correct text for the long prompts.
+      - ask: Do long prompts without code fail too?
+        answer: Yes. A long English essay fails in the same way.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `torch.exp` overflows in float16. The largest float16
+        value is 65,504, so `exp(x)` is `inf` for every x above
+        ln(65,504) = 11.09. Then `inf / inf` is `nan`, and the `nan` spreads
+        through every later layer. `argmax` of a row of `nan` returns 0, and
+        token 0 is `!`.
+      - **The number.** The long prompt has a score of 14.2, and 14.2 > 11.09.
+        The short prompt has 9.8 < 11.09. The threshold separates the two cases
+        exactly.
+      - **The fix.** Subtract the largest score of each row before `exp`. The
+        softmax does not change, because the factor cancels, and every
+        exponent is then at most 0. Or call `torch.softmax`, which does this
+        for you. Or compute the softmax in float32.
+      - **The guard.** Assert `torch.isfinite(logits).all()` in the test
+        suite. Test the attention with scores above 12, not only with small
+        random numbers.
+
+      **The noise.** The source code in the prompts. The code only makes the
+      prompts long. A long English essay fails in the same way.
+
+      **Why bfloat16 works.** bfloat16 has the same exponent range as float32.
+      Its largest value is 3.4 x 10^38, so `exp(14.2)` fits easily. This is
+      one reason why models run in bfloat16.
+    code: |
+      import math
+      import torch
+      print('largest float16:', torch.finfo(torch.float16).max)
+      print('exp overflows above:', math.log(torch.finfo(torch.float16).max))
+      for score in (9.8, 14.2):
+          print(score, torch.exp(torch.tensor(score, dtype=torch.float16)).item())
+
+  - id: "0.3"
+    title: "Ticket 3: the test passes and the model fails"
+    ticket: |
+      # Ticket 3: the test passes and the model fails
+
+      **Severity:** medium. **Reported by:** a developer.
+
+      > My attention function passes its unit test with a difference of 0.0.
+      > When I put it in the model, the model writes nonsense from the first
+      > token.
+
+      **Evidence**
+
+      - The function:
+
+        ```python
+        def my_attention(q, k, v):
+            scores = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
+            return torch.softmax(scores, dim=-1) @ v
+        ```
+
+      - The test:
+
+        ```python
+        q = torch.randn(1, 16, 1, 128)     # one query
+        k = torch.randn(1, 16, 50, 128)
+        v = torch.randn(1, 16, 50, 128)
+        want = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        assert (my_attention(q, k, v) - want).abs().max() == 0
+        ```
+
+      - The model runs the naive loop of Part 0: each step is a forward pass
+        over the whole prefix.
+      - The developer thinks that the problem is the random tensors in the
+        test, because they are not real activations.
+    probes:
+      - ask: What does the test give with 20 queries instead of 1?
+        answer: The largest difference is 3.1. The test fails.
+      - ask: Is the first generated token correct?
+        answer: No. The first token is already different from the token of HF.
+      - ask: What does the test give with real activations from the model?
+        answer: With one query from the model, the difference is 0.0 again.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `my_attention` has no causal mask. Each position can
+        see the tokens after it. The model never saw that in training, so its
+        hidden states are wrong from the first layer on.
+      - **The number.** The test has one query at the last position. For that
+        query, the causal mask removes nothing: the last token may see all 50
+        keys. So the test cannot fail. In a prefill of L = 20 tokens,
+        L(L - 1)/2 = 190 of the 400 query-key pairs are pairs with the future.
+        The test checks 0 of them.
+      - **The fix.** Add the mask: set the scores above the diagonal to
+        `-inf` before the softmax. Or call SDPA with `is_causal=True`.
+      - **The guard.** Test with the prefill shape: many queries, and the same
+        number of keys. Then test the whole model against HF on a real prompt,
+        and compare the logits.
+
+      **The noise.** The random tensors. Random tensors are a good test. The
+      problem was the shape. With real activations and one query, the test
+      still passes.
+
+      **The lesson.** Ask what your test holds constant. This test held the
+      number of queries at 1, and the bug lives only above 1.
+    code: |
+      L = 20
+      future_pairs = L * (L - 1) // 2
+      print(f'prefill of {L}: {future_pairs} of {L * L} pairs see the future '
+            f'({future_pairs / (L * L):.1%})')
+      print('one query at the last position: 0 pairs see the future')
+
+  - id: "0.4"
+    title: "Ticket 4: the kernel at 0.2% of peak"
+    ticket: |
+      # Ticket 4: the kernel at 0.2% of peak
+
+      **Severity:** low. But it asks for two weeks of work. **Reported by:**
+      the performance team.
+
+      > Our RMSNorm kernel reaches 0.68 TFLOP/s on an L40S. The card can do
+      > 362. That is 0.19% of the peak. We want two engineers for two weeks to
+      > rewrite it.
+
+      **Evidence**
+
+      - The input is 8,192 tokens x 2,048 values in bfloat16. The output has
+        the same shape. The weight is 2,048 values.
+      - One call takes 0.098 ms.
+      - RMSNorm does about 4 FLOP for each value: a square, an add, and two
+        multiplies.
+      - The profiler says that the kernel uses no tensor cores.
+    probes:
+      - ask: What bandwidth does the profiler report for the kernel?
+        answer: Nobody looked at it. The report shows only FLOP/s.
+      - ask: How long does a plain copy of the same tensor take?
+        answer: A `clone()` of the 8,192 x 2,048 input takes 0.091 ms.
+      - ask: What runs before and after the RMSNorm?
+        answer: A residual add runs before it, and a matmul after it.
+    solution: |
+      ### Solution: nothing is broken
+
+      - **Root cause.** RMSNorm is not limited by compute. It reads each value
+        one time and writes it one time, with 4 FLOP in between. That is about
+        1 FLOP for each byte. The ridge point of the L40S is
+        362 / 0.864 = 419 FLOP per byte. So this kernel waits on memory, and
+        FLOP/s is the wrong ruler.
+      - **The number.** The kernel moves 67.1 MB in 0.098 ms: 685 GB/s. That is
+        79% of the 864 GB/s of the card. A plain copy of the same bytes takes
+        0.091 ms. The best possible rewrite saves at most 7%.
+      - **The fix.** Do not rewrite it. If you want the time back, remove
+        bytes: fuse the RMSNorm with the residual add before it. Then the sum
+        never goes to memory and back.
+      - **The guard.** Every kernel report states which roof limits the kernel,
+        and measures the kernel against that roof. For a memory-bound kernel,
+        report GB/s.
+
+      **The noise.** No tensor cores. Tensor cores do matmuls. RMSNorm has no
+      matmul, and it would not be faster with them.
+    code: |
+      tokens, hidden, ms = 8192, 2048, 0.098
+      bytes_moved = tokens * hidden * 2 * 2 + hidden * 2      # read x, write y, read the weight
+      flop = tokens * hidden * 4
+      print(f'intensity: {flop / bytes_moved:.2f} FLOP/byte, ridge: {362e12 / 864e9:.0f}')
+      print(f'{bytes_moved / 1e6:.1f} MB in {ms} ms = {bytes_moved / (ms / 1e3) / 1e9:.0f} GB/s '
+            f'= {bytes_moved / (ms / 1e3) / 864e9:.0%} of the bandwidth')
+      print(f'{flop / (ms / 1e3) / 1e12:.2f} TFLOP/s = {flop / (ms / 1e3) / 362e12:.2%} of the compute')
+
+  - id: "0.5"
+    title: "Ticket 5: a 16 GB model does not fit in 24 GB"
+    ticket: |
+      # Ticket 5: a 16 GB model does not fit in 24 GB
+
+      **Severity:** medium. **Reported by:** a new team.
+
+      > The model card says that Llama-3-8B needs 16 GB. Our card has 24 GB.
+      > The load fails with out of memory. Is the card broken?
+
+      **Evidence**
+
+      - The load code:
+
+        ```python
+        model = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3-8B').cuda()
+        ```
+
+      - The container image has transformers 4.44. In that version,
+        `from_pretrained` loads float32 when you do not give a dtype.
+      - The error:
+
+            torch.OutOfMemoryError: CUDA out of memory. Tried to allocate
+            224.00 MiB. GPU 0 has a total capacity of 23.68 GiB of which
+            180.00 MiB is free. 22.10 GiB is allocated by PyTorch.
+
+      - A desktop session on the same card uses 400 MB.
+    probes:
+      - ask: What dtype do the parameters have?
+        answer: The load does not finish. On the CPU, the same call gives `torch.float32`.
+      - ask: Does the load work on an 80 GB card?
+        answer: Yes. `torch.cuda.memory_allocated()` then shows 32.1 GB.
+      - ask: What happens without the desktop session?
+        answer: The same error, with 22.10 GiB allocated.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The code gives no dtype, so this version of transformers
+        loads the weights in float32: 4 bytes for each parameter, not 2. The
+        16 GB of the model card is for bfloat16.
+      - **The number.** 8.03 B parameters x 4 bytes = 32.1 GB, which does not
+        fit in 24 GB. The failed allocation is a second proof: 224 MiB is
+        exactly one MLP matrix of 4,096 x 14,336 values at 4 bytes each. In
+        bfloat16 it is 112 MiB.
+      - **The fix.** `from_pretrained(..., torch_dtype=torch.bfloat16)`. (In
+        newer versions the argument is `dtype`.)
+      - **The guard.** After the load, assert the dtype of the parameters, and
+        log the bytes of the weights. The Part 1 function `model_bytes` gives
+        the number.
+
+      **The noise.** The desktop session. 400 MB does not explain a gap of
+      8 GB. Without it, the error is the same.
+    code: |
+      params = 8.03e9
+      for name, size in [('float32', 4), ('bfloat16', 2)]:
+          print(f'{name:9s} {params * size / 1e9:5.1f} GB')
+      print('one MLP matrix in float32:', 4096 * 14336 * 4 / 2**20, 'MiB')
+
+  - id: "0.6"
+    title: "Ticket 6: greedy is not greedy"
+    ticket: |
+      # Ticket 6: greedy is not greedy
+
+      **Severity:** medium. **Reported by:** the evaluation team.
+
+      > Our benchmark uses greedy decoding, but the score changes each time we
+      > run it: 61.2, 58.9, 60.4. We set
+      > `torch.use_deterministic_algorithms(True)`, and it did not help. The
+      > GPU is not deterministic.
+
+      **Evidence**
+
+      - The model is Qwen3-1.7B. The harness:
+
+        ```python
+        out = model.generate(input_ids, max_new_tokens=100)
+        ```
+
+      - The `generation_config.json` of the model:
+
+        ```json
+        {"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95,
+         "eos_token_id": [151645, 151643], "pad_token_id": 151643}
+        ```
+
+      - Two runs of the same question often differ from the first or the
+        second token.
+    probes:
+      - ask: What happens with `torch.manual_seed(0)` before each run?
+        answer: Two runs then give the same answers, token for token.
+      - ask: At the first different token, how close are the top two probabilities?
+        answer: |
+          Not close. In one example, the top token has probability 0.41, and
+          the chosen token has 0.12.
+      - ask: What does our own loop with `argmax` give?
+        answer: The same answer on every run.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `generate` reads the defaults from the
+        `generation_config.json` of the model. Qwen3 sets `do_sample: true`,
+        with a temperature of 0.6. The call does not say `do_sample=False`, so
+        the benchmark samples. It is not greedy.
+      - **The number.** Two runs differ at the first or the second token, and
+        with a fixed seed they agree. Numerical noise does not care about a
+        seed. A random number generator does. Also, at the first different
+        token, the chosen token had probability 0.12 against 0.41. Rounding
+        noise can flip a near tie, not a gap of that size.
+      - **The fix.** Pass `do_sample=False`, or write the loop yourself with
+        `argmax`, as you do in Part 0.
+      - **The guard.** Log the effective generation settings with every
+        benchmark result. Run each benchmark two times, and fail when the two
+        scores differ.
+
+      **The noise.** `use_deterministic_algorithms`. It makes the kernels
+      repeat their arithmetic exactly. It does not stop a sampler.
+    code: ''
+
+  - id: "0.7"
+    title: "Ticket 7: every answer is cut short"
+    ticket: |
+      # Ticket 7: every answer is cut short
+
+      **Severity:** medium. **Reported by:** the users of a small internal
+      tool.
+
+      > The answers stop in the middle of a sentence. Long questions get
+      > almost no answer.
+
+      **Evidence**
+
+      - The model is an older model. Its `generation_config.json` sets no
+        length. The service runs transformers 4.40. The code:
+
+        ```python
+        out = model.generate(input_ids)
+        ```
+
+      - Some logged requests:
+
+        | prompt tokens | new tokens |
+        |---|---|
+        | 9 | 11 |
+        | 12 | 8 |
+        | 15 | 5 |
+        | 18 | 2 |
+
+      - The team thinks that the model stops early because it emits its
+        end-of-sequence token too soon.
+    probes:
+      - ask: Is there a warning in the logs?
+        answer: |
+          Yes, at every request: `Using the model-agnostic default max_length (=20)
+          to control the generation length.`
+      - ask: What is the last token of each answer?
+        answer: A normal word. None of the answers ends with the end-of-sequence token.
+      - ask: What does a prompt of 25 tokens give?
+        answer: No new tokens, and a warning that the input is longer than `max_length`.
+    solution: |
+      ### Solution
+
+      - **Root cause.** With no length in the call and none in the config,
+        `generate` uses its own default. In transformers 4.x that default is
+        `max_length = 20`, and that limit counts the prompt **and** the answer.
+        (Newer versions default to 20 **new** tokens. The "break it" notebook
+        shows it.)
+      - **The number.** In every row, prompt + new tokens = 20. A constant sum
+        is a limit on the total length. A model that stops too early does not
+        make a constant sum. Also, no answer ends with the end-of-sequence
+        token.
+      - **The fix.** Pass `max_new_tokens`, which counts only the answer.
+      - **The guard.** Record why each answer ended: a stop token, or a length
+        limit. vLLM calls this `finish_reason`. Alert when the length limit is
+        the reason for many answers.
+
+      **The noise.** The theory of the early end-of-sequence token. The last
+      tokens are normal words, so the model never chose to stop.
+
+      Compare with Ticket 1 of Part 1. There, every answer had the **same
+      length**. Here, every request has the **same total**.
+    code: |
+      for prompt, new in [(9, 11), (12, 8), (15, 5), (18, 2)]:
+          print(prompt, '+', new, '=', prompt + new)
+
+  - id: "0.8"
+    title: "Ticket 8: the assistant finishes my question"
+    ticket: |
+      # Ticket 8: the assistant finishes my question
+
+      **Severity:** high. **Reported by:** the product team.
+
+      > We ask "What is the capital of France?" and the assistant answers
+      > " What is the capital of Germany? What is the capital of Italy?". It
+      > does not answer. It continues the question.
+
+      **Evidence**
+
+      - The model is Qwen3-1.7B, the post-trained model, not `Qwen3-1.7B-Base`.
+        The team checked.
+      - The code:
+
+        ```python
+        ids = tokenizer(question, return_tensors='pt').input_ids
+        out = model.generate(ids, max_new_tokens=100, do_sample=False)
+        ```
+
+      - The logged prompt ids for the question: 7 ids, from `3838` to `30`.
+      - The service uses a temperature of 0.7 in production. The team thinks
+        that the temperature is too high.
+    probes:
+      - ask: How many times does the id 151644 (`<|im_start|>`) appear in the logged prompts?
+        answer: Zero times, in every logged prompt.
+      - ask: What does the prompt look like after `tokenizer.apply_chat_template`?
+        answer: |
+          `<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n`
+          and then the model answers "The capital of France is Paris."
+      - ask: What happens at temperature 0?
+        answer: The same continuation of the question. The ticket shows the greedy output.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The code sends the raw question. A chat model learned
+        to answer only after the chat template: the user turn, the end of the
+        turn, and the start of the assistant turn. Without it, the model sees
+        a document that starts with a question, and it continues the document.
+      - **The number.** The logged prompts contain the id 151644
+        (`<|im_start|>`) zero times. A chat prompt has it at least two times:
+        one for the user turn and one for the assistant turn.
+      - **The fix.** Build the prompt with
+        `tokenizer.apply_chat_template(messages, add_generation_prompt=True)`.
+      - **The guard.** Assert that each chat prompt ends with the assistant
+        header. Keep one golden question in the deploy test.
+
+      **The noise.** The temperature. The output in the ticket is greedy, and
+      it is still wrong.
+
+      **The lesson.** The model is a function of the exact token ids. The chat
+      template is part of the input, not a detail of the display.
+    code: ''
+
+  - id: "0.9"
+    title: "Ticket 9: the vector add that fails for some sizes"
+    ticket: |
+      # Ticket 9: the vector add that fails for some sizes
+
+      **Severity:** low. **Reported by:** a student in the CUDA study group.
+
+      > My vector add kernel passes for 1,024, 4,096 and 65,536 elements. It
+      > fails for 1,000 and 5,000. I have the bounds check, so it cannot be an
+      > index problem.
+
+      **Evidence**
+
+      - The launch:
+
+        ```cuda
+        int threads = 256;
+        int blocks = n / threads;
+        add<<<blocks, threads>>>(a, b, out, n);
+        ```
+
+      - The kernel:
+
+        ```cuda
+        __global__ void add(const float* a, const float* b, float* out, int n) {
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) out[i] = a[i] + b[i];
+        }
+        ```
+
+      - For n = 1,000 the wrong elements are 768 to 999. They contain zeros.
+    probes:
+      - ask: Which elements are wrong for n = 5,000?
+        answer: Elements 4,864 to 4,999. There are 136 of them.
+      - ask: How many blocks run for n = 1,000?
+        answer: 3.
+      - ask: What happens for n = 100?
+        answer: Every element is wrong. The kernel does not run at all.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `n / threads` rounds down. For n = 1,000 the launch
+        gives 3 blocks of 256 threads, 768 threads in total. Nothing writes
+        elements 768 to 999.
+      - **The number.** The number of wrong elements is `n mod 256`:
+        1,000 mod 256 = 232 (768 to 999), and 5,000 mod 256 = 136. The sizes
+        that pass are all multiples of 256.
+      - **The fix.** Round up: `blocks = (n + threads - 1) / threads`. The
+        bounds check then stops the extra threads of the last block.
+      - **The guard.** Test sizes that are not multiples of the block size: a
+        prime, such as 1,009, and a size smaller than one block.
+
+      **The noise.** The bounds check. It protects against too **many**
+      threads. The bug is too **few** threads. The check cannot help.
+    code: |
+      for n in (1000, 5000, 1024, 100):
+          blocks = n // 256
+          print(f'n={n:5d}: {blocks:3d} blocks cover {blocks * 256:5d}, {n - blocks * 256:3d} elements have no thread')
+outro: |
+  ### Before you open the solution
+
+  Go back to each ticket and write one more line: **which piece of evidence was
+  noise, and why did it look relevant?**
+
+  Then go to Part 1. The tickets there use the arithmetic of the KV cache and
+  the roofline.
+patterns: |
+  ### The pattern in the tickets
+
+  | The shape of the number | What it usually means | Tickets |
+  |---|---|---|
+  | An id, a size or a value outside the possible range | Two parts that do not belong together | 1, 5 |
+  | A threshold that separates the good cases from the bad ones | An overflow or a limit | 2, 9 |
+  | A test that holds the important variable constant | A test that cannot fail | 3 |
+  | A good fraction of the correct roof | Nothing is broken | 4 |
+  | A result that changes with the seed | A sampler, not numerics | 6 |
+  | A constant sum | A limit on the total | 7 |
+  | A token that must be present and is not | A missing input format | 8 |
+
+  Part 1 adds the numbers of the KV cache and the roofline. The shapes stay the
+  same.

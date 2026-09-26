@@ -12,6 +12,7 @@ its challenge (`CC..._helper`). Its solution is in `solutions/`.
 | [`2_gather/`](2_gather/) | Decode attention on numbers you can check by hand. The same arithmetic with the keys scattered. Then write the oracle. |
 | [`3_kernels/`](3_kernels/) | Sectors, strides, and a cliff you can predict. Why blocks must outnumber SMs. Then make a gather coalesce. |
 | [`4_sharing/`](4_sharing/) | Refcounts and copy-on-write. Prefix caching, measured. Then build it, and find the hashing bug that gives fluent wrong output. |
+| [`5_incidents/`](5_incidents/) | Eight tickets at the boundaries of the blocks: leaks, block 0, hashes, coalescing and occupancy. Then break working code on purpose, and find three hidden faults from their behaviour. Do this section after stage 09. **The tickets need no GPU. The second notebook needs one.** |
 
 ## Kernel Micro-Architecture & Hardware Profiling
 
@@ -44,10 +45,11 @@ guess why a kernel is slow; you measure the hardware pipeline:
 - **Warp Divergence Elimination:** Stage 08c replaces branched reduction trees with
   register-level warp-shuffle intrinsics (`__shfl_xor_sync`), exchanging data directly
   between registers across warp lanes with zero shared memory and zero divergence.
-- **Low-Level Virtual Memory Management (`cuMemMap`):** Stage 06 implements dynamic
-  virtual address reservation and physical block mapping (`cuMemCreate`, `cuMemMap`,
-  `cuMemSetAccess`), showing how modern runtimes avoid VRAM fragmentation without
-  reallocating giant contiguous buffers.
+- **A model of the CUDA virtual-memory API (`cuMemMap`):** Stage 06 includes
+  `VirtualMemoryBlockManager`, a Python model of address reservation and page mapping
+  (`cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`). It calls no driver API. It lets you
+  reason about a design where the address stays fixed and the memory behind it grows.
+  LORE §18 says which systems use the real API, and why this course pages in software.
 - **PagedAttention vs. Contiguous Memory:** Eliminates up to 80% internal fragmentation
   by bounding waste to `block_size - 1` tokens and enabling zero-copy prompt sharing.
 

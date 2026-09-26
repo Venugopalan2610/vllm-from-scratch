@@ -10,6 +10,7 @@ its challenge (`CC..._helper`). Its solution is in `solutions/`.
 |---|---|
 | [`1_async/`](1_async/) | One loop, two clocks, and what happens when a client disconnects. Then build the engine loop. **No GPU.** |
 | [`2_metrics/`](2_metrics/) | Six numbers, a Pareto frontier, and why throughput is not the answer. Then find which of three projects your p99 asks for. **No GPU.** |
+| [`3_incidents/`](3_incidents/) | Seven tickets around the engine: the event loop, disconnects, proxies, and metrics that lie. Then break working code on purpose, and find three hidden faults from their behaviour. Do this section after stage 16. **No GPU.** |
 
 ## Systems Architecture: Resilient Serving & Zero-Copy IPC
 
@@ -22,12 +23,14 @@ GPU step, stalling the GPU.
   protecting the GPU execution loop from web server overhead.
 
 ### 2. The Bottleneck of `mp.Queue` vs. Zero-Copy Shared Memory
-Standard Python `multiprocessing.Queue` serializes every token event using `pickle`.
-At 5,000 tokens/sec across 100 concurrent streams, `pickle.dumps` and `pickle.loads`
-consume 30–50% of host CPU.
-- **SharedMemoryEventRing (Stage 27):** Implements a POSIX shared-memory circular ring
-  using a fixed binary C-struct (`struct.Struct("32sii64s")`). Zero serialization,
-  zero Python object allocation, zero-copy IPC.
+Standard Python `multiprocessing.Queue` serializes every token event with `pickle`, and
+sends it through a pipe. Measure before you optimize: on a laptop CPU, a pickle round trip
+of a small token event took 1.1 µs, and an `mp.Queue` put and get took 2.4 µs. At 5,000
+events each second that is about 1% of one core. The cost grows with the size of the event
+(for example, log-probabilities for each token), and with the number of events.
+- **SharedMemoryEventRing (Stage 27):** a POSIX shared-memory ring of fixed binary records
+  (`struct.Struct("32sii64s")`). No pickle and no pipe. Exercise F of the course README
+  asks you to measure it against `mp.Queue` on your machine.
 
 ### 3. Cache Line Alignment (`alignas(64)`) & False Sharing
 In multi-threaded schedulers or CPU worker rings, multiple cores update adjacent

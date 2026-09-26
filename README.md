@@ -6,7 +6,7 @@
 
 Stage 01 is the slowest inference engine that you will ever write. It is slow on purpose. For each new token, it computes all the earlier tokens again.
 
-36 stages later, the same GPU runs a production-style inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
+Thirty-one stages later, at stage 28, the same GPU runs a production-style inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
 
 ---
 
@@ -37,7 +37,7 @@ Its twelve chapters start from arithmetic that you can do on a napkin and work o
 - **[Spending the Idle](https://derivingsystems.com/12-spending-the-idle.html)** — Sets up Stage 17 (lossless speculative decoding).
 
 Inside this repository, two key companion documents guide your implementation:
-- **[LORE.md](LORE.md)** — The conceptual spine. 25 sections of mathematical proofs, memory wall derivations, hardware profiling guides, and systems architecture.
+- **[LORE.md](LORE.md)** — The conceptual spine. Derivations of the memory wall, hardware profiling guides, and systems architecture.
 - **[`course/GLOSSARY.md`](course/GLOSSARY.md)** — Defines every systems and ML term with an analogy from traditional software engineering.
 
 ---
@@ -50,21 +50,21 @@ You build one complete, high-performance LLM serving system from first principle
 | :--- | :--- | :--- |
 | **A0: The Memory Wall** | 01–03 | Naive quadratic loop, KV cache memoization, and the hardware roofline model |
 | **A1: The Batching Shift** | 04–05 | Static batching padding waste, then continuous batching (the Orca iteration schedule) |
-| **A2: PagedAttention & CUDA** | 06–09 | **PagedAttention**: virtual memory allocator (`cuMemMap`), **3 custom CUDA kernels (08, 08b, 08c)**, and radix-tree prefix caching |
-| **A3: The Scheduler** | 10–11 | Priority admission, recompute/swap preemption, and chunked prefill with SM budgeting |
-| **A4: Latency & Output** | 12–14 | CUDA Graphs decode replay (2 µs dispatch), batched rejection sampler, and streaming UTF-8 detokenizer |
+| **A2: PagedAttention & CUDA** | 06–09 | **PagedAttention**: a block allocator and page tables (plus a model of the CUDA virtual-memory API), **3 custom CUDA kernels (08, 08b, 08c)**, and hash-chained prefix caching with copy-on-write |
+| **A3: The Scheduler** | 10–11 | Admission against a KV budget, recompute/swap preemption, and chunked prefill with a token budget |
+| **A4: Latency & Output** | 12–14 | CUDA Graphs decode replay with shape buckets, a batched sampler (temperature, top-k, top-p, penalties, seeds), and a streaming UTF-8 detokenizer |
 | **A5: Production Serving** | 15–16 | Async worker loop, OpenAI-compatible HTTP server (`/v1/chat/completions`), and Prometheus telemetry (TTFT, ITL) |
 | **A6: Advanced Acceleration**| 17–20 | Tree-attention speculative decoding, quantization (**+ 18b, a custom Int8 GEMV CUDA kernel**), JSON grammar masking, and Megatron-style Tensor Parallelism |
-| **A7: The Capstone Engine** | 21–28 | **The integrated server**: paged model, scheduler, graphs with pinned staging buffers, int8 weights, FP8 KV cache (24b), tree speculation, zero-copy POSIX shared-memory IPC, and client disconnect abort |
-| **A8: The Frontier Extension** | 29–32 | **Advanced single-GPU serving**: LRU prefix cache eviction & cache-aware admission (29), Multi-LoRA serving with Batched GEMV (30), DeepSeek Multi-Head Latent Attention (MLA) with decode weight absorption (31), and TypeSafe Jev System 1 typed decision models (32) |
-| **Capstone Practicums** | I, J, K | **Whole-system timeline profiling (`./vc nsys`)**, **hardware counters & bank conflict analysis (`./vc ncu`)**, and **TensorRT-LLM architecture synthesis** |
+| **A7: The Capstone Engine** | 21–28 | **The integrated server**: paged model, scheduler, graphs with pinned staging buffers, int8 weights, FP8 KV cache (24b), n-gram speculative decoding, guided JSON, a POSIX shared-memory event ring, and client disconnect abort |
+| **A8: Beyond the Capstone** | 29–31 | LRU prefix cache eviction & cache-aware admission (29). **Optional extensions, with thin checks:** Multi-LoRA serving with batched GEMV (30), and DeepSeek Multi-Head Latent Attention (MLA) with decode weight absorption (31) |
+| **Capstone Practicums** | I, J, K | **I:** a timeline with Nsight Systems, a notebook with checks. **J:** hardware counters with Nsight Compute, a notebook with checks. **K (optional reading):** map your engine onto TensorRT-LLM |
 
 ### Bare-Metal CUDA (Not Triton)
 Five stages hold **CUDA that you write yourself** in real `.cu` files, compiled directly with `nvcc`:
 - **Stage 08:** Paged attention decode kernel (`s08_paged_attn.cu`).
 - **Stage 08b:** The same kernel, optimized for 128-byte DRAM transaction coalescing (`s08b_paged_attn_vec.cu`).
 - **Stage 08c:** Intra-warp register shuffles (`__shfl_xor_sync`) and context split-K parallel reduction (`s08c_paged_attn_split.cu`).
-- **Stage 18b:** Quantized Int8 matrix-vector multiply (GEMV) with fused bias epilogue (`s18b_gemv_int8.cu`).
+- **Stage 18b:** Quantized Int8 matrix-vector multiply (GEMV) with the dequantization fused into the epilogue (`s18b_gemv_int8.cu`).
 - **Stage 24b:** Paged attention operating over an FP8 KV cache (`s24b_kv_fp8.cu`).
 
 ---
@@ -78,7 +78,7 @@ The Capstone (Stages 21–28) connects your parts into one engine and gates your
 | Tokens against HuggingFace in fp32 | Identical | Identical |
 | Batch-1 decode step, against weight-read floor | 57% to 71% | 50% |
 | CUDA graphs against eager, at batch 1 | 1.3x to 1.5x | 1.2x |
-| Int8 weights against bf16, batch-1 step | 1.47x to 1.55x | 1.3x |
+| Int8 weights against bf16, batch-1 step | 1.27x (a hot laptop card) to 1.55x | 1.2x |
 | FP8 KV against bf16 KV, 16 x 2048 tokens | 1.33x to 1.46x | 1.2x |
 | Int8 weights: KL from bf16 at generated tokens | 0.004 nats | 0.015 nats |
 | FP8 KV cache: KL from bf16 through decode kernel | 0.009 nats | 0.03 nats |
@@ -98,22 +98,19 @@ To benchmark, inspect, and serve your engine on your machine:
 
 ### Production vLLM Parity: What You Built vs. Upstream
 
-You built the complete single-GPU core of vLLM. Here is how your engine maps to upstream production vLLM:
+You built the core ideas of single-GPU vLLM, in a smaller and slower form. Here is how your engine maps to upstream vLLM. Upstream changes fast: check the current source before you rely on a name in the right column.
 
 | Architectural Component | Built in this course | Upstream Production Scope |
 | :--- | :--- | :--- |
 | **Paged KV Cache** | Custom CUDA kernels (coalesced, split-K, FP8) | FlashAttention-3 / FlashInfer backends |
 | **Continuous Batching** | Dynamic iteration-level prefill & decode scheduler | Same architecture (Orca scheduler) |
-| **Prefix Caching** | Radix cache + LRU eviction under memory pressure (Stage 29) | Upstream v1 BlockManager LRU cache |
-| **Multi-LoRA Serving** | Multi-LoRA dispatch + Batched GEMV (Stage 30) | Upstream Punica / BGMV CUDA kernels |
-| **MLA Attention** | DeepSeek MLA + Decode Weight Absorption (Stage 31) | Upstream DeepSeek-V2/V3 decode kernels |
-| **Graph Dispatch** | CUDA Graphs with pinned staging buffers (Stage 12, 23) | Same architecture (`CUDAGraphRunner`) |
-| **Speculative Decoding** | Multi-branch Tree-Attention + n-gram drafts (Stage 17, 25) | Speculative decoding framework |
+| **Prefix Caching** | Hash-chained block cache (Stage 09) + LRU eviction under memory pressure (Stage 29) | Hash-based prefix caching of full blocks, with an LRU queue of free blocks (vLLM V1). SGLang uses a radix tree instead. |
+| **Multi-LoRA Serving** | Multi-LoRA dispatch + Batched GEMV (Stage 30, optional) | Upstream Punica / BGMV CUDA kernels |
+| **MLA Attention** | DeepSeek MLA + Decode Weight Absorption (Stage 31, optional) | Upstream DeepSeek-V2/V3 decode kernels |
+| **Graph Dispatch** | CUDA Graphs with pinned staging buffers (Stage 12, 23) | CUDA graphs captured for a set of batch sizes. The class names change between versions. |
+| **Speculative Decoding** | N-gram drafts, rejection sampling and a tree-attention mask (Stage 17); n-gram drafts in the engine (Stage 25) | N-gram, draft-model and EAGLE-style speculation |
 | **Structured Output** | Automaton JSON grammar mask compilation (Stage 19, 26) | Outlines / XGrammar integration |
 | **Server & IPC** | `/v1/chat/completions` + POSIX shared memory ring (Stage 27) | AsyncLLM engine & multi-process IPC |
-| **System 1 Decision Models** | Clean-room TypeSafe Jev architecture (Choice, Score, Noul) with zero KV-cache overhead (Stage 32) | Front-door admission, fast guardrails, and dynamic routing |
-
-> *Note on Jev (Stage 32): TypeSafe AI's commercial Jev weights are closed-source/hosted. Stage 32 implements a clean-room architecture of the published Jev System 1 specification (Choice, Score, Noul), which can be mounted onto open encoder backbones (e.g. `microsoft/deberta-v3-large` or community reproductions) for local deployment.*
 
 #### What Requires Multi-GPU / Multi-Node Hardware
 Features intentionally beyond the single-GPU scope of this course:
@@ -184,7 +181,7 @@ The course uses a unified CLI (`./vc`) to guide your implementation and verify c
 ./vc test 8 --jax     # Test on the JAX track without switching
 ```
 
-- **PyTorch Track (32 stages):** Compiles raw `.cu` files with `nvcc` and captures CUDA Graphs.
+- **PyTorch Track (33 core stages, and 2 optional extensions):** Compiles raw `.cu` files with `nvcc` and captures CUDA Graphs.
 - **JAX Track (20 stages):** Uses `jvllm/model.py`, Pallas GPU kernels, and static shape bucketing to eliminate XLA recompilation.
 - **Framework-Free Stages:** 9 stages (the block allocator, prefix cache, scheduler, detokenizer, metrics, and speculative verification) contain zero tensor code—proving that the core architecture of an inference engine is pure systems logic.
 
@@ -193,7 +190,7 @@ The course uses a unified CLI (`./vc`) to guide your implementation and verify c
 ## CLI Reference
 
 ```bash
-./vc list             # The full 32-stage ladder with your progress
+./vc list             # The full ladder with your progress
 ./vc guide 12         # Read the guide for any specific stage
 ./vc test 7           # Run checks for any specific stage
 ./vc info             # Print measured GPU bandwidth, TFLOPs, and roofline ridge

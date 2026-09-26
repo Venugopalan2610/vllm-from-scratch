@@ -1,0 +1,407 @@
+# The incident file of Part 8. dev/build_incident_files.py builds the two
+# notebooks from this file, and the /incident skill reads it.
+part: 8
+part_name: The Capstone
+folder: course/Part8_TheCapstone/7_incidents
+intro: |
+  You finished the capstone. Every part now runs in one engine, and the engine
+  runs against the roof. In a whole engine, the failures come from the seams
+  between the parts: the scheduler and the pool, the graph and the staging
+  buffers, the benchmark and the prefix cache. The profilers of Part 8 give
+  you the evidence.
+
+  Each ticket gives you a **symptom** and some **evidence**. Some of the
+  evidence is noise. Write four lines for each ticket:
+
+  1. **Root cause.** One sentence.
+  2. **The number that proves it.** Not "it looks like". A computation.
+  3. **The fix.**
+  4. **The guard.** A test, an assert or an alert that catches it next time.
+
+  Four rules:
+
+  - The tickets are **not** in the order of the notebooks.
+  - At least one ticket is **not a bug**. "Nothing is broken" is a valid answer
+    only if a number proves it.
+  - Write your answer **before** you open the solution.
+  - Every ticket has a scratch cell.
+
+  Do this section after stage 28. This notebook needs no GPU.
+reference: |
+  ### The reference sheet
+
+  | GPU | Memory | Bandwidth |
+  |---|---|---|
+  | L40S | 48 GB | 864 GB/s |
+
+  | Model | bf16 weights | KV bytes per token |
+  |---|---|---|
+  | Qwen3-1.7B | 3.44 GB | 114,688 (112 KiB) |
+
+  The floor of one decode step, from stage 28:
+
+      t_step >= max(W / BW, 2 P B / FLOPS) + B x c x kv / BW
+
+  - Shared memory has 32 banks, each 4 bytes wide. Two threads of a warp that
+    read different addresses in the same bank wait for each other.
+  - A ratio of more than 100% of the floor is never a fast engine. It is a
+    broken measurement.
+tickets:
+  - id: "8.1"
+    title: "Ticket 1: the engine at 131% of the roof"
+    ticket: |
+      # Ticket 1: the engine at 131% of the roof
+
+      **Severity:** low. But it goes into the capstone report. **Reported
+      by:** a student.
+
+      > My engine runs at 131% of the roofline floor. I think my kernels beat
+      > the hardware.
+
+      **Evidence**
+
+      - The benchmark computes the floor from the requests: the prompt tokens
+        and the output tokens of each request.
+      - The workload has a shared system prompt. The prefix cache hit rate is
+        64% of the prompt tokens.
+      - In the floor, 70% of the time comes from the prompt tokens, and 30%
+        from the output tokens.
+    probes:
+      - ask: What is the ratio with the prefix cache off?
+        answer: 70%, close to the corrected ratio.
+      - ask: How many prefill tokens did the engine really compute?
+        answer: 36% of the prompt tokens.
+      - ask: Does the stage 28 benchmark compute the floor from the requests or from the steps?
+        answer: From the steps that the engine ran.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The floor counts work that the engine never did. The
+        prefix cache skipped 64% of the prompt tokens, and the floor still
+        charges for them. The engine did less work than the floor assumes.
+      - **The number.** The true floor is 0.30 + 0.70 x 0.36 = 0.552 of the
+        computed floor. So the true ratio is 1.31 x 0.552 = 72%. That is a
+        good engine, below 100%, as physics requires.
+      - **The fix.** Compute the floor from the steps that the engine really
+        ran, with the tokens that each step computed. This is the design of
+        stage 28.
+      - **The guard.** Assert that the ratio is below 100%. A ratio above the
+        roof is always a measurement bug (Part 1, Ticket 4).
+    code: |
+      true_fraction = 0.30 + 0.70 * 0.36
+      print(f'true floor = {true_fraction:.3f} of the computed floor; ratio {1.31 * true_fraction:.0%}')
+
+  - id: "8.2"
+    title: "Ticket 2: int8 weights that do nothing for long documents"
+    ticket: |
+      # Ticket 2: int8 weights that do nothing for long documents
+
+      **Severity:** medium. **Reported by:** the team of the document
+      service.
+
+      > int8 weights made the chat service 1.4x faster. For our long documents
+      > they gave 1.05x. Is the int8 path broken at long context?
+
+      **Evidence**
+
+      - Qwen3-1.7B on an L40S.
+      - The chat service: batch 1, contexts of about 512 tokens.
+      - The document service: batch 16, contexts of about 16,384 tokens.
+      - The int8 GEMV reads half the bytes of bf16. The team checked this with
+        Nsight Compute on both services.
+    probes:
+      - ask: How many bytes of KV does one step of the document service read?
+        answer: About 30 GB.
+      - ask: What fraction of the step time is in the attention kernel for the documents?
+        answer: About 88%.
+      - ask: Does the int8 path give correct results for the documents?
+        answer: Yes. The KL from bf16 is 0.008 nats.
+    solution: |
+      ### Solution: nothing is broken
+
+      - **Root cause.** At long context the KV cache, not the weights, is most
+        of the bytes of a step. int8 halves the weights, and the weights are a
+        small part.
+      - **The number.** The document step reads 3.44 GB of weights and
+        16 x 16,384 x 114,688 = 30.1 GB of KV. int8 saves 1.72 GB of 33.5 GB:
+        the floor improves by 1.05x, which is the measurement. For chat, the KV
+        is only 0.06 GB, and the weights are almost everything: the floor
+        improves by 1.97x.
+      - **The fix.** For long context, shrink the KV: the FP8 KV cache
+        (stage 24b) halves it, and the floor improves by 1.81x, or 2.0x
+        together with int8.
+      - **The guard.** Before you choose an optimization, split the bytes of the
+        step into weights and KV for the real workload.
+    code: |
+      kv_token = 114_688
+      for name, batch, context in [('chat', 1, 512), ('documents', 16, 16_384)]:
+          kv = batch * context * kv_token / 1e9
+          bf16 = 3.44 + kv
+          print(f'{name:9s}: KV {kv:5.2f} GB, int8 weights {bf16 / (1.72 + kv):.2f}x, '
+                f'FP8 KV {bf16 / (3.44 + kv / 2):.2f}x, both {bf16 / (1.72 + kv / 2):.2f}x')
+
+  - id: "8.3"
+    title: "Ticket 3: the gaps between the steps"
+    ticket: |
+      # Ticket 3: the gaps between the steps
+
+      **Severity:** medium. **Reported by:** a student with a profile.
+
+      > My kernels reach 82% of the floor. The engine reaches only 59%. Where
+      > does the rest go?
+
+      **Evidence**
+
+      - The Nsight Systems timeline of the decode steps: the GPU row shows 11 ms
+        of work, then 4.2 ms of nothing, then the next step.
+      - The NVTX ranges on the CPU row in the gap: `schedule` 1.1 ms,
+        `prepare_inputs` 1.6 ms, `detokenize` 1.3 ms, `graph.replay` 0.2 ms.
+      - The CPU prepares step n + 1 only after step n has finished.
+    probes:
+      - ask: What does the GPU do during `detokenize`?
+        answer: Nothing. The row is empty.
+      - ask: How long is a whole step, from one start to the next?
+        answer: 15.2 ms.
+      - ask: How much of `prepare_inputs` is the copy of the block tables?
+        answer: 0.3 ms. The rest is Python that builds lists.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The CPU work of each step runs in series with the GPU
+        work. While the CPU schedules, prepares and detokenizes, the GPU is
+        idle.
+      - **The number.** The gap is 4.2 ms of a 15.2 ms step: the GPU is idle
+        28% of the time. 82% x 11 / 15.2 = 59%, which is the engine ratio. If
+        the gap were hidden, the engine could be 15.2 / 11 = 1.38x faster.
+      - **The fix.** Overlap: prepare step n + 1 while the GPU runs step n, and
+        detokenize in another thread or process. vLLM V1 does both.
+      - **The guard.** Export the GPU idle fraction between steps. Put an NVTX
+        range on each phase, and check the timeline after each change.
+
+      **The noise.** None. The kernel number is correct. It shows that the
+      problem is between the kernels.
+    code: |
+      gpu, gap = 11.0, 4.2
+      print(f'idle {gap / (gpu + gap):.0%}; engine ratio {0.82 * gpu / (gpu + gap):.0%}; '
+            f'best case {(gpu + gap) / gpu:.2f}x')
+
+  - id: "8.4"
+    title: "Ticket 4: one block lost for each preemption"
+    ticket: |
+      # Ticket 4: one block lost for each preemption
+
+      **Severity:** high. **Reported by:** a student, after a load test.
+
+      > After the overload test, with no request active, the pool has 6,750
+      > free blocks of 8,000. Before the test it had 8,000. My leak test
+      > without preemption passes.
+
+      **Evidence**
+
+      - The test caused 1,250 preemptions.
+      - The code that preempts:
+
+        ```python
+        def preempt(self, seq):
+            for block in seq.block_table[:-1]:
+                self.allocator.free(block)
+            seq.block_table.clear()
+            self.waiting.appendleft(seq)
+        ```
+
+      - The comment above the `[:-1]` says: "the last block may be shared by
+        the prefix cache".
+      - The prefix cache holds 0 blocks after the test.
+    probes:
+      - ask: How many blocks are lost after a test with 10 preemptions?
+        answer: 10.
+      - ask: Can the last block of a running sequence be shared?
+        answer: Only a full block goes into the prefix cache. The last block of a running sequence is usually partial.
+      - ask: Does `free` handle a shared block correctly?
+        answer: Yes. It decrements the reference count, and it frees the block only at 0.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `preempt` frees every block except the last one, then
+        clears the table. Nothing points to the last block any more, so it is
+        lost.
+      - **The number.** 8,000 - 6,750 = 1,250 blocks lost, and the test caused
+        1,250 preemptions: exactly one block for each. A test with 10
+        preemptions loses 10.
+      - **The fix.** Free every block: `for block in seq.block_table`. `free`
+        already handles a shared block with its reference count, so the
+        special case is not needed.
+      - **The guard.** The idle invariant of Part 3: free + cached + in use =
+        total, checked after every test. A leak test **with** preemption.
+
+      **The noise.** The comment. It describes a real concern, and the
+      reference count already handles it. The special case causes the bug.
+    code: |
+      print('lost:', 8000 - 6750, ' preemptions: 1250')
+
+  - id: "8.5"
+    title: "Ticket 5: one wrong token in five thousand"
+    ticket: |
+      # Ticket 5: one wrong token in five thousand
+
+      **Severity:** high. Hard to reproduce. **Reported by:** the evaluation
+      team.
+
+      > Under heavy load, about one step in 5,000 produces a wrong token. At
+      > low load, never. With `CUDA_LAUNCH_BLOCKING=1`, never.
+
+      **Evidence**
+
+      - The staging of the block tables before a graph replay:
+
+        ```python
+        self.cpu_tables[:n].copy_(torch.tensor(tables))          # a pinned buffer, reused
+        self.gpu_tables.copy_(self.cpu_tables, non_blocking=True)
+        graph.replay()
+        # the loop continues and prepares the next step at once
+        ```
+
+      - The wrong tokens appear only when the CPU runs ahead of the GPU by more
+        than one step.
+      - The team suspects a bad GPU, because the error is rare.
+    probes:
+      - ask: What happens with two pinned buffers, used in turn?
+        answer: No wrong token in 2 million steps.
+      - ask: Does the same card give wrong tokens in another engine?
+        answer: No.
+      - ask: When does the copy from the pinned buffer really run?
+        answer: When the GPU reaches it in the stream, which can be after the CPU has written the next step into the buffer.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `non_blocking=True` from pinned memory returns at once.
+        The copy runs later, when the GPU stream reaches it. The CPU then
+        writes the **next** step into the same buffer. When the GPU is behind,
+        the copy reads the tables of the next step.
+      - **The number.** The error needs the CPU to be more than one step ahead,
+        which happens only under load. `CUDA_LAUNCH_BLOCKING=1` makes every
+        launch wait, so the CPU can never run ahead, and the error disappears.
+        A bad GPU does not depend on the launch mode.
+      - **The fix.** Two staging buffers used in turn, or record a CUDA event
+        after the copy, and wait on it before the next write to the buffer.
+      - **The guard.** A stress test that keeps the CPU ahead of the GPU and
+        compares each token with an eager run.
+
+      **The noise.** The bad GPU. The same card is correct in another engine,
+      and the error follows the load, not the card.
+    code: ''
+
+  - id: "8.6"
+    title: "Ticket 6: the kernel with 31 bank conflicts for each read"
+    ticket: |
+      # Ticket 6: the kernel with 31 bank conflicts for each read
+
+      **Severity:** low. **Reported by:** a student with Nsight Compute.
+
+      > My kernel keeps a tile of floats in [shared memory](../../GLOSSARY.md#shared-memory), and a warp reads one
+      > column of it. `./vc ncu` shows 31 bank conflicts for each shared load.
+      > The kernel is 3x slower than I predicted.
+
+      **Evidence**
+
+      - The tile:
+
+        ```cuda
+        __shared__ float tile[32][128];
+        float x = tile[threadIdx.x][col];      // 32 threads, 32 rows, one column
+        ```
+
+      - The counter
+        `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` divided by
+        the number of shared loads is 31.
+      - The student thinks that shared memory is just slow on this card.
+    probes:
+      - ask: Which bank does `tile[r][col]` fall into?
+        answer: "`(r x 128 + col) mod 32`."
+      - ask: What is the counter after a change to `tile[32][129]`?
+        answer: 0.
+    solution: |
+      ### Solution
+
+      - **Root cause.** A row has 128 floats, and 128 is a multiple of 32. So
+        `tile[r][col]` falls into bank `(r x 128 + col) mod 32 = col mod 32` for
+        every row. All 32 threads read the same bank, one after the other.
+      - **The number.** 128 mod 32 = 0, so 32 threads share one bank: 32
+        transactions instead of 1, which is 31 extra, exactly the counter.
+      - **The fix.** Pad each row by one float: `tile[32][129]`. Then the bank
+        is `(r + col) mod 32`, which is different for each thread. Or use an
+        XOR swizzle.
+      - **The guard.** The bank conflict counter in the kernel review, with a
+        target of 0.
+
+      **The noise.** "Shared memory is slow". Without conflicts, a shared
+      load of a warp takes one transaction.
+    code: |
+      for width in (128, 129):
+          banks = {(r * width + 5) % 32 for r in range(32)}
+          print(f'row width {width}: the 32 threads touch {len(banks)} banks')
+
+  - id: "8.7"
+    title: "Ticket 7: new users wait forever at the peak"
+    ticket: |
+      # Ticket 7: new users wait forever at the peak
+
+      **Severity:** critical. **Reported by:** users.
+
+      > At the peak, new requests never get a first token. The running users
+      > also see their text stutter.
+
+      **Evidence**
+
+      - `max_num_seqs` is 256. The token budget for each step is 192.
+      - The scheduler gives the budget to the running decodes first, then to
+        the prefills.
+      - At the peak, 230 sequences are running.
+      - The team thinks that the GPU is too small for the peak.
+    probes:
+      - ask: How many decodes run in each step at the peak?
+        answer: 192.
+      - ask: How many prefill tokens run in each step at the peak?
+        answer: 0.
+      - ask: What happens to the other 38 running sequences in a step?
+        answer: They wait for the next step. Each step, a different set of them waits.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The budget is smaller than the number of sequences that
+        the scheduler lets run. The decodes take the whole budget, so the
+        prefills get nothing, and some decodes must skip each step.
+      - **The number.** 230 running > 192 tokens. 38 decodes skip each step,
+        which is the stutter, and 0 tokens remain for a prefill, which is the
+        infinite wait.
+      - **The fix.** Make the budget larger than `max_num_seqs` plus a useful
+        chunk, for example 256 + 512. Or lower `max_num_seqs` below the budget.
+      - **The guard.** Assert at startup that the token budget is larger than
+        `max_num_seqs`. Alert on steps with 0 prefill tokens while the queue is
+        not empty.
+
+      **The noise.** "The GPU is too small". The configuration makes the
+      starvation, at any GPU size.
+    code: |
+      running, budget = 230, 192
+      print('decodes that skip:', max(0, running - budget), ' prefill tokens left:', max(0, budget - running))
+outro: |
+  ### Before you open the solution
+
+  Go back to each ticket and write one more line: **which piece of evidence was
+  noise, and why did it look relevant?**
+patterns: |
+  ### The pattern in the tickets
+
+  | The shape of the number | What it usually means | Tickets |
+  |---|---|---|
+  | A ratio above 100% of the roof | A floor that counts work that did not happen | 1 |
+  | A small gain that the byte split predicts | The optimization targets the smaller term | 2 |
+  | GPU idle time between the steps | CPU work in series with the GPU | 3 |
+  | A loss that equals the count of one event | A leak on one code path | 4 |
+  | An error that the launch mode removes | A race between the CPU and the GPU | 5 |
+  | A counter that equals 31 | A stride that is a multiple of 32 | 6 |
+  | Running sequences above the budget | A configuration that starves someone | 7 |
+
+  The same shapes appeared in Parts 1 to 7. In a whole engine they appear at the
+  seams between the parts.

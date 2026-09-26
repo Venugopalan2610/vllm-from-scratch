@@ -211,9 +211,9 @@ def test_internal_waste_is_under_one_block(hf):
 
 
 def test_virtual_memory_cu_mem_map_lifecycle():
-    """vLLM V1 architecture: dynamic physical page mapping (cuMemMap).
-    Virtual address space is reserved up-front, while physical GPU pages are mapped/unmapped
-    dynamically on demand without tensor reallocation or VRAM fragmentation."""
+    """A model of the CUDA virtual memory API (cuMemMap), in Python.
+    The address space is reserved up-front, and physical pages are mapped and
+    unmapped on demand. The model counts them. It calls no driver function."""
     # Reserve a 64-block virtual space
     vmm = VirtualMemoryBlockManager(virtual_capacity_blocks=64, page_size_blocks=16)
     assert vmm.virtual_address_reserved is True

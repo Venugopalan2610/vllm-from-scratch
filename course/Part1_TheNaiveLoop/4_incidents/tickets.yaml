@@ -1,0 +1,787 @@
+# The incident file of Part 1. dev/build_incident_files.py builds the two
+# notebooks from this file, and the /incident skill reads it.
+part: 1
+part_name: The Naive Loop
+folder: course/Part1_TheNaiveLoop/4_incidents
+intro: |
+  You finished Part 1. You can build the loop. Now you must see when a loop is
+  broken from the outside, with only the symptoms.
+
+  That is the real job. In production nobody tells you "the position ids are off
+  by one". A user tells you "the answers got worse on Tuesday".
+
+  Each ticket below is a real class of failure in LLM serving. Each ticket gives
+  you a **symptom** and some **evidence**. Some of the evidence is noise, as in a
+  real incident. Write four lines for each ticket:
+
+  1. **Root cause.** One sentence.
+  2. **The number that proves it.** Not "it looks like". A computation.
+  3. **The fix.**
+  4. **The guard.** A test, an assert or an alert that catches it next time.
+
+  Four rules:
+
+  - The tickets are **not** in the order of the notebooks. First you must find
+    which idea the ticket needs. That is half of the skill.
+  - At least one ticket is **not a bug**. "Nothing is broken" is a valid answer
+    only if a number proves it.
+  - Write your answer **before** you open the solution. A wrong answer that you
+    wrote down teaches you more than a right answer that you read.
+  - Every ticket has a scratch cell. Most tickets need one computation.
+
+  This notebook needs no GPU.
+reference: |
+  ### The reference sheet
+
+  The tickets use these numbers. The GPU numbers are the vendor peaks for dense
+  bf16. Real code gets 70 to 90% of the bandwidth peak.
+
+  | GPU | Memory | Bandwidth | bf16 compute |
+  |---|---|---|---|
+  | A100 SXM 80GB | 80 GB | 2,039 GB/s | 312 TFLOP/s |
+  | H100 SXM 80GB | 80 GB | 3,350 GB/s | 989 TFLOP/s |
+  | L40S | 48 GB | 864 GB/s | 362 TFLOP/s |
+  | your card | `./vc info` | `./vc info` | `./vc info` |
+
+  | Model | Layers | Attention heads | KV heads | head_dim | hidden | vocab | bf16 weights |
+  |---|---|---|---|---|---|---|---|
+  | Qwen3-0.6B | 28 | 16 | 8 | 128 | 1024 | 151,936 | 1.5 GB |
+  | Qwen3-1.7B | 28 | 16 | 8 | 128 | 2048 | 151,936 | 3.44 GB |
+  | Llama-3-8B | 32 | 32 | 8 | 128 | 4096 | 128,256 | 16.1 GB |
+
+  Two formulas from Part 1:
+
+      KV bytes per token = 2 (K and V) x layers x KV heads x head_dim x bytes per value
+      decode floor (s)   = bytes read per step / bandwidth
+tickets:
+  - id: "1.1"
+    title: "Ticket 1: the bill"
+    ticket: |
+      # Ticket 1: the bill
+
+      **Severity:** high. **Reported by:** finance.
+
+      > The GPU bill for the chat service went up 9x this month. Traffic is flat.
+
+      **Evidence**
+
+      - Last month the service moved from an old model to Qwen3-1.7B. The team
+        changed only the model name.
+      - The new model has a larger vocabulary than the old one: 151,936 against
+        32,000.
+      - 100% of the responses since the change have exactly 1024 tokens.
+        `max_tokens` is 1024.
+      - A sample response:
+
+            Hello! How can I help you today?<|im_end|>
+
+            Hello! How can I help you today?<|im_end|>
+
+            Hello! How can I help you today?<|im_end|>
+            ...
+
+      - The stop check in the serving code:
+
+        ```python
+        STOP = model.generation_config.eos_token_id
+        ...
+        if next_token == STOP:
+            break
+        ```
+
+      - The old model's `generation_config.json` has `"eos_token_id": 2`. The new
+        one has `"eos_token_id": [151645, 151643]`.
+    probes:
+    - ask: What did the response lengths look like before the change?
+      answer: |
+        Spread from 3 to 900 tokens, median 140. 0.4% of the responses ended at
+        `max_tokens`.
+    - ask: What type does `next_token` have in the stop check?
+      answer: |
+        A Python `int` from `.item()`, for example `151645`. `STOP` prints as
+        `[151645, 151643]`.
+    - ask: How often does the stop token appear inside one response?
+      answer: |
+        In the sample of 1024 tokens, the token 151645 (`<|im_end|>`) appears
+        38 times.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `generation_config.eos_token_id` is a list for the new model.
+        In Python, `int == list` is always `False` and never raises an error. So the
+        loop never stops, and every response runs to `max_tokens`.
+      - **The number.** 100% of the responses have exactly 1024 tokens. A healthy
+        service has a spread of lengths. A wall at `max_tokens` means that the stop
+        check never fires. The sample shows the stop token `<|im_end|>` in the text
+        itself. The model tried to stop, and the loop ignored it.
+      - **The fix.** Normalize the stop ids to a set, as your stage 01 does:
+        `set(stop) if isinstance(stop, list) else {stop}`. Then check
+        `next_token in stop_ids`.
+      - **The guard.** Alert on the fraction of responses that end because of the
+        length limit. vLLM reports this as `finish_reason="length"`. Add a test with
+        a prompt that must stop in fewer than 20 tokens.
+
+      **The noise.** The larger vocabulary. It changes the size of the logits, not the
+      number of tokens.
+
+      **The lesson.** A config field can change its type between models. Your stage
+      01 docstring warned you about this exact field.
+  - id: "1.2"
+    title: "Ticket 2: the upgrade"
+    ticket: |
+      # Ticket 2: the new GPUs are slower
+
+      **Severity:** medium. **Reported by:** the platform team.
+
+      > We moved the private assistant from A100 to L40S. The L40S has more
+      > TFLOP/s, so we expected it to be faster. It is slower. Is the L40S driver
+      > broken?
+
+      **Evidence**
+
+      - The model is Llama-3-8B in bf16. Each GPU serves one user at a time, so the
+        batch size is 1.
+      - On A100 the users got 104 tokens/s. On L40S they get 45 tokens/s.
+      - The team checked that the driver and the CUDA version are the ones that the
+        vendor recommends.
+      - `nvidia-smi` on the L40S shows 99% "utilization" during generation.
+      - The prompts are short, less than 200 tokens. The replies are long, about 600
+        tokens.
+    probes:
+    - ask: What does a prefill cost on each card?
+      answer: |
+        A prompt of 200 tokens: 18 ms on the A100, 16 ms on the L40S. The L40S
+        is faster at prefill.
+    - ask: Do the cards throttle?
+      answer: |
+        No. Both run at full clocks, at 62 to 66 °C, during a run of 10 minutes.
+    - ask: What is the achieved bandwidth during decode?
+      answer: |
+        Nobody measured it. You have the numbers to compute it.
+    solution: |
+      ### Solution: nothing is broken
+
+      - **Root cause.** At batch size 1, decode waits on memory bandwidth, not on
+        compute. Each token reads all 16.1 GB of weights. The L40S has 2.4x less
+        bandwidth than the A100. So it must be about 2.4x slower. The TFLOP/s
+        number does not matter here.
+      - **The number.** Both cards reach the same fraction of their bandwidth
+        ceiling, about 83%. The software runs equally well on both. The ratio of the
+        measured speeds (2.31x) is close to the ratio of the bandwidths (2.36x).
+      - **The fix.** It is not a software fix. Go back to A100s or H100s for this
+        workload. Or change the workload: a larger batch moves decode toward the
+        compute side, where the L40S is good (Part 2).
+      - **The guard.** A rule for every hardware decision: for decode at a small
+        batch, compare cards by GB/s. Predict tokens/s as
+        `0.8 x bandwidth / bytes of weights` before you buy.
+
+      **The noise.** "99% utilization" in `nvidia-smi`. That number means "a kernel
+      was running during the sample". It does not mean "the compute units were
+      busy". A memory-bound kernel shows 99% too.
+    code: |
+      weights = 16.1e9
+      for gpu, bandwidth, measured in [('A100', 2039e9, 104), ('L40S', 864e9, 45)]:
+        ceiling = bandwidth / weights              # tokens/s if the read were free of overhead
+        print(f'{gpu}: ceiling {ceiling:5.1f} tok/s, measured {measured}, '
+              f'{measured/ceiling:.0%} of the ceiling')
+      print(f'bandwidth ratio {2039/864:.2f}x, measured ratio {104/45:.2f}x')
+  - id: "1.3"
+    title: "Ticket 3: the capacity plan"
+    ticket: |
+      # Ticket 3: the capacity plan
+
+      **Severity:** high. **Reported by:** the load test.
+
+      > The capacity plan says that one 24 GB card holds 85 concurrent requests. The
+      > load test gets out of memory at the 43rd request.
+
+      **Evidence**
+
+      - The model is Qwen3-0.6B. Each request can grow to 4096 tokens.
+      - The plan gives 20 GB to the KV cache. It keeps the rest for the weights, the
+        activations and the CUDA context.
+      - The script of the plan:
+
+        ```python
+        head_dim = config.hidden_size // config.num_attention_heads
+        kv_per_token = 2 * config.num_hidden_layers * config.num_key_value_heads * head_dim * 2
+        per_request = kv_per_token * 4096
+        print(20e9 // per_request)          # 85.0
+        ```
+
+      - An extract from `config.json`:
+
+        ```json
+        "hidden_size": 1024,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "num_hidden_layers": 28,
+        ```
+
+      - Last week the team updated the CUDA driver.
+      - At the crash, the memory monitor shows 23.9 GB in use with 42 requests
+        active.
+    probes:
+    - ask: How much memory does one request really add?
+      answer: |
+        One prefill of 1,000 tokens adds 114.7 MB to
+        `torch.cuda.memory_allocated()`.
+    - ask: Is the memory fragmented at the crash?
+      answer: |
+        `torch.cuda.memory_reserved()` is only 0.3 GB above
+        `memory_allocated()` at the crash.
+    - ask: Did the load test pass with the old driver?
+      answer: |
+        Nobody ran it with the old driver. The load test is new this week.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The script computes `head_dim` as `hidden_size //
+        num_attention_heads`, which is 64. Qwen3-0.6B sets `head_dim` explicitly to
+        128. So the plan counts half of the real KV bytes.
+      - **The number.** 85 / 42 = 2.0. The error is exactly the factor 128 / 64. A
+        clean factor of 2 in a memory error almost always means one wrong term in the
+        formula. It is not a leak or fragmentation.
+      - **The fix.** Read `config.head_dim` first, and use the division only as a
+        fallback. Your stage 02 `kv_bytes_per_token` does this.
+      - **The guard.** Do not trust a formula that nobody checked. Run one prefill,
+        add the bytes of the real K and V tensors in the cache, and assert that the
+        formula agrees.
+
+      **The noise.** The CUDA driver update. It happened near the time of the
+      failure, so it feels guilty. But a driver does not make the model need twice
+      the memory for each token.
+    code: |
+      layers, kv_heads = 28, 8
+      for name, head_dim in [('plan: hidden // heads', 1024 // 16), ('config: head_dim', 128)]:
+        per_token = 2 * layers * kv_heads * head_dim * 2
+        per_request = per_token * 4096
+        print(f'{name:22s} {per_token:7,} B/token  {per_request/1e6:6.1f} MB/request  '
+              f'{int(20e9 // per_request)} requests')
+  - id: "1.4"
+    title: "Ticket 4: the benchmark"
+    ticket: |
+      # Ticket 4: the kernel that was too fast
+
+      **Severity:** low. But it goes into a release note. **Reported by:** a code
+      reviewer.
+
+      > A pull request says: "the new attention kernel makes prefill 1.5x faster".
+      > Should we merge it?
+
+      **Evidence**
+
+      - The model is Qwen3-1.7B. The prompt has 2048 tokens. The card sustains 49
+        TFLOP/s on a large bf16 matmul (`./vc info`).
+      - The benchmark in the PR:
+
+        ```python
+        model(prompt_ids)                 # warm-up
+        start = time.perf_counter()
+        model(prompt_ids)
+        ms = (time.perf_counter() - start) * 1000
+        ```
+
+      - The PR reports 123 ms with the new kernel. Main gives 188 ms with a
+        benchmark that another team wrote.
+      - A second engineer repeats the PR benchmark with 40 iterations, and gets 183
+        ms. They write: "the speedup goes away over a long run, so the card must
+        throttle when it is hot."
+      - A forward pass costs about `2 x parameters x tokens` FLOP.
+    probes:
+    - ask: Does the PR benchmark call `torch.cuda.synchronize()`?
+      answer: No. A search of the benchmark file finds no `synchronize`.
+    - ask: What does the benchmark of the other team do?
+      answer: |
+        Three warm-up calls, then 20 timed calls, with `torch.cuda.synchronize()`
+        before and after the timed part.
+    - ask: What are the temperature and the clocks during the 40 iterations?
+      answer: 71 to 73 °C, and the clocks stay at their full speed.
+    solution: |
+      ### Solution
+
+      - **Root cause.** CUDA is asynchronous. `model(prompt_ids)` returns when the
+        CPU has **queued** the kernels, not when the GPU has **finished** them. The
+        timer stops early. With one iteration, the timer misses most of the GPU work.
+        With 40 iterations the queue fills, the CPU must wait, and the error almost
+        goes away.
+      - **The number.** 123 ms means 57 TFLOP/s. The card sustains only 49 TFLOP/s.
+        A result above the hardware peak is never a fast kernel. It is always a
+        broken measurement. Main at 188 ms gives 37 TFLOP/s, a normal fraction of the
+        peak.
+      - **The fix.** Call `torch.cuda.synchronize()` before you start the timer and
+        before you stop it. Your stage 03 `_milliseconds_per_call` does this.
+      - **The guard.** Put a physics check in every benchmark: compute the achieved
+        TFLOP/s or GB/s, and fail when it exceeds the peak of the card.
+
+      **The noise.** The throttle theory. It explains "slower over a long run". But
+      the 40-iteration number agrees with main. A card that throttles is slower than
+      main, not equal to it.
+
+      I measured these three times on an RTX 4080 Laptop GPU. On your card the
+      milliseconds differ, but the pattern is the same: the error shrinks as the
+      number of iterations grows.
+    code: |
+      params = 3.44e9 / 2
+      flop = 2 * params * 2048
+      for label, ms in [('PR, 1 iteration', 123), ('PR, 40 iterations', 183), ('main', 188)]:
+        print(f'{label:18s} {ms:4d} ms  ->  {flop / (ms/1000) / 1e12:5.1f} TFLOP/s   (sustained peak 49)')
+  - id: "1.5"
+    title: "Ticket 5: the customer"
+    ticket: |
+      # Ticket 5: the same question, a different answer
+
+      **Severity:** the customer says critical. **Reported by:** a customer.
+
+      > We use temperature 0. We send the same prompt two times and we get two
+      > different answers. Your service is not deterministic. Fix it.
+
+      **Evidence**
+
+      - The service runs Qwen3-1.7B in bf16 with a KV cache. It batches the requests
+        of many users.
+      - The two answers are identical for 31 tokens. They differ from token 32 on.
+      - The team replays the two requests offline. At token 32, the top two logits
+        are `17.125` and `17.000`.
+      - The two requests arrived at different times: one at 03:00, when the server
+        was idle, and one at 14:00, when it was busy.
+      - The team runs both requests again in fp32. The two answers are identical.
+    probes:
+    - ask: What was in the batch of each request?
+      answer: |
+        At 03:00 the request ran alone, at batch size 1. At 14:00 it shared a
+        batch with 47 other requests.
+    - ask: Does the sampler use a random number at temperature 0?
+      answer: No. At temperature 0 the sampler takes the argmax.
+    - ask: What happens if we replay the 14:00 request alone, in bf16?
+      answer: The replay alone gives the answer of 03:00, token for token.
+    solution: |
+      ### Solution: not a bug, but a real problem
+
+      - **Root cause.** When the server is busy, the request shares a batch with
+        other requests. A different batch shape can select a different kernel, or a
+        different split of a reduction. The additions then happen in a different
+        order. In bf16, the order changes the last bits of the result.
+      - **The number.** The gap between the top two logits is 0.125. That is exactly
+        one bf16 step at 17. So a change in the last bit is enough to flip the
+        argmax. After one different token, every token after it differs. The fp32
+        replay is identical, which proves that both code paths are correct.
+      - **The fix.** There is no free fix. Tell the customer the truth: "temperature
+        0 is deterministic only when the batch is the same". The options:
+        - Run the customer in fp32, or on a dedicated server at a fixed batch size.
+          Both cost money.
+        - Use batch-invariant kernels. Some engines now have a mode for this. It
+          costs speed.
+      - **The guard.** Compare two implementations in fp32, never in bf16, as the
+        tests of this repo do (`hf_exact` in `tests/conftest.py`). Log the gap
+        between the top two logits. When the answers differ, a small gap at the first
+        different token is the signature of this cause.
+
+      **The noise.** The times of day. They matter only because they change the
+      batch. The clock itself has no effect.
+
+      You saw this in `part1_kv_3_CCwriteBothLoops`. The cache changes the order of
+      the additions in the same way that the batch does.
+    code: |
+      import torch
+      # the distance between two neighbouring bf16 numbers near 17
+      value = torch.tensor(17.0, dtype=torch.bfloat16)
+      step = torch.nextafter(value, torch.tensor(100.0, dtype=torch.bfloat16)) - value
+      print('one bf16 step at 17:', step.item())
+      print('gap between the top two logits:', 17.125 - 17.000)
+  - id: "1.6"
+    title: "Ticket 6: the ignored question"
+    ticket: |
+      # Ticket 6: the bot ignores the question
+
+      **Severity:** high. **Reported by:** customer support.
+
+      > For long questions, the support bot writes an answer that has nothing to do
+      > with the question. For short questions it works.
+
+      **Evidence**
+
+      - Every request is the system prompt, then the question of the user. The
+        system prompt has 480 tokens.
+      - The tokenization code:
+
+        ```python
+        ids = tokenizer(system_prompt + question, return_tensors='pt',
+                        truncation=True, max_length=512).input_ids
+        ```
+
+        A developer copied it from a classification project last quarter.
+      - The histogram of the prompt lengths that the model sees has a tall spike at
+        exactly 512 tokens.
+      - The model's context window is 40,960 tokens.
+      - The problem started after the system prompt grew from 200 to 480 tokens.
+    probes:
+    - ask: How long are the failing questions?
+      answer: |
+        The failing questions have 60 to 400 tokens. The questions that work
+        have fewer than 32 tokens.
+    - ask: What text does the model really receive?
+      answer: |
+        For one failing request, the decoded input ends with:
+        `...I ordered a blue jacket last week and the`
+    - ask: Is there a warning in the logs?
+      answer: No. The tokenizer truncates silently when you ask it to.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `truncation=True, max_length=512` silently cuts the prompt
+        at 512 tokens. It cuts the **end**, and the end is the question. With a 480
+        token system prompt, only 32 tokens of the question remain. The model answers
+        a question that it never saw in full.
+      - **The number.** The spike at exactly 512 in the histogram. Real prompt
+        lengths are spread out. A wall at one value is a limit that someone applied.
+        Also 512 - 480 = 32: short questions fit, long questions do not. That
+        matches the symptom.
+      - **The fix.** Remove the truncation. The context window is 40,960 tokens.
+        When a prompt is too long for the window, reject it with a clear error. Do not
+        cut it. vLLM rejects a prompt that is too long.
+      - **The guard.** Log the prompt length. Alert when many prompts have exactly
+        the same length. That is the fingerprint of a silent limit.
+
+      **The noise.** The context window of 40,960. It is true, and it made the team
+      think that length could not be the problem. The limit was in the tokenizer
+      call, not in the model.
+  - id: "1.7"
+    title: "Ticket 7: the slow chatbot"
+    ticket: |
+      # Ticket 7: the chatbot gets slower as it talks
+
+      **Severity:** medium. **Reported by:** users.
+
+      > The first words come fast. A long answer slows down until it crawls.
+
+      **Evidence**
+
+      - The model is Qwen3-1.7B on the same card as yours.
+      - The latency of each token, from the logs:
+
+        | position of the token | ms for this token |
+        |---|---|
+        | 128 | 17 |
+        | 1,024 | 95 |
+        | 2,048 | 190 |
+
+      - The on-call engineer writes: "attention reads the whole context, so the
+        step time must grow with the context. This is normal."
+      - The generation loop:
+
+        ```python
+        for _ in range(max_tokens):
+            out = model(token_ids, use_cache=True)
+            next_token = out.logits[0, -1].argmax()
+            token_ids = torch.cat([token_ids, next_token.view(1, 1)], dim=1)
+        ```
+
+      - A decode step at position 128 on this card, with a correct cache, takes
+        about 13 ms.
+    probes:
+    - ask: What is the shape of `token_ids` at each step?
+      answer: |
+        `(1, prompt + generated so far)`. At position 2,048 it is `(1, 2048)`.
+    - ask: Does the GPU memory grow during a long answer?
+      answer: No. It stays flat at about 4.1 GB.
+    - ask: What does the profiler show for one step at position 2,048?
+      answer: |
+        The matmuls have 2,048 rows, not 1. The attention kernel runs on a
+        2,048 x 2,048 score matrix.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The loop never passes `past_key_values`. `use_cache=True`
+        only asks the model to **return** a cache. The next call throws it away, and
+        it processes the whole sequence again. This is the O(N^2) loop of stage 01
+        with a misleading flag.
+      - **The number.** A cached step at position 2048 reads the weights plus 0.24
+        GB of KV. That is only about 6% more than the step at 128. The log shows
+        11x more. Normal growth cannot be 11x. The step at 2048 is 190 ms, and a
+        cached step there is about 13 ms.
+      - **The fix.** Pass the cache back in, and feed only the new token:
+        `model(next_token, past_key_values=cache, use_cache=True)`. This is your
+        stage 02.
+      - **The guard.** Assert that the input of a decode step has shape `(B, 1)`.
+        Add a test: the step time at context 2048 must be less than 1.3x the step
+        time at context 128.
+
+      **The noise.** The on-call engineer's theory. It is half true: with a cache,
+      the step time does grow with the context, because each step reads more KV. But
+      you can compute how much. When the observed growth is 10 times the computed
+      growth, the theory is wrong.
+
+      I measured on an RTX 4080 Laptop GPU with a correct cache: 12.9 ms at 128,
+      13.2 ms at 2048, 17.4 ms at 8192.
+    code: |
+      weights = 3.44e9
+      kv_per_token = 2 * 28 * 8 * 128 * 2
+      for position in (128, 2048):
+        kv = kv_per_token * position
+        print(f'position {position:5d}: a cached step reads {weights/1e9:.2f} GB of weights '
+              f'+ {kv/1e9:.3f} GB of KV  ->  {(weights + kv)/(weights + kv_per_token*128):.3f}x the step at 128')
+      print(f'observed: {190/17:.1f}x')
+  - id: "1.8"
+    title: "Ticket 8: the other user"
+    ticket: |
+      # Ticket 8: my answer has someone else's words in it
+
+      **Severity:** critical. It is a possible data leak. **Reported by:** a user.
+
+      > I asked for a pancake recipe. The answer started well. Then it talked about
+      > a cat and a dog with Japanese names. I never wrote about pets or Japan.
+
+      **Evidence**
+
+      - The first request after a restart is always correct.
+      - A debug log prints the length of the KV cache after each prefill:
+
+        | request | prompt tokens | cache length after prefill |
+        |---|---|---|
+        | 1 | 8 | 8 |
+        | 2 | 7 | 45 |
+        | 3 | 12 | 97 |
+
+      - The request just before the pancake request asked about the largest cities
+        in Japan.
+      - The generation module:
+
+        ```python
+        _cache = DynamicCache()           # module level
+
+        def generate(model, tokenizer, prompt, max_tokens):
+            out = model(ids, past_key_values=_cache, use_cache=True)
+            ...
+        ```
+    probes:
+    - ask: Does the cache length ever go down?
+      answer: |
+        No. It grows until the process restarts. At 09:00 it was 4,112 tokens.
+    - ask: Are the users of request 1 and request 2 related?
+      answer: No. They are different accounts in different countries.
+    - ask: What is the length of the cache for request 1 after its answer?
+      answer: 45 tokens. Request 1 had 8 prompt tokens and 37 answer tokens.
+    solution: |
+      ### Solution: a data leak
+
+      - **Root cause.** The cache lives at module level. Each request appends its
+        K and V to the K and V of all the requests before it. Request 2 attends to
+        the prompt and the answer of request 1. The model then continues a
+        conversation that mixes two users.
+      - **The number.** The cache length after prefill must equal the prompt length.
+        Request 2 has 7 tokens and a cache of 45: 38 of those tokens belong to
+        someone else. Request 1 is correct because the cache starts empty.
+      - **The fix.** Make a new cache for every request. Your stage 02 docstring
+        warns about this exact trap, and a stage 02 check tests it.
+      - **The guard.** Assert `cache_length == prompt_length` after every prefill.
+        Add a test: run request A, then request B, and compare B with B run alone.
+        Treat this as a security incident. Find which users saw whose data.
+
+      **Why it is hard to see.** The answer does not become nonsense. The first few
+      tokens are correct, because the new prompt dominates. Then the old context
+      leaks in. In my run of this exact case, the pancake answer was correct for 4
+      tokens. Then it wrote "I have a cat named Momo. I have a dog named Kiki". The
+      model took Japanese names from the earlier request about Japan.
+  - id: "1.9"
+    title: "Ticket 9: the long document"
+    ticket: |
+      # Ticket 9: the long document
+
+      **Severity:** high. **Reported by:** the summarization team.
+
+      > Documents of 24,000 tokens crash with out-of-memory. Our plan says that
+      > they fit.
+
+      **Evidence**
+
+      - The model is Qwen3-1.7B on a 12 GB card, one request at a time.
+      - The plan: 3.44 GB of weights, plus 24,000 tokens of KV cache, plus 1.5 GB
+        of activations and context. The plan says that this is less than 8 GB.
+      - The memory profiler shows one very large allocation, at the end of the
+        prefill forward pass. It is 7.29 GB.
+      - The code of the prefill:
+
+        ```python
+        out = model(document_ids, use_cache=True)
+        next_token = out.logits[0, -1].argmax()
+        ```
+
+      - Documents of 8,000 tokens work.
+    probes:
+    - ask: What is the peak memory for a document of 8,000 tokens?
+      answer: 8.3 GB. It fits on the 12 GB card.
+    - ask: What is the shape of `out.logits` for 8,000 tokens?
+      answer: "`torch.Size([1, 8000, 151936])`"
+    - ask: Does the allocation of 7.29 GB happen in the attention?
+      answer: |
+        No. The profiler shows it in the last `Linear` layer of the model,
+        `lm_head`.
+    solution: |
+      ### Solution
+
+      - **Root cause.** `model(document_ids)` returns logits for **every** position:
+        24,000 x 151,936 values. The code then uses only the last row. The plan did
+        not count the logits.
+      - **The number.** 24,000 x 151,936 x 2 bytes = 7.29 GB, the exact size of the
+        large allocation. The plan needs 7.7 GB. With the logits it needs 15 GB. At
+        8,000 tokens the logits are 2.4 GB and still fit, so the short documents work.
+      - **The fix.** Compute the logits for the last position only. In HF, pass
+        `logits_to_keep=1`. In your own engine, select the last hidden state before
+        the LM head. vLLM computes logits only at the positions that it samples.
+      - **The guard.** Put the logits term in the memory model:
+        `prompt_len x vocab x bytes`. At startup, run one prefill at the maximum
+        prompt length and check the peak memory.
+
+      On an RTX 4080 Laptop GPU, a prefill of 8,192 tokens needs 3.46 GB of extra
+      memory with all the logits. It needs 1.38 GB with `logits_to_keep=1`.
+
+      **The lesson.** The vocabulary of a modern model is large. Qwen3 has 151,936
+      entries. One row of logits is small, but a row for each prompt token is not.
+    code: |
+      tokens, vocab = 24_000, 151_936
+      kv = 2 * 28 * 8 * 128 * 2 * tokens
+      logits = tokens * vocab * 2
+      print(f'weights 3.44 GB + KV {kv/1e9:.2f} GB + activations 1.5 GB = {3.44 + kv/1e9 + 1.5:.2f} GB   (the plan)')
+      print(f'logits for every position: {logits/1e9:.2f} GB')
+      print(f'total with logits: {3.44 + kv/1e9 + 1.5 + logits/1e9:.2f} GB on a 12 GB card')
+      print(f'logits for the last position only: {vocab*2/1e3:.0f} KB')
+  - id: "1.10"
+    title: "Ticket 10: the first request"
+    ticket: |
+      # Ticket 10: the first request of the day
+
+      **Severity:** medium. **Reported by:** the SRE team.
+
+      > After every deploy, and every time the autoscaler adds a pod, the first
+      > user on that pod gets a timeout. The users after it are fine.
+
+      **Evidence**
+
+      - The timeout for the first token is 500 ms.
+      - A prefill of 2048 tokens on a new pod: 644 ms for the first request, 186 ms
+        for every request after it.
+      - The readiness probe calls `/health`. That route returns `200 OK` when the
+        process has loaded the weights. It does not run the model.
+      - The autoscaler adds pods at the traffic peak, so the new pods get users at
+        once.
+      - The weights load from a local disk in 4 s.
+    probes:
+    - ask: What happens if someone sends one request by hand before the traffic?
+      answer: |
+        An engineer did this on one new pod. The first real user then took
+        190 ms.
+    - ask: Are the weights on the GPU when `/health` returns 200?
+      answer: Yes. The pod loads every weight before it reports ready.
+    - ask: What does the second request on a new pod cost?
+      answer: 186 ms, the same as every request after it.
+    solution: |
+      ### Solution: the math is not broken, the rollout is
+
+      - **Root cause.** The first forward pass on a new process pays one-time costs.
+        CUDA creates its context, loads the kernel modules and the cuBLAS handles,
+        selects the kernels, and grows the memory pool. The first user pays for all
+        of it.
+      - **The number.** 644 ms for the first prefill against 186 ms after it: a
+        cost of about 460 ms that happens only one time. It is more than the 500 ms
+        timeout when you add it to a normal prefill.
+      - **The fix.** Warm up at startup. Run a few forward passes with realistic
+        shapes before the pod reports that it is ready.
+      - **The guard.** Make the readiness probe run one small real generation, not
+        only a check that the process is alive. Track the latency of the first
+        request on each pod as a separate metric.
+
+      **The noise.** The load time of the weights. It is 4 s, but the pod is not
+      ready during that time, so no user waits for it.
+
+      Your stage 03 warms up before it measures, for the same reason. A benchmark
+      without a warm-up measures this cost, not the model.
+  - id: "1.11"
+    title: "Ticket 11: the empty fleet"
+    ticket: |
+      # Ticket 11: we bought four times too many GPUs
+
+      **Severity:** medium. It costs money, not uptime. **Reported by:** the CFO.
+
+      > We planned 39 A100s for 500 concurrent users. The dashboard says that the
+      > KV cache is never more than 24% full, even at the peak. Why did we buy them?
+
+      **Evidence**
+
+      - The model is Llama-3-8B. Each user can reach 8192 tokens.
+      - On each 80 GB card, the plan gives 60 GB to the KV cache.
+      - The script of the plan:
+
+        ```python
+        kv_per_token = (2 * config.num_hidden_layers * config.num_attention_heads
+                        * (config.hidden_size // config.num_attention_heads) * 2)
+        users_per_gpu = int(60e9 // (kv_per_token * 8192))    # 13
+        gpus = math.ceil(500 / users_per_gpu)                  # 39
+        ```
+
+      - No request was ever rejected, and the latency is good.
+    probes:
+    - ask: How much KV memory does each card use at the peak?
+      answer: About 14 GB of the 60 GB budget, 24%.
+    - ask: Do some requests reach 8,192 tokens?
+      answer: Yes. The p99 length is 7,900 tokens, and some requests reach 8,192.
+    - ask: How many users does one card serve at the peak?
+      answer: 13, the number of the plan.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The plan uses `num_attention_heads` (32) where it must use
+        `num_key_value_heads` (8). Llama-3-8B uses grouped-query attention: 4 query
+        heads share one K head and one V head. The cache stores only the KV heads.
+      - **The number.** The plan counts 512 KiB per token. The real value is 128 KiB.
+        The ratio is 4 = 32 / 8. The correct plan gives 55 users for each GPU, and 10
+        GPUs. 13 / 55 = 24%: this is the dashboard number. The dashboard was right
+        from the first day.
+      - **The fix.** Use `num_key_value_heads`. Then plan again: 10 GPUs, and some
+        margin.
+      - **The guard.** Compare the plan with the real use at the peak, and alert when
+        they differ by more than 1.5x in either direction. A plan that is too
+        pessimistic costs money, and a plan that is too optimistic causes an outage.
+
+      **Compare with Ticket 3.** It is the same formula, with a different wrong term,
+      and the error goes in the other direction. Ticket 3 crashed. This ticket only
+      wasted money, so nobody noticed it for months. A silent error is often the more
+      expensive one.
+    code: |
+      import math
+      layers, heads, kv_heads, head_dim = 32, 32, 8, 128
+      for name, h in [('plan: attention heads', heads), ('correct: KV heads', kv_heads)]:
+        per_token = 2 * layers * h * head_dim * 2
+        users = int(60e9 // (per_token * 8192))
+        print(f'{name:22s} {per_token//1024:4d} KiB/token  {users:3d} users/GPU  {math.ceil(500/users):3d} GPUs')
+      print(f'peak KV use predicted by the correct formula: {13/55:.0%} of the planned budget')
+outro: |
+  ### Before you open the solution
+
+  Go back to each ticket and write one more line: **which piece of evidence was
+  noise, and why did it look relevant?** In real incidents the noise costs more
+  time than the bug.
+
+  Then do the second notebook of this section. In that notebook you make the
+  bugs yourself and watch them.
+patterns: |
+  ### The pattern in the tickets
+
+  Read the "number" line of each solution again. Most of the tickets have one of
+  these forms:
+
+  | The shape of the number | What it usually means | Tickets |
+  |---|---|---|
+  | A clean ratio (2x, 4x) between the plan and reality | One wrong term in a formula | 3, 11 |
+  | A result above the hardware peak | A broken measurement | 4 |
+  | A wall at exactly one value | A limit that someone set, and forgot | 1, 6 |
+  | The same fraction of the ceiling on both machines | Nothing is broken: physics | 2 |
+  | A gap of one bf16 step between the top two logits | Numerics, not a bug | 5 |
+  | A length that must be equal and is not | State that leaks from one request to the next | 8 |
+  | Growth that is 10x more than the computation allows | The algorithm is not the one that you think | 7 |
+  | An allocation that equals an exact product of shapes | A tensor that nobody counted | 9 |
+  | A cost that happens only one time | Initialization | 10 |
+
+  Keep this table. In Part 2 the tickets come back with batches, padding and
+  queues. The shapes of the numbers stay the same.

@@ -151,9 +151,10 @@ class EngineAdapter:
 
 
 class SharedMemoryEventRing:
-    """Zero-copy IPC ring buffer for engine output events (vLLM V1 architecture).
-    Eliminates Python pickle serialization overhead between the engine process
-    and the API server process."""
+    """A ring of fixed binary records in POSIX shared memory, for the output
+    events of the engine process. It removes the pickle and the pipe of
+    mp.Queue. vLLM V1 also runs its engine in its own process; at the time of
+    writing it talks to it over ZeroMQ sockets with a compact encoding."""
     SLOT_STRUCT = struct.Struct("32sii64s")
     HEADER_STRUCT = struct.Struct("II")  # head, tail
 

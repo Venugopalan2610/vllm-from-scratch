@@ -136,10 +136,14 @@ def test_the_crossover(nvcc, tmodel, qmodel):
 
 
 def test_batch_one_is_faster(nvcc, tmodel, qmodel):
+    """The gate is 1.2x. The reference gives about 1.5x on a cold laptop
+    card and 1.27x on a hot one: when the card lowers its SM clock, the int8
+    GEMV, which also converts each value, loses more than the bf16 matmul.
+    A gate must not fail a correct kernel on a warm machine."""
     bf16_ms, int8_ms = _step_ms(tmodel, 1), _step_ms(qmodel, 1)
     print(f"\n  batch-1 step: bf16 {bf16_ms:.2f} ms, int8 {int8_ms:.2f} ms = "
           f"{bf16_ms / int8_ms:.2f}x")
-    assert bf16_ms / int8_ms >= 1.3
+    assert bf16_ms / int8_ms >= 1.2
 
 
 def test_a_big_batch_is_not_slower(nvcc, tmodel, qmodel):

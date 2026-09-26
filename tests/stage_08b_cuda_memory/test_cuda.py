@@ -121,6 +121,13 @@ def test_it_moves_more_bytes_per_second(nvcc, device, peak_gbs):
     state. The check prints the fraction of the peak next to it, with a loose
     gate. How near a card gets to its own streaming bandwidth depends on the
     card.
+
+    A gain has a ceiling. At a large size, the caches help stage 08 too, and
+    on some cards it already streams at 60% to 70% of the peak there. Then no
+    kernel can be 1.5x faster, because 1.5x would pass the roof. So each row
+    passes with a gain of 1.5x, OR with stage 08b at 60% of the peak or more:
+    near the roof, the gain is not the measure. The peak is a streaming copy,
+    which reads and writes. A kernel that only reads can pass 100% of it.
     """
     import cudalib
 
@@ -137,7 +144,8 @@ def test_it_moves_more_bytes_per_second(nvcc, device, peak_gbs):
                      num_bytes / (stage08_ms * 1e-3) / 1e9,
                      num_bytes / (stage08b_ms * 1e-3) / 1e9))
 
-    print(f"\n  measured peak: {peak_gbs:.0f} GB/s\n")
+    print(f"\n  measured peak (a streaming copy; a pure read can pass it): "
+          f"{peak_gbs:.0f} GB/s\n")
     print(f"  {'seqs':>5} {'ctx':>6} | {'stage 08':>9} {'GB/s':>7} {'%pk':>5}"
           f" | {'stage 08b':>10} {'GB/s':>7} {'%pk':>5} | {'gain':>6}")
     for (num_seqs, context_len, stage08_ms, stage08b_ms, stage08_gbs,
@@ -148,10 +156,14 @@ def test_it_moves_more_bytes_per_second(nvcc, device, peak_gbs):
               f"{100 * stage08b_gbs / peak_gbs:>4.0f}%"
               f" | {stage08_ms / stage08b_ms:>5.2f}x")
 
+    for num_seqs, context_len, stage08_ms, stage08b_ms, _, stage08b_gbs in rows:
+        gain, fraction = stage08_ms / stage08b_ms, stage08b_gbs / peak_gbs
+        assert gain > 1.5 or fraction >= 0.60, (
+            f"at {num_seqs} sequences x {context_len} tokens: only {gain:.2f}x "
+            f"faster than stage 08, at {100 * fraction:.0f}% of the peak. Make "
+            "sure that adjacent threads read adjacent addresses, and that each "
+            "one moves 16 bytes.")
     worst = min(row[2] / row[3] for row in rows)
-    assert worst > 1.5, (
-        f"only {worst:.2f}x faster than stage 08. Make sure that adjacent "
-        "threads read adjacent addresses, and that each one moves 16 bytes.")
     largest = rows[-1]
     fraction = largest[5] / peak_gbs
     assert fraction > 0.40, (

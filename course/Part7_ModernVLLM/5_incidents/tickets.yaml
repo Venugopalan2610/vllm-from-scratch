@@ -1,0 +1,597 @@
+# The incident file of Part 7. dev/build_incident_files.py builds the two
+# notebooks from this file, and the /incident skill reads it.
+part: 7
+part_name: Modern vLLM
+folder: course/Part7_ModernVLLM/5_incidents
+intro: |
+  You finished Part 7. You can guess tokens and check them, store fewer bytes
+  for each weight, forbid the tokens that break a schema, and cut a model
+  across ranks. Each feature has a promise: the same distribution, almost the
+  same output, always valid, the same result. Most tickets in this file are a
+  promise that the code did not keep, or a promise that nobody made.
+
+  Each ticket gives you a **symptom** and some **evidence**. Some of the
+  evidence is noise. Write four lines for each ticket:
+
+  1. **Root cause.** One sentence.
+  2. **The number that proves it.** Not "it looks like". A computation.
+  3. **The fix.**
+  4. **The guard.** A test, an assert or an alert that catches it next time.
+
+  Four rules:
+
+  - The tickets are **not** in the order of the notebooks.
+  - At least one ticket is **not a bug**. "Nothing is broken" is a valid answer
+    only if a number proves it.
+  - Write your answer **before** you open the solution.
+  - Every ticket has a scratch cell.
+
+  Do this section after stage 20. This notebook needs no GPU.
+reference: |
+  ### The reference sheet
+
+  | GPU | Memory | Bandwidth |
+  |---|---|---|
+  | A100 SXM 80GB | 80 GB | 2,039 GB/s |
+  | L40S | 48 GB | 864 GB/s |
+
+  | Model | Layers | Attention heads | KV heads | head_dim | hidden | bf16 weights |
+  |---|---|---|---|---|---|---|
+  | Qwen3-0.6B | 28 | 16 | 8 | 128 | 1024 | 1.5 GB |
+  | Qwen3-1.7B | 28 | 16 | 8 | 128 | 2048 | 3.44 GB |
+  | Llama-3-8B | 32 | 32 | 8 | 128 | 4096 | 16.1 GB |
+
+  - Speculative decoding with k draft tokens and an acceptance rate a for
+    each token: the expected tokens for each verify step are
+    `(1 - a^(k+1)) / (1 - a)`.
+  - FP8 e4m3: the largest value is 448. PyTorch clamps a larger value to 448.
+  - int8: 256 levels. With a scale s, the step between two levels is s.
+  - One all-reduce of a few KB over PCIe costs about 25 µs, most of it
+    latency.
+tickets:
+  - id: "7.1"
+    title: "Ticket 1: speculation that slows the chat"
+    ticket: |
+      # Ticket 1: speculation that slows the chat
+
+      **Severity:** medium. **Reported by:** the performance team.
+
+      > We turned on n-gram speculation with k = 4. The code editing service
+      > got 2.7x faster. The chat service got 6% slower. Is the chat path
+      > broken?
+
+      **Evidence**
+
+      - The acceptance rate for each draft token: 0.80 in code editing, 0.15
+        in chat.
+      - A verify step with 4 draft tokens costs about 1.15 times a plain decode
+        step at batch 1.
+      - The chat and the code services run the same engine and the same model.
+    probes:
+      - ask: How many tokens does a chat verify step produce on average?
+        answer: 1.18.
+      - ask: Why is the acceptance so low in chat?
+        answer: The n-gram draft copies text from the prompt. A code edit repeats most of its input. A chat answer does not.
+      - ask: Is the chat output identical with and without speculation, at temperature 0?
+        answer: Yes, token for token.
+    solution: |
+      ### Solution: nothing is broken
+
+      - **Root cause.** Speculation pays only when the drafts are accepted. A
+        verify step costs more than a plain step, and it wins only if it
+        produces enough tokens to pay for that. In chat the n-gram drafts are
+        almost always wrong.
+      - **The number.** Chat: (1 - 0.15^5) / (1 - 0.15) = 1.18 tokens for each
+        verify. 1.18 / 1.15 = 1.02: no gain, and the overhead of the draft
+        lookup takes the rest. Code: (1 - 0.8^5) / 0.2 = 3.36 tokens, and
+        3.36 / 1.15 = 2.9x, close to the measured 2.7x. The output is
+        identical, so the verify is correct.
+      - **The fix.** Enable speculation per workload, or adapt it: turn it off
+        for a request when its acceptance rate stays below a threshold.
+      - **The guard.** Export the acceptance rate for each workload
+        (stage 17). Predict the speedup from it before you enable the feature.
+    code: |
+      def tokens_per_verify(a, k=4):
+          return (1 - a ** (k + 1)) / (1 - a)
+      for name, a in [('code', 0.80), ('chat', 0.15)]:
+          t = tokens_per_verify(a)
+          print(f'{name}: {t:.2f} tokens per verify, predicted speedup {t / 1.15:.2f}x')
+
+  - id: "7.2"
+    title: "Ticket 2: speculation made the answers less creative"
+    ticket: |
+      # Ticket 2: speculation made the answers less creative
+
+      **Severity:** high. The promise of speculation is an exact distribution.
+      **Reported by:** the evaluation team.
+
+      > With speculation on, the sampled answers at temperature 1 repeat the
+      > prompt more often, and they are less varied.
+
+      **Evidence**
+
+      - The team built a test: a context where the target model gives
+        probability 0.6 to token A and 0.4 to token B. The n-gram draft always
+        proposes A.
+      - In 10,000 samples: without speculation, A 6,003 times. With
+        speculation, A 8,412 times.
+      - The code on a rejection:
+
+        ```python
+        accept = random() < min(1, p[draft] / q[draft])
+        if not accept:
+            token = sample(p)           # sample again from the target
+        ```
+
+      - The draft is one-hot, so `q[draft] = 1`.
+    probes:
+      - ask: How often does the verify accept A in the test?
+        answer: 60% of the time.
+      - ask: What does the code do after an acceptance?
+        answer: It keeps A, and it moves to the next draft token.
+      - ask: Is the test in fp32?
+        answer: Yes.
+    solution: |
+      ### Solution
+
+      - **Root cause.** After a rejection, the code samples from the whole
+        target distribution `p`. The correct rule samples from the residual
+        `max(0, p - q)`, normalized. The residual removes the mass that the
+        acceptance already gave to the draft token.
+      - **The number.** The verify accepts A with probability
+        min(1, 0.6 / 1) = 0.6. After a rejection (0.4), the bug samples A
+        again with probability 0.6. So P(A) = 0.6 + 0.4 x 0.6 = 0.84. The test
+        measured 0.8412. The correct residual is `[0, 0.4]`, normalized to B
+        with probability 1, so P(A) = 0.6.
+      - **The fix.** On a rejection, sample from
+        `normalize(max(0, p - q))`.
+      - **The guard.** The distribution test of stage 17, with a draft that is
+        often wrong. Compare the frequencies with `p` within a statistical
+        bound.
+
+      **The lesson.** The draft token gets two chances in the buggy code: the
+      acceptance and the new sample. That is why the output copies the draft,
+      and the n-gram draft copies the prompt.
+    code: |
+      p_a, q_a = 0.6, 1.0
+      accept = min(1, p_a / q_a)
+      print('buggy  P(A) =', accept + (1 - accept) * p_a)
+      print('correct P(A) =', accept + (1 - accept) * 0.0)
+
+  - id: "7.3"
+    title: "Ticket 3: int8 weights that made decode 2.4x slower"
+    ticket: |
+      # Ticket 3: int8 weights that made decode 2.4x slower
+
+      **Severity:** medium. **Reported by:** the team that quantized the model.
+
+      > Llama-3-8B in bf16 decodes at 104 tokens/s on an A100. With int8
+      > weights it decodes at 44 tokens/s. Half the bytes gave less than half
+      > the speed.
+
+      **Evidence**
+
+      - The quantized linear layer:
+
+        ```python
+        def forward(self, x):
+            w = self.weight_int8.to(torch.bfloat16) * self.scale     # (out, in)
+            return x @ w.t()
+        ```
+
+      - The batch size is 1.
+      - The team found that the kernel does not use the int8 tensor cores.
+    probes:
+      - ask: How many bytes does one decode step move, for each parameter?
+        answer: The profiler shows about 5 bytes for each parameter.
+      - ask: How large is `w` during the forward pass?
+        answer: A full bf16 matrix, the same size as the original weight.
+      - ask: What does the int8 path of stage 18b give?
+        answer: 192 tokens/s at batch 1.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The layer dequantizes the whole weight into a new bf16
+        matrix, then multiplies. So each step reads 1 byte (int8), writes 2
+        bytes (the bf16 copy) and reads 2 bytes again (the matmul) for each
+        parameter. That is 5 bytes, not 1, and more than the 2 bytes of bf16.
+      - **The number.** 5 / 2 = 2.5 times the bytes of bf16. 104 / 2.5 = 42
+        tokens/s, and the measurement is 44. Decode at batch 1 is limited by
+        bandwidth, so the speed follows the bytes.
+      - **The fix.** Fuse the dequantize into the GEMV: read the int8 value,
+        multiply in registers, and apply the scale at the end (stage 18b).
+        Then each step reads 1 byte for each parameter.
+      - **The guard.** A benchmark at batch 1 that fails when the quantized
+        path is not faster than bf16. The course calls this "the trap that
+        cancels the win".
+
+      **The noise.** The int8 tensor cores. At batch 1 the compute units wait
+      for memory, and a faster multiply changes nothing.
+    code: |
+      bf16, dequant_then_matmul, fused = 2, 1 + 2 + 2, 1
+      print(f'bytes per parameter: bf16 {bf16}, dequantize then matmul {dequant_then_matmul}, fused {fused}')
+      print(f'predicted: {104 * bf16 / dequant_then_matmul:.0f} tok/s; fused ceiling {104 * bf16 / fused:.0f} tok/s')
+
+  - id: "7.4"
+    title: "Ticket 4: one large weight ruined the layer"
+    ticket: |
+      # Ticket 4: one large weight ruined the layer
+
+      **Severity:** high. **Reported by:** the evaluation team.
+
+      > After int8 quantization, the KL from bf16 is 0.41 nats. The target is
+      > 0.015. The [top-1 agreement](../../GLOSSARY.md#top-1-agreement) is 71%.
+
+      **Evidence**
+
+      - The quantization uses **one** scale for each weight matrix:
+        `scale = w.abs().max() / 127`.
+      - In the worst layer, the largest weight has the value 1.9. The median
+        of `|w|` is 0.012. The weights are about normal.
+      - The team says: "int8 has 256 levels. That must be enough."
+    probes:
+      - ask: What fraction of the weights of the worst layer become 0 after the rounding?
+        answer: 33%.
+      - ask: Where is the value 1.9?
+        answer: In one output channel. The other channels have a largest value below 0.1.
+      - ask: What is the KL with one scale for each output channel?
+        answer: 0.009 nats.
+    solution: |
+      ### Solution
+
+      - **Root cause.** One scale for the whole matrix fits the largest weight.
+        The largest weight is 160 times the median, so the step of the grid is
+        too coarse for all the other weights. Many round to 0 or to one level.
+      - **The number.** The step is 1.9 / 127 = 0.015. Every weight below half a
+        step, 0.0075, rounds to 0. With a median of |w| of 0.012, the standard
+        deviation is 0.012 / 0.6745 = 0.018, and 33% of the weights are below
+        0.0075. A third of the layer is gone.
+      - **The fix.** One scale for each output channel (stage 18), or for each
+        group of 128 weights. A channel with a largest value of 0.1 gets a
+        step of 0.0008.
+      - **The guard.** The fidelity guard of stage 18: KL and top-1 agreement
+        against bf16, for each layer, not only for the whole model.
+
+      **The noise.** "256 levels must be enough". The number of levels is
+      fine. Where the levels sit is the problem.
+    code: |
+      from math import erf, sqrt
+      sigma = 0.012 / 0.6745
+      step = 1.9 / 127
+      print(f'step {step:.4f}, half a step {step / 2:.4f}, sigma {sigma:.4f}')
+      print(f'fraction that rounds to 0: {erf((step / 2) / sigma / sqrt(2)):.0%}')
+
+  - id: "7.5"
+    title: "Ticket 5: the FP8 cache that works on one model"
+    ticket: |
+      # Ticket 5: the FP8 cache that works on one model
+
+      **Severity:** high. **Reported by:** the team that enabled the FP8 KV
+      cache.
+
+      > With the FP8 KV cache, model A is fine: KL 0.02. Model B is bad: KL
+      > 0.9, and the answers drift after a few sentences.
+
+      **Evidence**
+
+      - The FP8 write:
+
+        ```python
+        k_fp8 = (k / k_scale).to(torch.float8_e4m3fn)
+        ```
+
+        `k_scale` comes from a calibration step. For model B the calibration
+        did not run, so `k_scale` is the default, 1.0.
+      - A debug print for model B: the largest |K| in layers 0 and 1 is 1,150,
+        in a few channels.
+      - For model A, the calibration ran.
+      - The team thinks that model B is more sensitive to precision.
+    probes:
+      - ask: What fraction of the K values of model B are above 448?
+        answer: 0.8%. All of them in a few channels of the first two layers.
+      - ask: What does `torch.tensor(1150.0).to(torch.float8_e4m3fn)` give?
+        answer: "448."
+      - ask: What is the KL for model B with a calibrated scale?
+        answer: 0.03.
+    solution: |
+      ### Solution
+
+      - **Root cause.** Without a scale, the K values of model B do not fit in
+        FP8. The largest FP8 e4m3 value is 448. PyTorch clamps every larger
+        value to 448. Those large channels are exactly the ones that decide
+        where the attention goes, so the attention changes.
+      - **The number.** 1,150 > 448. A value of 1,150 is stored as 448, an error
+        of 61%. A scale of 1,150 / 448 = 2.57 makes every value fit, and the KL
+        falls to 0.03.
+      - **The fix.** Calibrate the scale for each model, and refuse to start
+        with a default scale. Stage 24b calibrates it.
+      - **The guard.** At calibration, assert that `max|K| / k_scale` is below
+        448. Count the clamped values at runtime.
+
+      **The noise.** "Model B is more sensitive". It is not more sensitive to
+      precision. It has larger values, and the range, not the precision, was
+      the problem.
+    code: |
+      import torch
+      k = torch.tensor([1150.0, 300.0])
+      print('scale 1.0 :', (k / 1.0).to(torch.float8_e4m3fn).float() * 1.0)
+      scale = 1150 / 448
+      print(f'scale {scale:.2f}:', (k / scale).to(torch.float8_e4m3fn).float() * scale)
+
+  - id: "7.6"
+    title: "Ticket 6: 3% invalid JSON from the guided mode"
+    ticket: |
+      # Ticket 6: 3% invalid JSON from the guided mode
+
+      **Severity:** medium. The feature is sold as "always valid".
+      **Reported by:** a customer.
+
+      > Your guided JSON mode promises valid JSON. 3.1% of our responses do not
+      > parse.
+
+      **Evidence**
+
+      - The invalid responses end like this:
+
+            {"name": "Ada", "skills": ["math", "engines", "poe
+
+      - `max_tokens` is 256.
+      - The customer's schema allows a list of strings of any length.
+      - The team checked the mask on 10,000 random states of the automaton, and
+        it never allows an illegal token.
+    probes:
+      - ask: How many tokens do the invalid responses have?
+        answer: All of them have exactly 256.
+      - ask: How many tokens do the valid responses have?
+        answer: Between 18 and 241.
+      - ask: What is the finish reason of the invalid responses?
+        answer: "`length`."
+    solution: |
+      ### Solution
+
+      - **Root cause.** The mask keeps every prefix valid. It does not promise
+        that the object ends before `max_tokens`. When the limit comes, the
+        answer stops in the middle, and a valid prefix is not a valid document.
+      - **The number.** 100% of the invalid responses have exactly 256 tokens,
+        the limit, and their finish reason is `length`. No valid response has
+        256 tokens.
+      - **The fix.** Near the limit, allow only the tokens that bring the
+        object closer to its end (stage 26: a forced close). Or ask the
+        customer for a larger `max_tokens`, and tell them the limit.
+      - **The guard.** Alert on guided responses with the finish reason
+        `length`. Test a schema that allows an unbounded list with a small
+        `max_tokens`.
+
+      **The noise.** The test of the mask. It is correct, and it tests the
+      promise that the mask makes. This ticket is about a promise that it does
+      not make.
+    code: ''
+
+  - id: "7.7"
+    title: "Ticket 7: guided requests make everyone slow"
+    ticket: |
+      # Ticket 7: guided requests make everyone slow
+
+      **Severity:** medium. **Reported by:** the performance team.
+
+      > When guided requests are in the batch, the time between tokens goes up
+      > for every request, not only the guided ones.
+
+      **Evidence**
+
+      - The decode step at batch 16 takes 12 ms without guided requests.
+      - The measured step, by the number of guided requests in the batch:
+
+        | guided requests | ms for each step |
+        |---|---|
+        | 0 | 12 |
+        | 1 | 50 |
+        | 4 | 164 |
+        | 8 | 316 |
+
+      - For each guided request, the engine builds the mask at each step. It
+        tests each of the 151,669 tokens against the automaton, in Python.
+      - The team says that the GPU is too slow for guided decoding.
+    probes:
+      - ask: How long does one mask build take?
+        answer: About 38 ms.
+      - ask: Does the GPU work while the masks are built?
+        answer: No. The step waits for all the masks, and the GPU is idle.
+      - ask: How many different automaton states does a typical JSON answer visit?
+        answer: About 40.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The mask build runs on the CPU, one request after the
+        other, before each step. The GPU waits for it. It costs the same at
+        every step, although an answer visits only a few states.
+      - **The number.** (164 - 12) / 4 = 38 ms and (316 - 12) / 8 = 38 ms: a
+        constant cost of 38 ms for each guided request, added to the 12 ms of
+        the GPU. The GPU part does not change.
+      - **The fix.** Cache the masks by automaton state (stage 26). A JSON
+        answer visits about 40 states, so after a few answers almost every
+        mask comes from the cache. Build the masks while the GPU runs the
+        forward pass, not before it.
+      - **The guard.** Export the mask time for each step and the hit rate of
+        the mask cache.
+
+      **The noise.** "The GPU is too slow". The GPU time is 12 ms in every row.
+    code: |
+      for n, ms in [(1, 50), (4, 164), (8, 316)]:
+          print(f'{n} guided: {(ms - 12) / n:.0f} ms for each guided request')
+
+  - id: "7.8"
+    title: "Ticket 8: a colour that the schema forbids"
+    ticket: |
+      # Ticket 8: a colour that the schema forbids
+
+      **Severity:** high. **Reported by:** a customer.
+
+      > The schema says `"color": {"enum": ["green", "red", "blue"]}`. We got
+      > `{"color": "grey"}`.
+
+      **Evidence**
+
+      - The code that builds the mask:
+
+        ```python
+        def allowed(state, token_text):
+            return state.accepts(token_text[0])      # the first character
+        ```
+
+      - The Qwen3 vocabulary has the tokens `green` (13250) and `grey` (34571).
+      - All the invalid outputs contain one token of several characters where
+        the automaton allowed only its first character.
+      - The team says that the model was fine-tuned on grey elephants.
+    probes:
+      - ask: After `"` in the value, which characters does the automaton allow?
+        answer: "`g`, `r` and `b`."
+      - ask: Which token did the model choose there?
+        answer: "`grey` (34571)."
+      - ask: How many of the invalid outputs have only tokens of one character?
+        answer: None.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The mask tests only the first character of each token.
+        A token of several characters can start legally and continue illegally.
+        `grey` starts with `g`, which is legal, and then leaves the automaton.
+      - **The number.** All the invalid outputs contain a multi-character token
+        whose first character was legal and whose later characters were not.
+        None of them uses only single characters.
+      - **The fix.** Walk the automaton through **every** character of the
+        token, and allow the token only if the automaton is still alive at
+        the end (stage 19). Precompute this for each state.
+      - **The guard.** A property test: for many states, walk every allowed
+        token through the automaton, and assert that none of them fails.
+
+      **The noise.** The grey elephants. The model can prefer any token. The
+      mask must forbid it.
+    code: ''
+
+  - id: "7.9"
+    title: "Ticket 9: two GPUs slower than one"
+    ticket: |
+      # Ticket 9: two GPUs slower than one
+
+      **Severity:** low. **Reported by:** the platform team.
+
+      > Tensor parallel on 2 L40S cards makes Llama-3-8B 1.76x faster. For
+      > Qwen3-0.6B it makes decode slower: 2.5 ms for each step against
+      > 2.2 ms on one card.
+
+      **Evidence**
+
+      - The two cards connect over PCIe.
+      - The tensor parallel code does 2 all-reduces in each layer: one after
+        the attention and one after the MLP. The values are correct.
+      - One all-reduce of `hidden x 2` bytes costs about 25 µs.
+      - The team suspects a bug in the all-reduce for small models.
+    probes:
+      - ask: How many bytes does one all-reduce send for Qwen3-0.6B?
+        answer: 2 KB for each token.
+      - ask: How much time do the all-reduces take in one step of Qwen3-0.6B?
+        answer: About 1.4 ms.
+      - ask: What does a second replica, not tensor parallel, give?
+        answer: Twice the throughput, with 2.2 ms for each step.
+    solution: |
+      ### Solution: nothing is broken
+
+      - **Root cause.** Tensor parallel halves the weight read and adds a fixed
+        cost for each all-reduce. A small model has little weight to halve, so
+        the fixed cost wins.
+      - **The number.** Qwen3-0.6B: the step reads 1.5 GB, 2.17 ms at 80% of
+        864 GB/s. On two cards it reads half, 1.09 ms, plus 28 x 2 = 56
+        all-reduces x 25 µs = 1.4 ms, a total of 2.49 ms. Slower than 2.17 ms.
+        Llama-3-8B: 23.3 ms on one card, 11.65 + 64 x 0.025 = 13.25 ms on
+        two, which is 1.76x.
+      - **The fix.** Do not shard a small model. Run 2 replicas: two times the
+        throughput, with the step of one card.
+      - **The guard.** Before you shard, predict:
+        `t_tp = t_1 / tp + layers x 2 x t_allreduce`.
+
+      **The noise.** The bug theory. The values are correct, and the time is
+      what the formula predicts.
+    code: |
+      def step_ms(weight_gb, layers, tp):
+          read = weight_gb * 1e9 / tp / (0.8 * 864e9) * 1e3
+          talk = layers * 2 * 0.025 if tp > 1 else 0
+          return read + talk
+      for name, gb, layers in [('Qwen3-0.6B', 1.5, 28), ('Llama-3-8B', 16.1, 32)]:
+          one, two = step_ms(gb, layers, 1), step_ms(gb, layers, 2)
+          print(f'{name}: 1 card {one:.2f} ms, 2 cards {two:.2f} ms, speedup {one / two:.2f}x')
+
+  - id: "7.10"
+    title: "Ticket 10: the rank that got only queries"
+    ticket: |
+      # Ticket 10: the rank that got only queries
+
+      **Severity:** high. **Reported by:** the team that added tensor
+      parallel.
+
+      > With tp = 1, Qwen3-1.7B is correct. With tp = 2 the output is nonsense
+      > from the first token.
+
+      **Evidence**
+
+      - The loader fuses q, k and v into one `qkv` weight, as vLLM does. For
+        Qwen3-1.7B its output dimension is 16 x 128 + 8 x 128 + 8 x 128 = 4,096
+        rows.
+      - The sharding:
+
+        ```python
+        qkv_shard = qkv_weight.chunk(tp, dim=0)[rank]
+        ```
+
+      - The MLP uses the same `chunk` and works.
+      - Each rank prints the right shape: 2,048 rows.
+    probes:
+      - ask: Which rows of the fused weight does rank 0 get?
+        answer: Rows 0 to 2,047.
+      - ask: With tp = 2 and only the MLP sharded, is the output correct?
+        answer: Yes, identical to tp = 1 in fp32.
+      - ask: How many query heads and KV heads should each rank have?
+        answer: 8 query heads and 4 KV heads.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The fused weight is Q, then K, then V, one after the
+        other. `chunk(2)` cuts it in the middle. Rows 0 to 2,047 are all of Q,
+        so rank 0 gets 16 query heads and no K or V. Rank 1 gets all of K and
+        V and no Q.
+      - **The number.** Q has 16 x 128 = 2,048 rows, exactly half of 4,096. The
+        cut falls at the end of Q. Rank 0 has 0 rows of K and V; it should have
+        4 x 128 = 512 of each. The shapes are right, and the contents are wrong.
+      - **The fix.** Split Q, K and V separately, each by heads: rank r gets
+        query heads 8r to 8r + 7 and KV heads 4r to 4r + 3. Then concatenate
+        the three parts on each rank.
+      - **The guard.** Compare tp = 2 with tp = 1 in fp32 (stage 20). Assert
+        which heads each rank holds, not only the shape.
+
+      **The noise.** The MLP works with the same `chunk`. Its gate and up
+      weights are not fused in this loader, so a cut in the middle is correct
+      for them.
+    code: |
+      q, k, v = 16 * 128, 8 * 128, 8 * 128
+      rows = q + k + v
+      half = rows // 2
+      print(f'fused rows {rows}, rank 0 gets rows 0..{half - 1}: Q rows {min(half, q)}, K and V rows {max(0, half - q)}')
+outro: |
+  ### Before you open the solution
+
+  Go back to each ticket and write one more line: **which piece of evidence was
+  noise, and why did it look relevant?**
+patterns: |
+  ### The pattern in the tickets
+
+  | The shape of the number | What it usually means | Tickets |
+  |---|---|---|
+  | The measured speedup equals the formula | Nothing is broken, the regime is wrong | 1, 9 |
+  | A frequency that equals `accept + reject x p` | A rule that gives one token two chances | 2 |
+  | Bytes for each parameter above the original | A hidden copy | 3 |
+  | A fraction of values below half a step | A scale that one outlier chose | 4 |
+  | A value above the largest value of the format | The range, not the precision | 5 |
+  | 100% of the failures at the length limit | A promise that nobody made | 6 |
+  | A constant cost for each feature request, and a flat GPU time | CPU work on the critical path | 7 |
+  | The failure needs a token of several characters | A check that looks at one piece | 8 |
+  | A cut that falls exactly on a boundary | A fused layout that a plain split ignores | 10 |

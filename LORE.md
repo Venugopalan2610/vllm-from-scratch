@@ -1024,33 +1024,33 @@ and complete memory safety before graph execution.
 
 ---
 
-## 16. Chunked Prefill, Decode Interference, and SM Partitioning
+## 16. Chunked Prefill and Decode Interference
 
-Mixed batching (running prefill and decode simultaneously in one step) solves the prefill bubble
-problem, but introduces a severe hardware contention problem: **Streaming Multiprocessor (SM) Starvation**.
+A mixed batch (prefill tokens and decode tokens in one step) removes the prefill bubble. It
+does not remove the interference between the two kinds of work. It changes its shape.
 
-### The Arithmetic Asymmetry
-- **Prefill:** Compute-bound matrix multiplication (GEMM: $M \times K \times N$ where $M$ is prompt length).
-  High arithmetic intensity ($\approx 100\text{ FLOP/byte}$). Prefill kernels launch hundreds of
-  thread blocks that saturate all SMs and Tensor Cores for tens of milliseconds.
-- **Decode:** Memory-bandwidth-bound matrix-vector multiplication (GEMV: $M = 1$).
-  Low arithmetic intensity ($\approx 1\text{ FLOP/byte}$). Decode requests are latency-critical:
-  users expect Inter-Token Latency (ITL) under 20-30 ms.
+### The arithmetic asymmetry
+- **Prefill:** many rows go through each matmul, so the weight read is shared by many tokens.
+  The step is limited by compute.
+- **Decode:** one row for each sequence. The step reads every weight for a few rows. It is
+  limited by memory bandwidth, and a user feels its time directly as the time between tokens.
 
-### The Interference Trap
-When a 2,048-token prefill shares a step with 16 decode streams:
-The prefill GEMM waves occupy every SM on the GPU. The small decode thread blocks are queued
-behind prefill waves in the hardware scheduler. Decode tokens that normally take 2 ms to compute
-are delayed by 50-100 ms, causing massive ITL spikes (p99 latency collapse).
+### Where the interference is
+In the flat batch of stage 21, the prefill rows and the decode rows go through the **same**
+matmul kernels: the step concatenates them. So no decode kernel waits in a queue behind a
+prefill kernel. The decode tokens wait for the **whole step**, and the prefill rows make the step
+long. A step with 2,048 prefill tokens takes about as long as the prefill of 2,048 tokens, and
+every decode in it waits that long for its token. Part 4 measures it on your card.
 
-### How Production Engines Fix It
-1. **Chunked Prefill (Stage 21/22):** Break long prefills into chunks capped by a strict `token_budget`
-   (e.g., 512 tokens). No single prefill wave can monopolize the GPU indefinitely.
-2. **SM Partitioning (CUDA Green Contexts / MPS):** Modern GPUs allow dividing hardware SMs
-   into isolated partitions. For example, reserve 20% of SMs exclusively for decode kernels
-   so decode ITL is completely immune to prefill compute storms.
-3. **Disaggregated Prefill-Decode (Splitwise / Mooncake):** Separate physical GPU clusters for prefill
-   and decode, transferring KV blocks across nodes over high-speed RDMA InfiniBand networks.
+### How engines handle it
+1. **Chunked prefill (stages 11 and 22):** cap the prefill tokens of each step with a token
+   budget. The budget is a dial: a small one keeps the time between tokens short, a large one
+   gives the long prompts a short time to the first token.
+2. **Disaggregated prefill and decode:** run prefill and decode on different GPUs, and send the
+   KV cache from one to the other (research systems such as Splitwise, DistServe and Mooncake,
+   and an experimental mode in vLLM). The decode GPUs then never run a prefill.
+3. **SM partitioning:** give a part of the SMs to each kind of work (CUDA green contexts, MPS).
+   This is an area of research, not a default of the common engines.
 
 ---
 
@@ -1065,8 +1065,8 @@ Beyond $K=4$, linear drafting pays compute to generate draft tokens that are alm
 ### Multi-Branch Tree Speculation
 Modern speculative engines (Medusa, EAGLE, SpecInfer) propose a **tree of candidate hypotheses**
 rather than a single chain. For example, propose 3 candidates for token 1, and 2 candidates for
-each branch of token 2, creating a tree of 16 candidate tokens.
-All 16 candidate tokens are verified simultaneously in **ONE target model forward pass**!
+each of them at token 2: a tree of 3 + 6 = 9 candidate tokens.
+All 9 candidate tokens are verified in **ONE target model forward pass**.
 
 ### The 2D Tree Attention Mask
 To evaluate multiple branching hypotheses without cross-branch interference, the target model
@@ -1080,33 +1080,40 @@ emitting the accepted tokens plus one bonus token from the winning leaf.
 
 ---
 
-## 18. Virtual Memory Management with `cuMemMap` (vLLM V1)
+## 18. Virtual Memory Management with `cuMemMap`: what it offers, and who uses it
 
-In stage 06, we built a `BlockAllocator` managing logical blocks within a contiguous PyTorch tensor:
+In stage 06, we built a `BlockAllocator` over blocks of one tensor that the engine allocates
+at startup:
 ```python
 kv_cache = torch.empty((num_layers, 2, num_blocks, block_size, num_kv_heads, head_dim), device="cuda")
 ```
-This is how vLLM v0 worked. In production, this static contiguous allocation has severe limitations:
+vLLM does the same in principle. At startup it measures the memory that the weights and the
+activations need (the `gpu_memory_utilization` setting), and it gives the rest to the KV cache
+as preallocated tensors. The paging happens in software, through the block table. The GPU
+never sees a page fault. That is stage 06.
 
-### The Fragmentation Bottleneck
-1. **Contiguous Allocation Failure:** Allocating a 30 GB contiguous tensor at startup requires a single
-   unbroken slab of virtual and physical VRAM. If weight loading or CUDA runtime initialization
-   fragments VRAM, the allocation fails with CUDA OOM even if 35 GB of VRAM is free!
-2. **Static Pool Sizing:** You cannot dynamically expand the KV cache pool without reallocating
-   the entire tensor and copying gigabytes of existing KV data.
+### What the CUDA virtual memory API adds
+The CUDA driver has a lower-level API that separates an address from the memory behind it:
+1. **`cuMemAddressReserve`:** reserve a range of *virtual addresses*, with no memory behind it.
+2. **`cuMemCreate`:** allocate a chunk of physical GPU memory (a multiple of the granularity, often 2 MB).
+3. **`cuMemMap`:** put a physical chunk behind a part of the reserved range.
+4. **`cuMemSetAccess`:** allow the GPU to read and write that part.
+5. **`cuMemUnmap` / `cuMemRelease`:** take the chunk away again, and free it.
 
-### Low-Level Driver VMM Architecture
-vLLM V1 rebuilt memory management using CUDA low-level Virtual Memory Management driver APIs:
-1. **`cuMemAddressReserve`:** Reserve a huge contiguous range of *virtual address space*
-   (e.g., 128 GB) at zero physical memory cost. (Virtual address space is 48-bit and practically infinite).
-2. **`cuMemCreate`:** Allocate physical memory chunks in fixed 2MB pages (`CUmemGenericAllocationHandle`).
-3. **`cuMemMap`:** Map physical pages into arbitrary virtual address ranges on demand.
-4. **`cuMemSetAccess`:** Set GPU read/write permissions for the mapped ranges.
-5. **`cuMemUnmap`:** Decouple physical pages from virtual address space instantly when blocks are freed.
+With it, a tensor can have a fixed address and a size that grows and shrinks, with no copy.
 
-This architecture completely decouples virtual addresses from physical GPU memory. The KV cache
-can grow and shrink page by page, physical pages can be remapped without copying data, and contiguous
-memory fragmentation is eliminated entirely.
+### Who uses it
+- **vLLM's sleep mode** uses a memory pool built on this API to give the memory of the weights
+  and of the KV cache back to the driver, and to take it again later, while the addresses stay
+  valid.
+- **Research systems** such as vAttention (2024) keep the KV cache of each request virtually
+  contiguous, and map physical memory behind it on demand. Then an ordinary attention kernel
+  works with no block table.
+
+This course does not call the driver API. `VirtualMemoryBlockManager` in stage 06 is a model
+of it in Python: it counts reserved pages and mapped pages, so that you can reason about the
+design. Before you rely on a claim about which engine uses what, read the current source.
+Inference engines change fast.
 
 ---
 
@@ -1167,19 +1174,34 @@ Understanding `vllm-from-scratch` gives you the exact blueprint required to navi
 
 ---
 
-## 22. LRU Prefix Eviction: Radix Trees Under Memory Pressure
+## 22. LRU Prefix Eviction Under Memory Pressure
 
-Prefix caching (Stage 09/10) enables multiple requests sharing a prompt prefix to reuse physical KV blocks without redundant prefill computation. However, a naive prefix cache faces a dilemma:
+Prefix caching (stage 09) lets requests that share a prompt prefix reuse physical KV blocks,
+with no prefill work for them. A prefix cache with no eviction faces a dilemma:
 
-1. **Immediate Freeing:** If blocks are freed when a sequence finishes, multi-turn chat sessions and popular system prompts lose their cached state immediately.
-2. **Permanent Caching:** If completed sequence blocks remain pinned in memory indefinitely, new requests with unfamiliar prompts will trigger `OutOfBlocks` errors and crash or stall the engine.
+1. **Free at once:** if the blocks go back to the free list when a sequence finishes, the next
+   turn of a chat and the next user of a popular system prompt find nothing in the cache.
+2. **Keep forever:** if finished blocks stay in memory, the pool fills with old prefixes, and new
+   requests find no free block.
 
-The solution deployed in production vLLM is an **LRU Eviction Policy combined with Reference Counting**:
+vLLM V1 solves it with reference counts and an LRU order, in the same data structures that hold
+the free blocks:
 
-- **Active Blocks (`ref_count > 0`):** Blocks currently assigned to running sequences. These are strictly protected from eviction.
-- **Cached Inactive Blocks (`ref_count == 0`):** Blocks whose requests have finished. Instead of being returned to the free list, they remain indexed in the prefix radix tree and enter a doubly-linked LRU queue.
-- **Eviction on Demand:** When `BlockAllocator.allocate()` cannot satisfy an allocation request, it calls `LRUPrefixCache.evict(needed_blocks)`. The cache pops the least recently accessed blocks with zero references, clears their cache mapping, and recycles their physical IDs back to the allocator.
-- **Cache-Aware Scheduling:** In high-concurrency environments, incoming requests in the waiting queue are sorted descending by their prefix cache hit length (`CacheAwareScheduler`). Prioritizing requests that hit warm cache blocks minimizes prefill time, drastically lowers Time-To-First-Token (TTFT), and maximizes system goodput.
+- **Active blocks (`ref_count > 0`):** in use by running sequences. They are never evicted.
+- **Cached free blocks (`ref_count == 0`):** their requests have finished. They stay in the map
+  from block hash to block, and they wait in a queue of free blocks, least recently used first.
+- **Eviction on demand:** an allocation takes the block at the head of that queue. If the block
+  still has a hash, the cache drops the hash first. A later hit on a cached free block takes it
+  out of the queue again.
+
+The key is a hash that chains the hash of the parent block with the tokens of the block, as in
+stage 09. SGLang made a different choice: a radix tree over the token sequences (RadixAttention).
+The two designs find the same shared prefixes. They differ in how they store them and evict them.
+
+Stage 29 adds one policy that vLLM does not use by default: a `CacheAwareScheduler` that orders
+the waiting queue by the length of each request's cached prefix. It raises the hit rate, and it
+can starve a request with no cached prefix, so it needs a limit on the wait (Part 4 has an incident
+about this kind of starvation).
 
 ---
 
@@ -1231,38 +1253,3 @@ During decode attention:
    $$\text{Output} = c_{\text{context}} W_{UV}$$
 
 Decode attention executes directly against compressed latents with zero intermediate decompression and zero mathematical approximation error.
-
----
-
-## 25. System 1 Decision Models: Non-Autoregressive Typed Inference (TypeSafe Jev)
-
-In classical cognitive science, Daniel Kahneman distinguishes between **System 1** (fast, instinctive, automated decisions) and **System 2** (slow, deliberate, step-by-step reasoning). 
-
-Modern LLM serving engines are almost exclusively built for **System 2**:
-- They generate output sequentially, token by token.
-- Each generated token requires reading the entire KV cache and all model weights from HBM.
-- A 100-token response requires 100 round-trips through GPU memory, bound by memory bandwidth.
-
-However, many critical software automation tasks—such as **request classification, front-door guardrails, quality grading, and router dispatch**—do not require conversational prose. They require **typed, deterministic, probabilistic decisions**.
-
-TypeSafe AI introduced **Jev**, a specialized non-autoregressive "System 1" model designed specifically for software decisions rather than free-form text:
-
-### 1. The Three Typed Primitives
-Rather than sampling over a 150k vocabulary of sub-word tokens, a System 1 model maps hidden representations directly to typed schema heads:
-1. **`Choice`:** Categorical distribution over discrete targets (e.g. `["billing", "support", "technical"]` or adapter IDs) with normalized confidence probabilities:
-   $$\mathbf{p} = \text{Softmax}(W_{\text{choice}} \cdot h_L)$$
-2. **`Score`:** Continuous calibrated scalar regression bounded to an explicit range $[A, B]$ via scaled sigmoid projection:
-   $$\text{Score} = A + (B - A) \cdot \sigma(w_{\text{score}}^T h_L + b)$$
-3. **`Noul`:** A pure probability $p \in [0, 1]$ evaluating the belief/truth value of a boolean proposition (e.g. `is_jailbreak_prompt`):
-   $$\text{Noul} = \sigma(w_{\text{noul}}^T h_L + b)$$
-
-### 2. The Serving Implication: Zero KV Cache Overhead
-Because Jev executes non-autoregressively in a single forward pass:
-- **No KV Cache Allocation:** It never calls `BlockAllocator.allocate()` or occupies physical blocks in PagedAttention.
-- **50x–200x Latency Advantage:** A single forward step completes in 1–2 milliseconds on modern GPUs, compared to 100–500 ms for an autoregressive LLM decode loop.
-- **The Front-Door Pattern:** In high-performance serving architectures, a System 1 model sits at the entrance of the scheduler. It screens incoming requests for safety violations (`Noul`), scores priority (`Score`), and routes requests to specialized LoRA adapters (`Choice`) before a single byte of precious KV cache is allocated in the main engine.
-
-### 3. Clean-Room Architecture & Open Ecosystem Lineage
-TypeSafe AI's commercial Jev model weights are closed-source and hosted as a commercial API. In this course, Stage 32 is a **clean-room architectural implementation** of the published Jev System 1 specification. In local open-source production environments, these non-autoregressive typed heads (`Choice`, `Score`, `Noul`) are mounted directly on top of open encoder backbones (such as `microsoft/deberta-v3-large` or community models like `open-jev-deberta-v3-large`).
-
-

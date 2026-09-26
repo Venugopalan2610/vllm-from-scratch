@@ -1,0 +1,499 @@
+# The incident file of Part 4. dev/build_incident_files.py builds the two
+# notebooks from this file, and the /incident skill reads it.
+part: 4
+part_name: The Scheduler
+folder: course/Part4_TheScheduler/3_incidents
+intro: |
+  You finished Part 4. The scheduler decides who runs, who waits, who is
+  preempted, and how many tokens go into each step. Its failures do not give
+  wrong text. They give time: stalls, storms, starvation and latency that the
+  dashboard does not show.
+
+  Each ticket gives you a **symptom** and some **evidence**. Some of the
+  evidence is noise. Write four lines for each ticket:
+
+  1. **Root cause.** One sentence.
+  2. **The number that proves it.** Not "it looks like". A computation.
+  3. **The fix.**
+  4. **The guard.** A test, an assert or an alert that catches it next time.
+
+  Four rules:
+
+  - The tickets are **not** in the order of the notebooks.
+  - At least one ticket is **not a bug**. "Nothing is broken" is a valid answer
+    only if a number proves it.
+  - Write your answer **before** you open the solution.
+  - Every ticket has a scratch cell.
+
+  Do this section after stage 11. This notebook needs no GPU.
+reference: |
+  ### The reference sheet
+
+  | Machine | Number |
+  |---|---|
+  | Your card, prefill | about 37 TFLOP/s sustained (Part 1) |
+  | PCIe 4.0 x16, pinned memory | about 25 GB/s |
+
+  | Model | Parameters | KV bytes per token | bf16 weights |
+  |---|---|---|---|
+  | Qwen3-1.7B | 1.72 B | 114,688 (112 KiB) | 3.44 GB |
+
+  - The block size is 16 tokens.
+  - A prefill of N tokens costs about `2 x parameters x N` FLOP, plus the
+    attention.
+  - A decode step at a small batch costs about 25 ms on your card with this
+    model.
+tickets:
+  - id: "4.1"
+    title: "Ticket 1: the preemption storm"
+    ticket: |
+      # Ticket 1: the preemption storm
+
+      **Severity:** high. **Reported by:** the SRE team.
+
+      > At the peak, 38% of the requests are preempted at least once, and the
+      > throughput falls by half. We raised `max_num_seqs` from 128 to 256 to
+      > admit more requests, and it got worse.
+
+      **Evidence**
+
+      - The pool has 12,000 blocks.
+      - The admission rule: admit a request when the free blocks cover its
+        **prompt**.
+      - The peak workload: prompts of about 1,000 tokens and answers of about
+        1,500 tokens.
+      - At the start of the peak, the scheduler admitted 190 requests at once.
+      - The preemption mode is recompute.
+    probes:
+      - ask: How many blocks did the 190 prompts take?
+        answer: 11,970 of the 12,000.
+      - ask: When does the first preemption happen after the admission?
+        answer: About 16 decode steps later.
+      - ask: How many times is a preempted request preempted, on average?
+        answer: 2.7 times.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The admission counts the prompt and ignores the answer.
+        Each running request needs one more block every 16 tokens. The
+        scheduler admits until the prompts fill the pool, so the first growth
+        has no room, and the scheduler must preempt. A preempted request comes
+        back, is admitted again on its prompt, and the storm repeats.
+      - **The number.** 190 prompts x 63 blocks = 11,970 of 12,000 blocks, with
+        30 left for the growth of 190 requests. At the end, one request needs
+        (1,000 + 1,500) / 16 = 157 blocks. The pool holds only
+        12,000 / 157 = 76 requests of full size. The scheduler admitted 190.
+      - **The fix.** Leave room for the growth. Keep a watermark of free blocks
+        at admission, or cap the running requests near what the pool holds at
+        the expected final length. Raising `max_num_seqs` goes the wrong way.
+      - **The guard.** Alert on the preemption rate. A few percent is normal.
+        38% means the admission promises memory that it does not have.
+
+      **The noise.** None of the evidence is noise here. The change of
+      `max_num_seqs` is a clue: more admission gave more preemption.
+    code: |
+      import math
+      prompt_blocks = math.ceil(1000 / 16)
+      final_blocks = math.ceil(2500 / 16)
+      print('prompt blocks:', prompt_blocks, ' x 190 =', prompt_blocks * 190)
+      print('final blocks:', final_blocks, ' pool holds', 12000 // final_blocks, 'requests of full size')
+
+  - id: "4.2"
+    title: "Ticket 2: the freeze after a preemption"
+    ticket: |
+      # Ticket 2: the freeze after a preemption
+
+      **Severity:** medium. **Reported by:** users of the chat service.
+
+      > At the peak, all of our streams freeze for about two seconds, a few
+      > times each hour.
+
+      **Evidence**
+
+      - Qwen3-1.7B. The service accepts long documents of up to 12,000 tokens.
+        [Chunked prefill](../../GLOSSARY.md#chunked-prefill) is on for new requests, with a chunk of 512 tokens.
+      - Each freeze starts at the same step as a line in the log:
+
+            resumed seq 88213 (recompute, 12000 tokens)
+
+      - The code that resumes a preempted request:
+
+        ```python
+        def resume(self, seq):
+            tokens = seq.prompt + seq.output
+            self.prefill(seq, tokens)          # one forward pass
+        ```
+
+      - One engineer suspects Python garbage collection pauses.
+    probes:
+      - ask: How long is the step that contains the resume?
+        answer: 1.9 seconds.
+      - ask: How long is a garbage collection pause?
+        answer: The longest pause in the logs is 14 ms.
+      - ask: Do new long documents cause a freeze?
+        answer: No. A new document of 12,000 tokens goes in chunks of 512, and no stream freezes.
+    solution: |
+      ### Solution
+
+      - **Root cause.** A resume by recompute runs the whole sequence as **one**
+        prefill. The path for new requests is chunked, but this path is not.
+        Every running stream waits for that one step.
+      - **The number.** The matmuls need 2 x 1.72 G x 12,000 = 41.3 TFLOP. The
+        causal attention adds 2 x 12,000^2 x 16 heads x 128 x 28 layers =
+        16.5 TFLOP. At 37 TFLOP/s that is 1.12 + 0.45 = 1.56 s. The step takes
+        1.9 s, so the prefill runs at 82% of the sustained rate. A freeze of the
+        size of one whole prefill is the fingerprint.
+      - **The fix.** Send the recompute through the same token budget as a new
+        prompt, in chunks. The course notebook said this: you can cut a
+        recompute into chunks, and you cannot cut a swap-in. For a sequence
+        this long, a swap is also an option: 12,000 x 112 KiB = 1.38 GB, or
+        about 55 ms each way at 25 GB/s.
+      - **The guard.** Assert that no step has more prefill tokens than the
+        budget, whatever the path. Alert on the longest step, not only on the
+        average.
+
+      **The noise.** Garbage collection. Its longest pause is 14 ms, which is
+      less than 1% of the freeze.
+    code: |
+      matmul = 2 * 1.72e9 * 12000
+      attention = 2 * 12000**2 * 16 * 128 * 28
+      print(f'recompute: {matmul / 1e12:.1f} + {attention / 1e12:.1f} TFLOP -> {(matmul + attention) / 37e12:.2f} s')
+      kv = 12000 * 114688
+      print(f'swap: {kv / 1e9:.2f} GB -> {kv / 25e9 * 1e3:.0f} ms each way')
+
+  - id: "4.3"
+    title: "Ticket 3: the good p99 and the angry users"
+    ticket: |
+      # Ticket 3: the good p99 and the angry users
+
+      **Severity:** medium. **Reported by:** the product team.
+
+      > Users say that the text freezes for two seconds, a few times during a
+      > long answer. The dashboard says that the p99 of the time between
+      > tokens is 24 ms. The users must be wrong.
+
+      **Evidence**
+
+      - The server runs 64 streams. The time between tokens: p50 22 ms, p99
+        24 ms.
+      - A document of 16,000 tokens arrives about every 3 minutes. Chunked
+        prefill is **off**.
+      - The time to the first token of the documents is 2.3 s. The document
+        users are happy.
+      - The p99.9 is 25 ms.
+    probes:
+      - ask: What is the largest time between two tokens in the last hour?
+        answer: 2.1 s. It happened 20 times.
+      - ask: How many streams saw at least one gap above 1 s in the last hour?
+        answer: Every stream that lasted more than 3 minutes.
+      - ask: At what time do the gaps happen?
+        answer: At the same step for all 64 streams, when a long document starts its prefill.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The prefill of each long document runs in one step, and
+        all 64 streams wait for that step. It happens once in 3 minutes. That
+        is too rare for any percentile over the steps, but every user who
+        stays for 3 minutes sees it.
+      - **The number.** 3 minutes is 180 s / 22 ms = 8,182 steps. One frozen
+        step in 8,182 is 0.012% of the steps. The p99 skips the slowest 1%, and
+        the p99.9 skips the slowest 0.1%. Both are blind to 0.012%.
+      - **The fix.** Chunked prefill (stage 11). The document then goes in
+        chunks, and the time between tokens stays near the time of one step.
+      - **The guard.** Measure the worst gap **for each request**, and report
+        the fraction of requests with a gap above 1 s. A percentile over all
+        the steps hides rare events that every user meets.
+
+      **The noise.** The happy document users. Their time to the first token
+      is fine. The cost of their prefill falls on the other users.
+    code: |
+      steps = 180 / 0.022
+      print(f'steps between documents: {steps:.0f}, frozen fraction: {1 / steps:.3%}')
+      print('the p99 ignores 1%, the p99.9 ignores 0.1%')
+
+  - id: "4.4"
+    title: "Ticket 4: chunked prefill made the documents slow"
+    ticket: |
+      # Ticket 4: chunked prefill made the documents slow
+
+      **Severity:** medium. **Reported by:** the team of the document
+      service.
+
+      > Since chunked prefill, the time to the first token of our documents of
+      > 16,000 tokens went from 2.3 s to 6.4 s. The chat team is happy, and we
+      > are not.
+
+      **Evidence**
+
+      - The token budget for each step is 128 tokens.
+      - About 64 decode streams run all the time. Each decode takes one token
+        of the budget.
+      - A step with the budget of 128 takes about 25 ms.
+      - The time between tokens for the chat streams is now 25 ms at the p99.
+    probes:
+      - ask: How many prefill tokens of the document go into each step?
+        answer: 64.
+      - ask: How many steps does the prefill of one document take?
+        answer: 250.
+      - ask: What does a step with 512 tokens cost?
+        answer: About 50 ms.
+    solution: |
+      ### Solution: a setting, not a bug
+
+      - **Root cause.** The budget of 128 tokens is too small. The 64 decodes
+        take half of it, so the document gets 64 tokens for each step, and its
+        prefill needs 16,000 / 64 = 250 steps.
+      - **The number.** 250 steps x 25 ms = 6.25 s, which is the measured
+        6.4 s. With a budget of 512, the document gets 448 tokens for each
+        step: 36 steps x about 50 ms = 1.8 s. The chat streams then see about
+        50 ms between tokens, not 2 s freezes.
+      - **The fix.** Raise the budget. The budget is the dial between the time
+        to the first token of long prompts and the time between tokens of
+        everybody else. Choose it with both numbers.
+      - **The guard.** Report the time to the first token for each prompt
+        length, and the time between tokens, when you change the budget.
+
+      **The noise.** None. The happy chat team is the other side of the same
+      dial.
+    code: |
+      import math
+      decodes = 64
+      for budget, step in [(128, 0.025), (512, 0.050)]:
+          chunk = budget - decodes
+          steps = math.ceil(16000 / chunk)
+          print(f'budget {budget}: {chunk} prefill tokens per step, {steps} steps, TTFT {steps * step:.2f} s')
+
+  - id: "4.5"
+    title: "Ticket 5: the request that never finishes"
+    ticket: |
+      # Ticket 5: the request that never finishes
+
+      **Severity:** medium. **Reported by:** a customer.
+
+      > One of my requests took 41 minutes. The others take 30 seconds.
+
+      **Evidence**
+
+      - The request had a prompt of 2,000 tokens. The log shows it was
+        preempted 37 times.
+      - The scheduler admits a request when the free blocks cover its prompt.
+        At the peak it preempts about 8 times each second.
+      - The scheduler preempts the request that it admitted **last**.
+      - The code that preempts:
+
+        ```python
+        def preempt(self, seq):
+            self.free(seq)
+            self.running.remove(seq)
+            self.waiting.append(seq)          # to the back of the queue
+        ```
+
+      - The engineer proposes a fix: put the preempted request at the front
+        of the queue. The engineer also thinks that long prompts are unlucky,
+        because they take more blocks.
+    probes:
+      - ask: When this request is admitted again, which request is the last admitted?
+        answer: This request. It is the newest member of the running set each time.
+      - ask: What happens in a replay of the peak with the request at the front of the queue?
+        answer: |
+          The worst request is preempted 70 times, not 37, and the slowest
+          request takes longer. The total preemptions go from about 4,800 to
+          8,400.
+      - ask: What happens in a replay where admission reserves the blocks for the final length?
+        answer: No preemption at all. The median time to the first token stays about the same.
+      - ask: Do other requests with 2,000 tokens get preempted 37 times?
+        answer: No. Most of them are preempted less than 5 times.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The admission promises memory that the pool does not
+        have, so the running set outgrows the pool every few steps, and the
+        scheduler preempts all the time. The victim is always the newest
+        request. A preempted request comes back as the newest request, so it
+        is the next victim again. It loops: preempt, wait, admit, preempt.
+      - **The number.** 37 preemptions x a recompute of about 2,000 tokens is
+        74,000 tokens of wasted prefill for one request. And the replays: at the
+        front of the queue the worst request has 70 preemptions, and with an
+        admission that reserves the final length it has 0. The queue position
+        moves the damage. The admission removes it.
+      - **The fix.** Admit with headroom: reserve the blocks for the final
+        length, or keep a watermark of free blocks. Also cap the preemptions of
+        one request: after 3, it cannot be a victim.
+      - **The guard.** Alert on the preemption rate, and when a request is
+        preempted more than 3 times. Report the preemptions for each request,
+        not only the total.
+
+      **The noise.** "Long prompts are unlucky". A long prompt costs more to
+      recompute, so its loop hurts more, but the loop is the problem. And the
+      obvious fix, the front of the queue, is the trap of this ticket: the
+      "break it" notebook of this Part shows that it makes the loop worse.
+    code: |
+      print('wasted prefill tokens:', 37 * 2000)
+
+  - id: "4.6"
+    title: "Ticket 6: long prompts forget their beginning"
+    ticket: |
+      # Ticket 6: long prompts forget their beginning
+
+      **Severity:** high. **Reported by:** the evaluation team.
+
+      > Since chunked prefill, the answers to long prompts are fluent but
+      > wrong. They ignore the instructions at the start of the prompt. Short
+      > prompts are fine.
+
+      **Evidence**
+
+      - The chunk size is 512 tokens.
+      - The fraction of wrong answers by prompt length:
+
+        | prompt tokens | wrong |
+        |---|---|
+        | up to 512 | 0% |
+        | 513 to 1,024 | 61% |
+        | above 1,024 | 88% |
+
+      - The code that prepares a chunk:
+
+        ```python
+        positions = torch.arange(len(chunk_tokens))
+        ```
+
+      - The team says that long prompts are harder questions.
+    probes:
+      - ask: Do the prompts of exactly 512 tokens work?
+        answer: Yes. 0% wrong.
+      - ask: What positions does the second chunk of a prompt get?
+        answer: 0 to 511, the same as the first chunk.
+      - ask: With chunked prefill off, how many long prompts are wrong?
+        answer: 3%, about the same as the short prompts.
+    solution: |
+      ### Solution
+
+      - **Root cause.** Each chunk starts its positions at 0. The second chunk
+        must start at 512, after the tokens that the first chunk put in the
+        cache. RoPE then tells the model that the second chunk sits at the
+        same place as the first chunk, so the relative distances to the start
+        of the prompt are wrong.
+      - **The number.** The error starts at exactly 513 tokens, which is one
+        chunk plus one. Up to 512 tokens there is only one chunk, and its
+        positions are correct. With chunked prefill off, the long prompts are
+        as good as the short ones: 3%.
+      - **The fix.** `positions = num_computed_tokens + torch.arange(len(chunk))`.
+      - **The guard.** Compare a chunked prefill with a prefill in one pass, in
+        fp32, for a prompt of 3 chunks: the logits must agree. Stage 21 has
+        this check.
+
+      **The noise.** "Long prompts are harder". With the same prompts and no
+      chunking, the error rate is 3%.
+    code: ''
+
+  - id: "4.7"
+    title: "Ticket 7: chunked prefill costs 8% of the throughput"
+    ticket: |
+      # Ticket 7: chunked prefill costs 8% of the throughput
+
+      **Severity:** low. **Reported by:** the finance team.
+
+      > After chunked prefill, the tokens/s fell by 8%. That is 8% more GPUs
+      > for the same traffic. Turn it off.
+
+      **Evidence**
+
+      | | before | after |
+      |---|---|---|
+      | tokens/s | 9,400 | 8,650 |
+      | time between tokens, p99 | 610 ms | 95 ms |
+      | requests that meet the promise (TTFT < 3 s and TPOT < 100 ms) | 71% | 96% |
+
+      - The promise to the customers is in the last row.
+    probes:
+      - ask: How many requests per second meet the promise, before and after?
+        answer: Nobody computed it. The server gets 40 requests each second.
+      - ask: Why does chunked prefill cost throughput at all?
+        answer: The prefill now runs in more, smaller steps, and each step reads the weights again.
+    solution: |
+      ### Solution: nothing is broken
+
+      - **Root cause.** Chunked prefill trades a little raw throughput for the
+        time between tokens. Each extra step reads the weights again, and a
+        small chunk uses the tensor cores less well. The 8% is the price.
+      - **The number.** The throughput that counts is the goodput: the
+        requests that meet the promise. With 40 requests each second, the
+        goodput goes from 0.71 x 40 = 28.4 to 0.96 x 40 = 38.4 requests each
+        second. That is 35% more useful work for 8% fewer raw tokens.
+      - **The fix.** Keep chunked prefill. Tune the budget (Ticket 4) if the 8%
+        matters.
+      - **The guard.** Put the goodput on the finance dashboard next to the
+        raw throughput.
+    code: |
+      rate = 40
+      before, after = 0.71 * rate, 0.96 * rate
+      print(f'goodput: {before:.1f} -> {after:.1f} requests/s, {after / before - 1:.0%} more')
+      print(f'raw tokens/s: {8650 / 9400 - 1:.0%}')
+
+  - id: "4.8"
+    title: "Ticket 8: the swap that runs at a quarter of the bus"
+    ticket: |
+      # Ticket 8: the swap that runs at a quarter of the bus
+
+      **Severity:** low. **Reported by:** the kernel team.
+
+      > We use swap for long sequences, as Ticket 2 suggests. A swap-out of
+      > 12,000 tokens takes 230 ms. We expected about 55 ms.
+
+      **Evidence**
+
+      - The CPU copy of the cache:
+
+        ```python
+        cpu_blocks = torch.empty(num_cpu_blocks, 16, kv_heads, head_dim, dtype=torch.bfloat16)
+        ...
+        cpu_blocks[dst].copy_(gpu_blocks[src], non_blocking=True)
+        ```
+
+      - Nsight Systems names the copy `Memcpy DtoH (Pageable)`.
+      - The bus is PCIe 4.0 x16. The host has 512 GB of RAM, and 380 GB are
+        free.
+    probes:
+      - ask: What does the same copy do into a buffer made with `pin_memory=True`?
+        answer: 56 ms.
+      - ask: Does the CPU wait during the copy?
+        answer: Yes. The CPU thread is blocked for the whole copy, although the call says non_blocking.
+    solution: |
+      ### Solution
+
+      - **Root cause.** The CPU buffer is pageable memory. The DMA engine of
+        the GPU can only write into memory that the OS cannot move, so the
+        driver copies through a small pinned staging buffer, in pieces, and
+        the CPU waits. `non_blocking=True` has no effect with pageable memory.
+      - **The number.** 1.38 GB / 0.230 s = 6.0 GB/s, a quarter of the 25 GB/s
+        that the bus gives with pinned memory. The same copy into a pinned
+        buffer takes 56 ms.
+      - **The fix.** Allocate the CPU cache once, at startup, with
+        `pin_memory=True`.
+      - **The guard.** Log the GB/s of every swap. Alert when it is below half
+        of the measured bus.
+
+      **The noise.** The free RAM. The amount of memory is not the problem.
+      Its kind is.
+    code: |
+      kv = 12000 * 114688
+      print(f'{kv / 1e9:.2f} GB in 230 ms = {kv / 0.230 / 1e9:.1f} GB/s; pinned: {kv / 25e9 * 1e3:.0f} ms')
+outro: |
+  ### Before you open the solution
+
+  Go back to each ticket and write one more line: **which piece of evidence was
+  noise, and why did it look relevant?**
+patterns: |
+  ### The pattern in the tickets
+
+  | The shape of the number | What it usually means | Tickets |
+  |---|---|---|
+  | The demand at the final length is larger than the pool | Admission that ignores growth | 1 |
+  | A stall that equals the FLOP of one large prefill | A path that skips the token budget | 2, 3 |
+  | An event rarer than the percentile | A metric that cannot see the damage | 3 |
+  | `prompt / (budget - decodes) x step` | A setting on the dial | 4 |
+  | One request with many events | A loop in the policy | 5 |
+  | An error that starts at one chunk + 1 | State that does not carry across a chunk | 6 |
+  | Goodput moves, raw throughput does not | The right target | 7 |
+  | A bandwidth at a fixed fraction of the bus | The wrong kind of memory | 8 |

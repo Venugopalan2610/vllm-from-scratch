@@ -25,6 +25,7 @@ from runner.cli import (
     commit_stage,
     load_progress,
     load_stages,
+    progress_counts,
     run_checks,
     save_progress,
     stage_files,
@@ -260,8 +261,7 @@ class VcTUI:
 
         # 1. Header Banner
         header_h = 3
-        done = len(self.progress["completed"])
-        total = len(self.ladder)
+        done, total = progress_counts(self.ladder, self.progress)[:2]
         pct = int((done / total) * 100) if total else 0
         pbar_len = 16
         filled = int(pbar_len * (done / total)) if total else 0

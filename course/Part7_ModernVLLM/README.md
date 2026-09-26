@@ -12,6 +12,7 @@ its challenge (`CC..._helper`). Its solution is in `solutions/`.
 | [`2_quantization/`](2_quantization/) | Fewer bytes per weight, and the trap that cancels the win. Then quantize, and find the speed you lost. |
 | [`3_guided/`](3_guided/) | Mask the logits that cannot come next. Then make invalid output impossible, and find what the mask does not promise. **No GPU.** |
 | [`4_tensorParallel/`](4_tensorParallel/) | Where to cut, and how few times the ranks must talk. Then count the collectives. **No GPU.** |
+| [`5_incidents/`](5_incidents/) | Ten tickets about promises: the exact distribution, the fidelity, the valid JSON, and the same result on two ranks. Then break working code on purpose, and find three hidden faults from their behaviour. Do this section after stage 20. **The tickets need no GPU. The second notebook needs one.** |
 
 ## Hardware Acceleration: Tensor Cores, CUTLASS & Speculative Trees
 
@@ -20,9 +21,9 @@ In autoregressive decode, the sequence generates one token per step ($M=1$). The
 must read all model weights (e.g. 14 GB for a 7B parameter bf16 model) from DRAM
 to registers to perform a single GEMV operation:
 $$\text{Arithmetic Intensity} = \frac{2 \times 7\times 10^9 \text{ FLOPs}}{14\times 10^9 \text{ Bytes}} = 1.0\text{ FLOP/byte}$$
-On an H100 (3.35 TB/s HBM3 bandwidth, 2,000 TFLOP/s FP16 compute):
+On an H100 SXM (3.35 TB/s HBM3 bandwidth, about 989 TFLOP/s of dense bf16 compute):
 $$\text{Max Throughput} = 3.35\times 10^{12}\text{ B/s} \times 1.0\text{ FLOP/B} = 3.35\text{ TFLOP/s}$$
-That is **less than 0.2% of the GPU's compute capability**. The compute units sit idle
+That is **about 0.3% of the GPU's dense compute**. The compute units sit idle
 waiting for memory. Batching requests reuses weights across $B$ tokens, raising arithmetic
 intensity toward the roofline ridge point.
 

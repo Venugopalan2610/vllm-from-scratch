@@ -16,3 +16,6 @@ __pycache__/
 
 # notebook scratch
 .ipynb_checkpoints/
+
+# incident drills: your own progress log
+.incidents.md
