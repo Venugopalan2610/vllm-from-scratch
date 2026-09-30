@@ -215,3 +215,18 @@ class ModelRunner:
         for key_cache, value_cache in self.kv_caches:
             key_cache[destination].copy_(key_cache[source])
             value_cache[destination].copy_(value_cache[source])
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    decode_step_floor_ms = (facts.weight_bytes + n * facts.context_len * facts.kv_bytes_per_token) / facts.bandwidth_bytes_per_s * 1e3
+    decode_step_measured_ms = cudalib.bench_ms(step_at(n))
+    decode_step_measured_over_floor = decode_step_measured_ms / decode_step_floor_ms
+    decode_step_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / decode_step_measured_ms
+    return {"decode_step_floor_ms": decode_step_floor_ms, "decode_step_measured_ms": decode_step_measured_ms,
+            "decode_step_measured_over_floor": decode_step_measured_over_floor, "decode_step_ms_2n_over_n": decode_step_ms_2n_over_n}

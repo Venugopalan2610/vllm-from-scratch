@@ -131,3 +131,18 @@ class VirtualMemoryBlockManager:
     @property
     def physical_pages_in_use(self) -> int:
         return len(self.mapped_physical_pages)
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import math
+
+    blocks_predicted = math.ceil(n / facts.block_size)
+    blocks_measured = count_at(n)
+    blocks_measured_over_predicted = blocks_measured / blocks_predicted
+    blocks_2n_over_n = count_at(2 * n) / blocks_measured
+    return {"blocks_predicted": blocks_predicted, "blocks_measured": blocks_measured,
+            "blocks_measured_over_predicted": blocks_measured_over_predicted, "blocks_2n_over_n": blocks_2n_over_n}

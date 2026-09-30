@@ -180,3 +180,18 @@ def run_all(model, tokenizer, jobs, max_batch_size=8):
     for rid, prompt, max_tokens in jobs:
         engine.add_request(rid, prompt, max_tokens)
     return engine.run_to_completion()
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    engine_step_floor_ms = (facts.weight_bytes + n * facts.context_len * facts.kv_bytes_per_token) / facts.bandwidth_bytes_per_s * 1e3
+    engine_step_measured_ms = cudalib.bench_ms(step_at(n))
+    engine_step_measured_over_floor = engine_step_measured_ms / engine_step_floor_ms
+    engine_step_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / engine_step_measured_ms
+    return {"engine_step_floor_ms": engine_step_floor_ms, "engine_step_measured_ms": engine_step_measured_ms,
+            "engine_step_measured_over_floor": engine_step_measured_over_floor, "engine_step_ms_2n_over_n": engine_step_ms_2n_over_n}

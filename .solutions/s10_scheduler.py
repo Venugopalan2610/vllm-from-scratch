@@ -129,3 +129,18 @@ class Scheduler:
                 break
             self.step()
         return self.finished
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import math
+
+    steps_predicted = facts.max_tokens + 1
+    steps_measured = count_at(n)
+    steps_measured_over_predicted = steps_measured / steps_predicted
+    steps_2n_over_n = count_at(2 * n) / steps_measured
+    return {"steps_predicted": steps_predicted, "steps_measured": steps_measured,
+            "steps_measured_over_predicted": steps_measured_over_predicted, "steps_2n_over_n": steps_2n_over_n}

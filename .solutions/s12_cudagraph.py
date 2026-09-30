@@ -59,3 +59,18 @@ class CUDAGraphRunner:
     def run_eager(self, *inputs):
         self.eager_calls += 1
         return self.fn(*inputs)
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    graph_replay_floor_ms = (facts.weight_bytes) / facts.bandwidth_bytes_per_s * 1e3
+    graph_replay_measured_ms = cudalib.bench_ms(step_at(n))
+    graph_replay_measured_over_floor = graph_replay_measured_ms / graph_replay_floor_ms
+    graph_replay_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / graph_replay_measured_ms
+    return {"graph_replay_floor_ms": graph_replay_floor_ms, "graph_replay_measured_ms": graph_replay_measured_ms,
+            "graph_replay_measured_over_floor": graph_replay_measured_over_floor, "graph_replay_ms_2n_over_n": graph_replay_ms_2n_over_n}

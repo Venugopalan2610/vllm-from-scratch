@@ -161,3 +161,18 @@ class UnchunkedScheduler(ChunkedScheduler):
                 prefill.append((seq.id, prompt_left))
         decoded = [seq for seq in decoders if self._decode_one(seq)]
         return prefill, decoded
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import math
+
+    prefill_steps_predicted = math.ceil(n / facts.token_budget)
+    prefill_steps_measured = count_at(n)
+    prefill_steps_measured_over_predicted = prefill_steps_measured / prefill_steps_predicted
+    prefill_steps_2n_over_n = count_at(2 * n) / prefill_steps_measured
+    return {"prefill_steps_predicted": prefill_steps_predicted, "prefill_steps_measured": prefill_steps_measured,
+            "prefill_steps_measured_over_predicted": prefill_steps_measured_over_predicted, "prefill_steps_2n_over_n": prefill_steps_2n_over_n}

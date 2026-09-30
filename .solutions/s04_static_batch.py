@@ -71,3 +71,18 @@ def padding_waste(output_lens: list[int]) -> float:
     useful_tokens = sum(output_lens)
     computed_tokens = len(output_lens) * max(output_lens)
     return 1.0 - useful_tokens / computed_tokens
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    batch_step_floor_ms = (facts.weight_bytes) / facts.bandwidth_bytes_per_s * 1e3
+    batch_step_measured_ms = cudalib.bench_ms(step_at(n))
+    batch_step_measured_over_floor = batch_step_measured_ms / batch_step_floor_ms
+    batch_step_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / batch_step_measured_ms
+    return {"batch_step_floor_ms": batch_step_floor_ms, "batch_step_measured_ms": batch_step_measured_ms,
+            "batch_step_measured_over_floor": batch_step_measured_over_floor, "batch_step_ms_2n_over_n": batch_step_ms_2n_over_n}

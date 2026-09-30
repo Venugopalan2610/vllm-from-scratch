@@ -58,3 +58,18 @@ class QuantizedLinearCUDA(nn.Module):
 
     def nbytes(self):
         return self.int8_weight.numel() + self.scales.numel() * 4
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    int8_linear_call_floor_ms = (facts.out_features * facts.in_features * facts.bytes_per_weight + facts.out_features * facts.bytes_per_scale) / facts.bandwidth_bytes_per_s * 1e3
+    int8_linear_call_measured_ms = cudalib.bench_ms(step_at(n))
+    int8_linear_call_measured_over_floor = int8_linear_call_measured_ms / int8_linear_call_floor_ms
+    int8_linear_call_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / int8_linear_call_measured_ms
+    return {"int8_linear_call_floor_ms": int8_linear_call_floor_ms, "int8_linear_call_measured_ms": int8_linear_call_measured_ms,
+            "int8_linear_call_measured_over_floor": int8_linear_call_measured_over_floor, "int8_linear_call_ms_2n_over_n": int8_linear_call_ms_2n_over_n}

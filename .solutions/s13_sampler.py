@@ -128,3 +128,18 @@ def sample(logits, params, prev_tokens=None):
     noise = gumbel_noise(uniform_noise(params, scores.shape, device))
     sampled = (scores + noise).argmax(dim=-1)
     return torch.where(greedy, scores.argmax(dim=-1), sampled)
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    sampler_call_floor_ms = (n * facts.vocab_size * facts.logit_bytes) / facts.bandwidth_bytes_per_s * 1e3
+    sampler_call_measured_ms = cudalib.bench_ms(step_at(n))
+    sampler_call_measured_over_floor = sampler_call_measured_ms / sampler_call_floor_ms
+    sampler_call_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / sampler_call_measured_ms
+    return {"sampler_call_floor_ms": sampler_call_floor_ms, "sampler_call_measured_ms": sampler_call_measured_ms,
+            "sampler_call_measured_over_floor": sampler_call_measured_over_floor, "sampler_call_ms_2n_over_n": sampler_call_ms_2n_over_n}

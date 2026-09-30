@@ -171,3 +171,18 @@ class PrefixCache:
             self._evict_oldest()
             evicted += 1
         return evicted
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import math
+
+    prompt_tokens_computed_predicted = facts.system_len + n * facts.question_len
+    prompt_tokens_computed_measured = count_at(n)
+    prompt_tokens_computed_measured_over_predicted = prompt_tokens_computed_measured / prompt_tokens_computed_predicted
+    prompt_tokens_computed_2n_over_n = count_at(2 * n) / prompt_tokens_computed_measured
+    return {"prompt_tokens_computed_predicted": prompt_tokens_computed_predicted, "prompt_tokens_computed_measured": prompt_tokens_computed_measured,
+            "prompt_tokens_computed_measured_over_predicted": prompt_tokens_computed_measured_over_predicted, "prompt_tokens_computed_2n_over_n": prompt_tokens_computed_2n_over_n}

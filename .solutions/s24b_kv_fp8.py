@@ -116,3 +116,18 @@ class Fp8GraphedModelRunner(GraphedModelRunner):
 def kv_bytes_per_token_fp8(model):
     config = model.config
     return 2 * config.num_layers * config.num_kv_heads * config.head_dim
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import cudalib
+
+    decode_step_floor_ms = (facts.weight_bytes + n * facts.context_len * facts.kv_values_per_token * facts.bytes_per_kv_value) / facts.bandwidth_bytes_per_s * 1e3
+    decode_step_measured_ms = cudalib.bench_ms(step_at(n))
+    decode_step_measured_over_floor = decode_step_measured_ms / decode_step_floor_ms
+    decode_step_ms_2n_over_n = cudalib.bench_ms(step_at(2 * n)) / decode_step_measured_ms
+    return {"decode_step_floor_ms": decode_step_floor_ms, "decode_step_measured_ms": decode_step_measured_ms,
+            "decode_step_measured_over_floor": decode_step_measured_over_floor, "decode_step_ms_2n_over_n": decode_step_ms_2n_over_n}

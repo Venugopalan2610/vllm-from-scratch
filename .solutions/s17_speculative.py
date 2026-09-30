@@ -177,3 +177,18 @@ def verify_tree_greedy(logits_rows, tree_tokens, tree_parents):
     bonus_token = int(torch.argmax(logits_rows[last_row]))
 
     return best_path + [bonus_token], len(best_path)
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md. Reference solution."""
+    import math
+
+    tokens_predicted = n * (1 - facts.acceptance_rate ** (facts.num_draft + 1)) / (1 - facts.acceptance_rate)
+    tokens_measured = count_at(n)
+    tokens_measured_over_predicted = tokens_measured / tokens_predicted
+    tokens_2n_over_n = count_at(2 * n) / tokens_measured
+    return {"tokens_predicted": tokens_predicted, "tokens_measured": tokens_measured,
+            "tokens_measured_over_predicted": tokens_measured_over_predicted, "tokens_2n_over_n": tokens_2n_over_n}
