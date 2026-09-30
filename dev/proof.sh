@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Make the proof log in docs/proof/: every check of the torch track against
-# the reference solutions, the four lines of each stage, and the live engine
-# with every reference part, measured on this card.
+# the reference solutions, the four lines of each stage, the whole engine of
+# stage 28, and the live engine with every reference part, measured on this card.
 #
 #   dev/proof.sh
 #
@@ -52,6 +52,11 @@ echo "==> the four lines of each stage"
 "$PYTHON" -m pytest tests/ -q -s -k four_lines --backend torch -p no:cacheprovider 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' | tr '\r' '\n' | grep -v 'Loading weights\|Warning' > "$OUT/four_lines.log"
 tail -1 "$OUT/four_lines.log"
+
+echo "==> stage 28: the whole engine, against its floor and against stage 05"
+"$PYTHON" -m pytest tests/stage_28_benchmark -q -s --backend torch -p no:cacheprovider 2>&1 \
+  | sed 's/\x1b\[[0-9;]*m//g' | tr '\r' '\n' | grep -v 'Loading weights\|Warning' > "$OUT/stage28.log"
+tail -1 "$OUT/stage28.log"
 
 echo "==> ./vc run, with every reference part from 06 to 19"
 "$PYTHON" runner/live_run.py --stages 06,07,08,08b,08c,09,10,11,12,13,14,15,16,17,18,18b,19 2>&1 \

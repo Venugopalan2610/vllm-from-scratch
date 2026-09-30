@@ -432,6 +432,10 @@ def cmd_guide(ladder, progress, stage_id=None):
     stage = resolve_or_report(ladder, progress, stage_id)
     if not stage:
         return 1
+    current = current_stage(ladder, progress)
+    if current is not None and stage["id"] == current["id"]:
+        momentum.record_action(progress, stage["id"])     # active time, see momentum.py
+        save_progress(progress)
     print_stage_banner(stage, progress, progress_counts(ladder, progress)[1])
     heading("YOU ARE HERE")
     print(wrap(stage["layer"] + ".   The map: docs/MAP.md"))
@@ -611,6 +615,9 @@ def cmd_status(ladder, progress):
                          f"{stage_name(stage, progress)}", "bold"))
     for path in stage_files(stage, progress):
         print("  " + paint(path, "dim"))
+    spent = momentum.stage_record(progress, stage["id"]).active_minutes
+    if spent:
+        print("  " + paint(f"active time on this stage so far: {momentum.format_minutes(spent)}", "dim"))
     print_momentum(stage, progress)
     print("\n  " + paint("./vc guide", "cyan") + "   what to build and why")
     print("  " + paint("./vc test", "cyan") + "    run the checks")
@@ -672,6 +679,9 @@ def cmd_list(ladder, progress):
         if is_current:
             name = paint(name, "bold")
         tag = "  " + paint("extension, optional", "dim") if is_extension(stage) else ""
+        spent = momentum.stage_record(progress, stage["id"]).active_minutes
+        if spent and stage["id"] in progress["completed"]:
+            tag += "  " + paint(f"({momentum.format_minutes(spent)} active)", "dim")
         if progress["backend"] == "jax":
             tag = "  " + paint("shared" if is_shared(stage) else "jax", "dim")
         print(f"  {marker} {stage_label(stage):>3} {stage['id']:<26} {name}  "

@@ -193,10 +193,12 @@ def show_table(columns):
 def show_oracle(result, oracle):
     identical, ties, real = compare_with_oracle(result["outputs"], oracle)
     total = len(result["outputs"])
-    print(paint("\n  THE ORACLE", "bold") + paint("  (move 6: each request alone, with the given attention)", "dim"))
-    print(f"  identical: {identical}/{total}.  "
-          f"different from a near tie (a rounding flip, Part 0 assumption 6): {ties}.  "
-          f"real differences: {len(real)}.")
+    print(paint("\n  THE ORACLE", "bold") + paint("  (each request run alone, with the given attention)", "dim"))
+    verdict = f"  {len(real)} real differences in {total} requests."
+    print(paint(verdict, "bold", "green" if not real else "red"))
+    print(f"  {identical} identical. {ties} took another token where the two best tokens scored almost")
+    print("  the same, so the rounding of the GPU decided. That is normal: a batch adds its")
+    print("  numbers in a different order than one request alone. Part 0 measures it.")
     for rid, position, gap in real[:5]:
         print(paint(f"  {rid}: different from token {position}, where the oracle's best two "
                     f"scores differ by {gap:.2f}. That is not rounding. Look at your newest part.",
@@ -281,7 +283,7 @@ def section_speculation(model, parts, args):
     elif gaps[first] <= NEAR_TIE:
         print(f"  the same tokens as the plain decode up to token {first}. There the plain "
               f"decode's two best scores differ by {gaps[first]:.3f}: a near tie. A verify pass "
-              "has more rows, so it adds in a different order (Part 0, assumption 6).")
+              "has more rows, so it adds in a different order. Part 0 measures it.")
     else:
         print(paint(f"  different from the plain decode at token {first}, where its two best "
                     f"scores differ by {gaps[first]:.2f}. That is not rounding: check how you "

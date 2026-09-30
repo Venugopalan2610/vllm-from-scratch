@@ -8,8 +8,16 @@ From that history it chooses one message. It never blocks a command, and it
 never changes a result. It only tells you where you are, and what to do next.
 
 The history lives in .progress.json, next to your completed stages.
+
+It also measures the active time of each stage: the time between two actions
+of `./vc` on that stage (a guide, a test, a submit). A gap longer than
+IDLE_LIMIT_MINUTES counts as that limit, because you were probably away. Time
+that you spend only in the notebooks, with no `./vc` action, is not seen. So
+the number is a lower bound. The time estimate of the course will come from
+these numbers, not from a guess.
 """
 
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -17,6 +25,7 @@ from pathlib import Path
 MOTTO = "Do not stop. Continue. Be better than before."
 STUCK_RUNS = 5          # runs with no new pass before ./vc offers a way out
 AWAY_DAYS = 3           # days away before ./vc says "welcome back"
+IDLE_LIMIT_MINUTES = 30 # a longer gap between two actions counts as this
 PREFORMATTED = "  "     # a line that starts with this keeps its own spacing
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -27,6 +36,8 @@ class StageRecord:
     best: int = -1              # the most checks that passed in one run
     total: int = 0
     runs_since_best: int = 0
+    active_minutes: float = 0.0     # see the docstring of the module
+    last_action_at: float = 0.0     # seconds since the epoch, 0 = never
 
     @classmethod
     def load(cls, data):
@@ -34,7 +45,16 @@ class StageRecord:
 
     def as_dict(self):
         return dict(runs=self.runs, best=self.best, total=self.total,
-                    runs_since_best=self.runs_since_best)
+                    runs_since_best=self.runs_since_best,
+                    active_minutes=round(self.active_minutes, 2),
+                    last_action_at=self.last_action_at)
+
+    def add_action(self, now_s):
+        """Count the time since the last action on this stage, up to the limit."""
+        if self.last_action_at:
+            gap_minutes = max(0.0, now_s - self.last_action_at) / 60
+            self.active_minutes += min(gap_minutes, IDLE_LIMIT_MINUTES)
+        self.last_action_at = now_s
 
 
 @dataclass
@@ -65,10 +85,25 @@ def records(progress):
     return history.setdefault(progress["backend"], {})
 
 
-def record_run(progress, stage_id, passed, total):
+def record_action(progress, stage_id, now_s=None):
+    """A `./vc` action on a stage that is not a run of the checks: a guide."""
+    stage_records = records(progress)
+    record = StageRecord.load(stage_records.get(stage_id))
+    record.add_action(time.time() if now_s is None else now_s)
+    stage_records[stage_id] = record.as_dict()
+
+
+def format_minutes(minutes):
+    """-> '45 min' or '3 h 20 min'."""
+    minutes = int(round(minutes))
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h {minutes % 60} min"
+
+
+def record_run(progress, stage_id, passed, total, now_s=None):
     """Add one run of the checks to the history. -> the RunResult."""
     stage_records = records(progress)
     record = StageRecord.load(stage_records.get(stage_id))
+    record.add_action(time.time() if now_s is None else now_s)
     previous_best = record.best
     record.runs += 1
     record.total = total

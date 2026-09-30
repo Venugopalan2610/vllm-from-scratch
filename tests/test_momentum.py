@@ -74,3 +74,30 @@ def test_days_away():
 def test_each_arc_has_its_notebooks():
     for arc_number in range(8):
         assert momentum.notebooks_for(f"A{arc_number}") is not None
+
+
+def test_active_time_adds_the_gaps_between_actions():
+    progress = new_progress()
+    start = 1_000_000.0
+    momentum.record_action(progress, "06-block-allocator", start)
+    momentum.record_run(progress, "06-block-allocator", 3, 10, now_s=start + 10 * 60)
+    momentum.record_run(progress, "06-block-allocator", 5, 10, now_s=start + 25 * 60)
+    assert momentum.stage_record(progress, "06-block-allocator").active_minutes == 25
+
+
+def test_a_long_gap_counts_only_up_to_the_limit():
+    progress = new_progress()
+    start = 1_000_000.0
+    momentum.record_run(progress, "06-block-allocator", 3, 10, now_s=start)
+    momentum.record_run(progress, "06-block-allocator", 4, 10, now_s=start + 8 * 3600)
+    assert momentum.stage_record(progress, "06-block-allocator").active_minutes == momentum.IDLE_LIMIT_MINUTES
+
+
+def test_an_old_record_with_no_time_still_loads():
+    record = momentum.StageRecord.load({"runs": 4, "best": 4, "total": 4, "runs_since_best": 1})
+    assert record.active_minutes == 0 and record.last_action_at == 0
+
+
+def test_minutes_read_as_hours_and_minutes():
+    assert momentum.format_minutes(45) == "45 min"
+    assert momentum.format_minutes(200) == "3 h 20 min"
