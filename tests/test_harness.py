@@ -172,6 +172,16 @@ def test_each_notebook_has_its_place_in_the_reading_order():
     assert len(places) == len(set(places)), "two notebooks have the same number"
 
 
+def test_course_uses_self_explaining_names():
+    """A name says what it is, of what, and its unit. Run `dev/names.py` to
+    see each vague name with its place."""
+    from dev.names import vague_names
+
+    found = vague_names()
+    assert not found, "\n".join(f"{path} cell {cell} line {line}: `{name}`"
+                                 for path, cell, line, name, _ in found)
+
+
 def test_course_defines_each_term_before_it_uses_it():
     """Run `dev/jargon.py` to see each early use, and `--fix` to link it."""
     from dev.jargon import early_uses, reading_order

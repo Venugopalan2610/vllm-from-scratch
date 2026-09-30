@@ -401,8 +401,8 @@ tickets:
     code: |
       arrival, service = 12, 10
       for minutes in (30, 60):
-          t = minutes * 60
-          queue = (arrival - service) * t
+          seconds = minutes * 60
+          queue = (arrival - service) * seconds
           print(f'after {minutes} min: queue {queue}, wait {queue / service / 60:.0f} min')
 
   - id: "2.7"
@@ -510,8 +510,8 @@ tickets:
       **The noise.** 100% utilization. It tells you that the GPU is busy. It
       does not tell you whether a user waits.
     code: |
-      for batch, ms in [(64, 22), (128, 38), (192, 55), (256, 71)]:
-          per_user = 1000 / ms
+      for batch, step_ms in [(64, 22), (128, 38), (192, 55), (256, 71)]:
+          per_user = 1000 / step_ms
           print(f'batch {batch:3d}: {per_user:4.1f} tok/s per user, {batch * per_user:5.0f} tok/s total',
                 '' if per_user >= 20 else '  <- breaks the promise')
 outro: |

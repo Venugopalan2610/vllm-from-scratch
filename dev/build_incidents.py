@@ -118,6 +118,12 @@ The four questions:
   check would?
 
 The reference is your own `cached_generate` from stage 02.
+
+**About the numbers in the solutions.** A time belongs to one card, so the
+solutions give times as ratios, and your ratios should have the same shape.
+Bytes and token counts belong to the model, so you get the same values. A text
+or a token position comes from a reference run. In bfloat16 a different card
+can shift it by a few tokens, and the kind of damage stays the same.
 ''')
 
 PREDICT = md('''
@@ -144,15 +150,15 @@ The Exercise 2 text of `part1_kv_3_CCwriteBothLoops` warned about this trap.
 @torch.inference_mode()
 def fault_whole_sequence(prompt, max_tokens):
   token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
-  output = model(token_ids, use_cache=True)
-  cache = output.past_key_values
-  next_token = output.logits[:, -1:].argmax(-1)
+  forward_pass = model(token_ids, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_token = forward_pass.logits[:, -1:].argmax(-1)
   token_ids = torch.cat([token_ids, next_token], dim=1)
   generated = [next_token.item()]
   for _ in range(max_tokens - 1):
-    output = model(token_ids, past_key_values=cache, use_cache=True)    # THE FAULT
-    cache = output.past_key_values
-    next_token = output.logits[:, -1:].argmax(-1)
+    forward_pass = model(token_ids, past_key_values=cache, use_cache=True)    # THE FAULT
+    cache = forward_pass.past_key_values
+    next_token = forward_pass.logits[:, -1:].argmax(-1)
     token_ids = torch.cat([token_ids, next_token], dim=1)
     generated.append(next_token.item())
   print(f'cache length {cache.get_seq_length()}, real sequence length {token_ids.shape[1]}')
@@ -175,15 +181,15 @@ cache. Here the code overrides it.
 def fault_stuck_position(prompt, max_tokens):
   token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
   prompt_length = token_ids.shape[1]
-  output = model(token_ids, use_cache=True)
-  cache = output.past_key_values
-  next_token = output.logits[:, -1:].argmax(-1)
+  forward_pass = model(token_ids, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_token = forward_pass.logits[:, -1:].argmax(-1)
   generated = [next_token.item()]
   for _ in range(max_tokens - 1):
-    output = model(next_token, past_key_values=cache, use_cache=True,
+    forward_pass = model(next_token, past_key_values=cache, use_cache=True,
                    position_ids=torch.tensor([[prompt_length]], device=device))   # THE FAULT
-    cache = output.past_key_values
-    next_token = output.logits[:, -1:].argmax(-1)
+    cache = forward_pass.past_key_values
+    next_token = forward_pass.logits[:, -1:].argmax(-1)
     generated.append(next_token.item())
   return generated
 
@@ -200,14 +206,14 @@ correct.
 @torch.inference_mode()
 def fault_first_row(prompt, max_tokens):
   token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
-  output = model(token_ids, use_cache=True)
-  cache = output.past_key_values
-  next_token = output.logits[:, :1].argmax(-1)          # THE FAULT: row 0, not row -1
+  forward_pass = model(token_ids, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_token = forward_pass.logits[:, :1].argmax(-1)          # THE FAULT: row 0, not row -1
   generated = [next_token.item()]
   for _ in range(max_tokens - 1):
-    output = model(next_token, past_key_values=cache, use_cache=True)
-    cache = output.past_key_values
-    next_token = output.logits[:, -1:].argmax(-1)
+    forward_pass = model(next_token, past_key_values=cache, use_cache=True)
+    cache = forward_pass.past_key_values
+    next_token = forward_pass.logits[:, -1:].argmax(-1)
     generated.append(next_token.item())
   return generated
 
@@ -224,16 +230,16 @@ are correct.
 @torch.inference_mode()
 def fault_previous_token(prompt, max_tokens):
   token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
-  output = model(token_ids, use_cache=True)
-  cache = output.past_key_values
-  next_token = output.logits[:, -1:].argmax(-1)
+  forward_pass = model(token_ids, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_token = forward_pass.logits[:, -1:].argmax(-1)
   generated = [next_token.item()]
   previous = next_token
   for _ in range(max_tokens - 1):
-    output = model(previous, past_key_values=cache, use_cache=True)   # THE FAULT
-    cache = output.past_key_values
+    forward_pass = model(previous, past_key_values=cache, use_cache=True)   # THE FAULT
+    cache = forward_pass.past_key_values
     previous = next_token
-    next_token = output.logits[:, -1:].argmax(-1)
+    next_token = forward_pass.logits[:, -1:].argmax(-1)
     generated.append(next_token.item())
   return generated
 
@@ -253,12 +259,12 @@ shared_cache = DynamicCache()
 @torch.inference_mode()
 def fault_shared_cache(prompt, max_tokens):
   token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
-  output = model(token_ids, past_key_values=shared_cache, use_cache=True)   # THE FAULT
-  next_token = output.logits[:, -1:].argmax(-1)
+  forward_pass = model(token_ids, past_key_values=shared_cache, use_cache=True)   # THE FAULT
+  next_token = forward_pass.logits[:, -1:].argmax(-1)
   generated = [next_token.item()]
   for _ in range(max_tokens - 1):
-    output = model(next_token, past_key_values=shared_cache, use_cache=True)
-    next_token = output.logits[:, -1:].argmax(-1)
+    forward_pass = model(next_token, past_key_values=shared_cache, use_cache=True)
+    next_token = forward_pass.logits[:, -1:].argmax(-1)
     generated.append(next_token.item())
   return generated
 
@@ -290,18 +296,18 @@ print('eos_token_id:', model.generation_config.eos_token_id)
 def fault_stop_check(prompt, max_tokens):
   stop = model.generation_config.eos_token_id
   token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
-  output = model(token_ids, use_cache=True)
-  cache = output.past_key_values
-  next_token = int(output.logits[0, -1].argmax())
+  forward_pass = model(token_ids, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_token = int(forward_pass.logits[0, -1].argmax())
   generated = []
   for _ in range(max_tokens):
     if next_token == stop:                               # THE FAULT
       break
     generated.append(next_token)
-    output = model(torch.tensor([[next_token]], device=device),
+    forward_pass = model(torch.tensor([[next_token]], device=device),
                    past_key_values=cache, use_cache=True)
-    cache = output.past_key_values
-    next_token = int(output.logits[0, -1].argmax())
+    cache = forward_pass.past_key_values
+    next_token = int(forward_pass.logits[0, -1].argmax())
   return generated
 
 correct = reference(model, tokenizer, chat_prompt, 60)
@@ -324,14 +330,14 @@ def fault_truncation(prompt, max_tokens):
   token_ids = tokenizer(prompt, return_tensors='pt', truncation=True,
                         max_length=8).input_ids.to(device)      # THE FAULT
   print('the model sees:', repr(tokenizer.decode(token_ids[0])))
-  output = model(token_ids, use_cache=True)
-  cache = output.past_key_values
-  next_token = output.logits[:, -1:].argmax(-1)
+  forward_pass = model(token_ids, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_token = forward_pass.logits[:, -1:].argmax(-1)
   generated = [next_token.item()]
   for _ in range(max_tokens - 1):
-    output = model(next_token, past_key_values=cache, use_cache=True)
-    cache = output.past_key_values
-    next_token = output.logits[:, -1:].argmax(-1)
+    forward_pass = model(next_token, past_key_values=cache, use_cache=True)
+    cache = forward_pass.past_key_values
+    next_token = forward_pass.logits[:, -1:].argmax(-1)
     generated.append(next_token.item())
   return generated
 
@@ -345,14 +351,16 @@ report('full     ', full, full)
 
 Time one prefill of 2048 tokens, with and without
 `torch.cuda.synchronize()`. Then do it again with more iterations. Convert
-each time into TFLOP/s, and compare with the sustained peak of your card from
-`./vc info`.
+each time into TFLOP/s, and compare with the sustained peak of your card,
+which the cell measures first.
 
 This is Ticket 4. Predict how the error changes with the number of iterations.
 '''), code('''
-PEAK_TFLOPS = 49      # replace with the sustained number of `./vc info` on your card
+import cudalib
+PEAK_TFLOPS = cudalib.matmul_flops(heat_seconds=5) / 1e12      # sustained bf16 on this card, measured now
+print(f'the sustained peak of this card: {PEAK_TFLOPS:.0f} TFLOP/s')
 
-params = sum(p.numel() for p in model.parameters())
+params = sum(parameter.numel() for parameter in model.parameters())
 prompt_2048 = torch.randint(0, 1000, (1, 2048), device=device)
 flop = 2 * params * 2048
 
@@ -364,19 +372,19 @@ def time_prefill(iters, synchronize):
     model(prompt_2048, use_cache=False)
   if synchronize:                                        # THE FAULT when False
     torch.cuda.synchronize()
-  ms = (time.perf_counter() - start) / iters * 1000
+  prefill_ms = (time.perf_counter() - start) / iters * 1000
   torch.cuda.synchronize()
-  return ms
+  return prefill_ms
 
 for _ in range(3):
   time_prefill(1, True)                                  # warm-up
 
 for iters in (1, 3, 10, 40):
   for synchronize in (False, True):
-    ms = time_prefill(iters, synchronize)
-    tflops = flop / (ms / 1000) / 1e12
+    prefill_ms = time_prefill(iters, synchronize)
+    tflops = flop / (prefill_ms / 1000) / 1e12
     flag = '   <-- above the peak: impossible' if tflops > PEAK_TFLOPS else ''
-    print(f'iters {iters:2d}  synchronize {str(synchronize):5s}  {ms:6.1f} ms  {tflops:5.1f} TFLOP/s{flag}')
+    print(f'iters {iters:2d}  synchronize {str(synchronize):5s}  {prefill_ms:6.1f} ms  {tflops:5.1f} TFLOP/s{flag}')
 ''')),
 
     ('d9', md('''
@@ -398,9 +406,9 @@ def peak_gb(**kwargs):
   torch.cuda.empty_cache()
   torch.cuda.reset_peak_memory_stats()
   before = torch.cuda.memory_allocated()
-  output = model(long_prompt, use_cache=True, **kwargs)
-  shape = tuple(output.logits.shape)
-  del output
+  forward_pass = model(long_prompt, use_cache=True, **kwargs)
+  shape = tuple(forward_pass.logits.shape)
+  del forward_pass
   return (torch.cuda.max_memory_allocated() - before) / 1e9, shape
 
 for kwargs in ({}, {'logits_to_keep': 1}):
@@ -437,8 +445,8 @@ script = textwrap.dedent("""
 
 # a second copy of the weights must fit next to this one
 torch.cuda.empty_cache()
-result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
-cold = [int(line) for line in result.stdout.split()]
+process = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+cold = [int(line) for line in process.stdout.split()]
 print('new process, ms per call:', cold)
 print(f'first / last: {cold[0] / cold[-1]:.2f}x')
 
@@ -452,7 +460,7 @@ def one_call(tokens):
 
 new_shape = torch.randint(0, 1000, (3, 777), device=device)   # a shape not seen before
 warm = [one_call(new_shape) for _ in range(5)]
-print('warm process, new shape, ms per call:', [round(t) for t in warm])
+print('warm process, new shape, ms per call:', [round(warm_ms) for warm_ms in warm])
 print(f'first / median of the rest: {warm[0] / sorted(warm[1:])[2]:.2f}x')
 ''')),
 ]
@@ -521,9 +529,9 @@ SOLUTIONS_2 = {
     'd1': '''
 ### What happens
 
-- **Crash?** No. The cache grows much faster than the sequence. On my run the
+- **Crash?** No. The cache grows much faster than the sequence. In the reference run the
   cache had 645 entries for a sequence of 37 tokens.
-- **When?** At token 7 on my run. The first few tokens are correct, because the
+- **When?** At token 7 in the reference run. The first few tokens are correct, because the
   real context is still at the start of the cache.
 - **What?** Fluent, but it **repeats the prompt**: "Tokyo, Osaka, and Kyoto.
   The three largest cities in Japan are Tokyo, Osaka, and Kyoto. The three
@@ -539,7 +547,7 @@ SOLUTIONS_2 = {
 ### What happens
 
 - **Crash?** No.
-- **When?** At token 4 on my run.
+- **When?** At token 4 in the reference run.
 - **What?** Repetition that gets worse: "Tokyo, Osaka, Osaka, Kyoto, and
   Kyoto, and Kyoto, and... and... and". Each new token has the same rotation,
   so to the model every new token sits at the same place. The attention cannot
@@ -555,7 +563,7 @@ over time.
 ### What happens
 
 - **Crash?** No.
-- **When?** At token 0. On my run the first token was ":" and not " Tokyo".
+- **When?** At token 0. In the reference run the first token was ":" and not " Tokyo".
 - **What?** Only the first token is wrong. After it, the text recovers: ":
   Tokyo, Osaka, and Kyoto. The population of Tokyo...". The decode steps are
   correct, and the prompt is still in the cache. The model simply continues
@@ -570,7 +578,7 @@ miss in a demo, because the answer "looks fine".
 ### What happens
 
 - **Crash?** No.
-- **When?** At token 2 on my run.
+- **When?** At token 2 in the reference run.
 - **What?** Nonsense with **doubled words**: "cities cities in in Japan Japan".
   Each token goes into the cache one step late, and so the model sees each
   token two times in a row.
@@ -582,8 +590,8 @@ miss in a demo, because the answer "looks fine".
 ### What happens
 
 - **Crash?** No.
-- **When?** Request A is perfect. Request B went wrong at token 4 on my run.
-- **What?** Fluent, and plausible, and wrong. On my run B wrote "a secret. I
+- **When?** Request A is perfect. Request B went wrong at token 4 in the reference run.
+- **What?** Fluent, and plausible, and wrong. In the reference run B wrote "a secret. I
   have a cat named Momo. I have a dog named Kiki". The Japanese names come
   from request A. The shared cache length at the end was 71: the sum of both
   requests.
@@ -616,7 +624,7 @@ appears inside the text.
 - **Crash?** No. No warning either.
 - **When?** At token 0.
 - **What?** The model sees only "Answer in one word. What is the". It then
-  invents a question. On my run it asked about "the name of the first element
+  invents a question. In the reference run it asked about "the name of the first element
   in the periodic table".
 - **Which guard?** None of stages 01 to 03, because they never truncate. The
   guard is to log the prompt length and alert on a spike at one value.
@@ -631,16 +639,19 @@ With one iteration and no synchronize, the time is too short, and the TFLOP/s
 can be above the peak of your card. As the number of iterations grows, the
 error shrinks.
 
-On my card (RTX 4080 Laptop GPU, sustained peak 49 TFLOP/s), over two runs:
+Read the ratio of the two columns: the time without synchronize divided by
+the time with it. In the reference runs:
 
-| iterations | no synchronize | synchronize |
+| iterations | no synchronize / synchronize | TFLOP/s against the sustained peak |
 |---|---|---|
-| 1 | 60 to 123 ms, 57 to 118 TFLOP/s | 188 ms, 37 TFLOP/s |
-| 3 | 142 ms | 186 ms |
-| 10 | 173 ms | 186 ms |
-| 40 | 183 ms | 185 ms |
+| 1 | 0.32 to 0.65 | 1.2x to 2.4x the peak: impossible |
+| 3 | 0.76 to 0.79 | below the peak |
+| 10 | about 0.93 | below the peak |
+| 40 | 0.97 to 0.99 | below the peak |
 
-The row with one iteration changes a lot from run to run. A broken
+Your milliseconds differ from card to card. The ratios have the same shape
+on every card: far below 1 at one iteration, and close to 1 at 40. The row
+with one iteration changes a lot from run to run. A broken
 measurement is not only wrong, it is also unstable. The synchronized column
 stays within 1%.
 
@@ -659,7 +670,8 @@ number above the peak.
     'd9': '''
 ### What happens
 
-On my run, at 8192 tokens:
+In the reference run, at 8192 tokens (bytes do not depend on the card, so
+you get the same numbers):
 
 | | logits shape | peak extra memory |
 |---|---|---|
@@ -678,13 +690,13 @@ allocation of size `prompt_len x vocab x bytes`.
 
 The two ratios are very different.
 
-**A new process pays a large cost one time.** On my card, the first prefill of
-2048 tokens in a new process took 644 to 700 ms, and the calls after it took
-186 to 202 ms: 3.5x in both runs. CUDA creates its context, loads the kernel modules and the cuBLAS
+**A new process pays a large cost one time.** In the reference runs, the first
+prefill of 2048 tokens in a new process took about 3.5x the time of the calls
+after it, in both runs. CUDA creates its context, loads the kernel modules and the cuBLAS
 handles, and grows the memory pool. All of that happens in the first call.
 
-**A new shape in a warm process costs almost nothing in eager PyTorch.** On my
-card the ratio was between 0.90x and 1.01x over two runs. That is noise. The kernels are already loaded, and the allocator
+**A new shape in a warm process costs almost nothing in eager PyTorch.** In the
+reference runs the ratio was between 0.90x and 1.01x. That is noise. The kernels are already loaded, and the allocator
 already has memory. Eager PyTorch simply launches the same kernels with other
 sizes.
 
@@ -717,7 +729,7 @@ times with **the same** prompt. The second answer differs from the first. A
 pure function cannot do that, so the loop has state.
 
 **`mystery_b`: the position is off by one.** The text stays fluent, and it is
-a sensible answer. On my runs it differed from the reference after 10 to 14
+a sensible answer. In the reference runs it differed from the reference after 10 to 14
 tokens. For example, it wrote "3.7 million" where the reference wrote
 "37,400,000". Nothing looks broken, so only a comparison token by token finds
 it. The experiment: compare with the reference on several prompts, and look at
@@ -785,7 +797,7 @@ Now go to Part 2:
 
 def break_it(with_solutions):
     title = ('CodeChallenge: break it on purpose' if with_solutions
-             else 'CodeChallenge HELPER: break it on purpose')
+             else 'CodeChallenge: break it on purpose')
     cells = [header(title), SETUP, INTRO_2, LOAD]
     for key, text, drill in DRILLS:
         cells += [text, PREDICT, drill] if not with_solutions else [text, drill, md(SOLUTIONS_2[key])]
@@ -798,6 +810,6 @@ def break_it(with_solutions):
     return cells
 
 
-save('part1_inc_2_CCbreakItOnPurpose_helper.ipynb', break_it(False))
+save('part1_inc_2_CCbreakItOnPurpose_challenge.ipynb', break_it(False))
 save('solutions/part1_inc_2_CCbreakItOnPurpose.ipynb', break_it(True))
 print('done')

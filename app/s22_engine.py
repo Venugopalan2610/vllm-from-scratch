@@ -2,8 +2,9 @@
 
 `./vc lore 22` for the insight. `./vc test 22` to check yourself.
 
-Stages 10 and 11 were two separate schedulers in a simulation. Neither one
-ran a model, and neither one could stop at EOS. Stage 09 was a prefix cache
+Stages 10 and 11 were two separate schedulers in a simulation. The live
+engine executed their plans, but neither one could stop at EOS, use the
+prefix cache, or abort a request. Stage 09 was a prefix cache
 with nothing to cache. Stages 13 and 14 were a sampler and a detokenizer
 with no engine to call them. This stage makes one engine from all of them,
 on top of your stage 21 runner.

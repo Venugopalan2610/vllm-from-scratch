@@ -118,3 +118,46 @@ class PrefixCache:
 
     def __init__(self, allocator: RefCountedAllocator, capacity=None):
         raise NotImplementedError("stage 09: implement PrefixCache")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: the prompt tokens that n requests compute, when
+    they share one system prompt.
+
+    GIVEN
+        count_at(n)
+            -> the prompt tokens that n requests compute,
+            when they share one system prompt
+        n
+            the size to count at
+        facts
+            facts.system_len     the tokens of the system prompt that every request starts with
+            facts.question_len   the tokens of the question of each request, all different
+            facts.block_size     the tokens in one block
+
+    ASKED: one line for each number
+        prompt_tokens_computed_predicted
+            predict: the prompt tokens if the shared system
+            prompt were computed only one time. Use
+            facts.system_len and facts.question_len.
+        prompt_tokens_computed_measured
+            measure: count_at(n)
+        prompt_tokens_computed_measured_over_predicted
+            divide
+        prompt_tokens_computed_2n_over_n
+            double: count_at(2n) over count_at(n)
+    """
+    prompt_tokens_computed_predicted = ...
+    prompt_tokens_computed_measured = ...
+    prompt_tokens_computed_measured_over_predicted = ...
+    prompt_tokens_computed_2n_over_n = ...
+    return {
+        "prompt_tokens_computed_predicted": prompt_tokens_computed_predicted,
+        "prompt_tokens_computed_measured": prompt_tokens_computed_measured,
+        "prompt_tokens_computed_measured_over_predicted": prompt_tokens_computed_measured_over_predicted,
+        "prompt_tokens_computed_2n_over_n": prompt_tokens_computed_2n_over_n,
+    }

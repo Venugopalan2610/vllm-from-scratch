@@ -97,3 +97,52 @@ class ContinuousEngine:
 def run_all(model, tokenizer, jobs, max_batch_size=8):
     """jobs: a list of (rid, prompt, max_tokens). -> {rid: [token ids]}."""
     raise NotImplementedError("stage 05: implement run_all")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: one decode step of n running requests, each with a
+    KV cache.
+
+    GIVEN
+        step_at(n)
+            -> a function with no arguments. It runs one
+            decode step of n running requests, each with a
+            KV cache.
+        n
+            the size to measure at
+        facts
+            facts.bandwidth_bytes_per_s   the read bandwidth of this card
+            facts.weight_bytes         the bytes of every weight of the model
+            facts.kv_bytes_per_token   the KV cache bytes of one token
+            facts.context_len          the tokens in the cache of each request
+        cudalib.bench_ms(function)
+            -> the milliseconds of one call: warmed up, waited for, repeated
+
+    ASKED: one line for each number
+        engine_step_floor_ms
+            predict: the weights one time, plus the KV cache of
+            every row: n x facts.context_len x
+            facts.kv_bytes_per_token
+        engine_step_measured_ms
+            measure: the time of step_at(n)
+        engine_step_measured_over_floor
+            divide
+        engine_step_ms_2n_over_n
+            double: the time at 2n over the time at n
+    """
+    import cudalib
+
+    engine_step_floor_ms = ...
+    engine_step_measured_ms = ...
+    engine_step_measured_over_floor = ...
+    engine_step_ms_2n_over_n = ...
+    return {
+        "engine_step_floor_ms": engine_step_floor_ms,
+        "engine_step_measured_ms": engine_step_measured_ms,
+        "engine_step_measured_over_floor": engine_step_measured_over_floor,
+        "engine_step_ms_2n_over_n": engine_step_ms_2n_over_n,
+    }

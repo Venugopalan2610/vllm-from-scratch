@@ -199,3 +199,40 @@ def test_long_context_is_faster(nvcc, tmodel):
     print(f"\n  {num_seqs} x {context_len} tokens: bf16 KV {bf16_ms:.1f} ms, "
           f"FP8 KV {fp8_ms:.1f} ms = {bf16_ms / fp8_ms:.2f}x")
     assert bf16_ms / fp8_ms >= 1.2
+
+
+def test_the_four_lines(nvcc, tmodel):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s24b_kv_fp8 import four_lines
+    from tests.helpers import check_four_lines
+
+    from app.s24b_kv_fp8 import Fp8GraphedModelRunner, calibrate_kv_scales
+
+    model = tmodel
+    config = model.config
+    prompt_ids = _prose_ids(model, 1024)
+    scales = calibrate_kv_scales(model, prompt_ids)
+    context_len = len(prompt_ids) + 1
+    kv_values_per_token = 2 * config.num_layers * config.num_kv_heads * config.head_dim
+    facts = cudalib.card_facts(weight_bytes=model.weight_bytes(), kv_values_per_token=kv_values_per_token,
+                               bytes_per_kv_value=1, context_len=context_len)
+    floor_ms = ((facts.weight_bytes + 4 * context_len * kv_values_per_token)
+                / facts.bandwidth_bytes_per_s * 1e3)
+
+    def step_at(num_seqs):
+        blocks_per_seq = context_len // 16 + 2
+        runner = Fp8GraphedModelRunner(model, blocks_per_seq * num_seqs + 16, scales,
+                                       max_model_len=blocks_per_seq * 16, buckets=(num_seqs,))
+        runner.capture()
+        block_lists = [list(range(1 + index * blocks_per_seq, 1 + (index + 1) * blocks_per_seq))
+                       for index in range(num_seqs)]
+        runner.execute([SeqChunk(prompt_ids, 0, blocks) for blocks in block_lists])
+        decodes = [SeqChunk([11], len(prompt_ids), blocks) for blocks in block_lists]
+        return lambda: runner.execute(decodes)
+
+    check_four_lines(four_lines, "decode_step", step_at, 4, facts, floor_ms,
+                     "at a long context the KV cache is a large part of the floor, and FP8 halves it")

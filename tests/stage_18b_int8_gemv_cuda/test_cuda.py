@@ -212,3 +212,31 @@ def test_it_actually_stores_int8(nvcc, device):
     print(f"  int8 version  {quantized.nbytes() / 1e6:>7.2f} MB   "
           f"\033[1m{dense_bytes / quantized.nbytes():.1f}x smaller\033[0m")
     assert quantized.nbytes() < dense_bytes / 3.5
+
+
+def test_the_four_lines(nvcc, device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s18b_gemv_cuda import four_lines
+    from tests.helpers import check_four_lines
+
+    from app.s18b_gemv_cuda import QuantizedLinearCUDA
+
+    # 128 MB of int8 weights: larger than any L2 cache.
+    in_features, out_features = 16384, 8192
+    facts = cudalib.card_facts(in_features=in_features, out_features=out_features,
+                               bytes_per_weight=1, bytes_per_scale=4)
+    floor_ms = ((out_features * in_features + out_features * 4)
+                / facts.bandwidth_bytes_per_s * 1e3)
+    dense = torch.nn.Linear(in_features, out_features, bias=False, device=device, dtype=torch.bfloat16)
+    layer = QuantizedLinearCUDA.from_linear(dense)
+
+    def step_at(num_rows):
+        inputs = torch.randn(num_rows, in_features, device=device, dtype=torch.bfloat16)
+        return torch.inference_mode()(lambda: layer(inputs))
+
+    check_four_lines(four_lines, "int8_linear_call", step_at, 1, facts, floor_ms,
+                     "against stage 18: near 1 at one row, because the kernel reads each int8 weight one time, with no copy")

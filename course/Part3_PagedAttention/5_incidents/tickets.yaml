@@ -101,7 +101,7 @@ tickets:
       number each day has a leak.
     code: |
       free = [20_000, 18_160, 16_318]
-      print('lost each day:', [a - b for a, b in zip(free, free[1:])])
+      print('lost each day:', [today - tomorrow for today, tomorrow in zip(free, free[1:])])
       print('115 aborts x 16 blocks =', 115 * 256 // 16)
       print('days until empty:', 16_318 / 1_840)
 
@@ -166,7 +166,7 @@ tickets:
       remainder does.
     code: |
       bad = [48, 160, 32, 96, 64, 240, 128, 176, 80, 32, 112, 224]
-      print('remainders mod 16:', [n % 16 for n in bad])
+      print('remainders mod 16:', [length % 16 for length in bad])
       print(f'expected fraction: 1/16 = {1 / 16:.2%}')
 
   - id: "3.3"

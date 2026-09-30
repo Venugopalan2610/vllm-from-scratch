@@ -46,7 +46,7 @@ def test_stuck_after_enough_runs_with_no_new_pass():
     results = [run(progress, 4) for _ in range(momentum.STUCK_RUNS)]
     assert not any(result.is_stuck for result in results[:-1])
     assert results[-1].is_stuck
-    text = " ".join(line for line, _ in momentum.when_stuck(results[-1], "06", "A2"))
+    text = " ".join(line for line, _ in momentum.when_stuck(results[-1], "06", "A3"))
     assert momentum.MOTTO in text
     assert "./vc peek 06" in text and "Part3_PagedAttention" in text
 

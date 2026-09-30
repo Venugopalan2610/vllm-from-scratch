@@ -110,3 +110,45 @@ def build_tree_mask(tree_parents, prefix_len=0, device="cpu"):
 def verify_tree_greedy(logits_rows, tree_tokens, tree_parents):
     """Greedy verification for tree speculative decoding."""
     raise NotImplementedError("stage 17: implement verify_tree_greedy")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: the tokens that n verify passes give, when each
+    draft is accepted with a fixed chance.
+
+    GIVEN
+        count_at(n)
+            -> the tokens that n verify passes give, when
+            each draft is accepted with a fixed chance
+        n
+            the size to count at
+        facts
+            facts.acceptance_rate   the chance that one draft token is accepted
+            facts.num_draft         the draft tokens of each pass
+
+    ASKED: one line for each number
+        tokens_predicted
+            predict: the tokens that n passes give, from the
+            formula of this stage. Use facts.acceptance_rate and
+            facts.num_draft.
+        tokens_measured
+            measure: count_at(n)
+        tokens_measured_over_predicted
+            divide
+        tokens_2n_over_n
+            double: count_at(2n) over count_at(n)
+    """
+    tokens_predicted = ...
+    tokens_measured = ...
+    tokens_measured_over_predicted = ...
+    tokens_2n_over_n = ...
+    return {
+        "tokens_predicted": tokens_predicted,
+        "tokens_measured": tokens_measured,
+        "tokens_measured_over_predicted": tokens_measured_over_predicted,
+        "tokens_2n_over_n": tokens_2n_over_n,
+    }

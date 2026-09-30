@@ -32,6 +32,11 @@ GPU: each step sleeps for the step time, then gives one token to each running
 request. `lab.client` consumes a stream and records when each token arrives.
 The notebook runs real `asyncio` code, so the stalls are real stalls.
 
+The times of the fake engine and of the simulations are set by the code, so
+you get about the same values as the solutions. The one exception is
+Exercise 1, where the real tokenizer runs on your CPU: there, compare the
+ratio, not the milliseconds.
+
 This notebook needs no GPU.
 '''
 
@@ -147,14 +152,14 @@ requests.
 rng = random.Random(0)
 pods = []
 for pod in range(10):
-  scale = 10 if pod == 9 else 1
-  pods.append([scale * rng.lognormvariate(math.log(0.12), 0.25) for _ in range(10_000)])
+  slowdown = 10 if pod == 9 else 1
+  pods.append([slowdown * rng.lognormvariate(math.log(0.12), 0.25) for _ in range(10_000)])
 
 def p99(values):
   return sorted(values)[int(0.99 * (len(values) - 1))]
 
 dashboard = sum(p99(latencies) for latencies in pods) / len(pods)          # THE FAULT
-everything = [x for latencies in pods for x in latencies]
+everything = [latency for latencies in pods for latency in latencies]
 print('p99 of each pod:', [round(p99(latencies) * 1000) for latencies in pods], 'ms')
 print(f'the dashboard: {dashboard * 1000:.0f} ms    the true p99: {p99(everything) * 1000:.0f} ms')
 print(f'the p90 of the bad pod: {sorted(pods[9])[int(0.9 * 9999)] * 1000:.0f} ms')
@@ -176,19 +181,19 @@ print(f'{len(events)} events, {sum(size for _, size in events):,} bytes')
 
 def through_proxy(events, buffer_bytes):
   delivered, held = [], 0
-  for t, size in events:
+  for event_time, size in events:
     held += size
     if held >= buffer_bytes:                                            # THE FAULT when the buffer is large
-      delivered.append(t)
+      delivered.append(event_time)
       held = 0
   if held:
     delivered.append(events[-1][0])
   return delivered
 
 for buffer in (0, 4096, 32768):
-  out = through_proxy(events, buffer)
-  print(f'buffer {buffer:6,} B: first bytes at {out[0]:5.2f} s, the last at {out[-1]:5.2f} s, '
-        f'{len(out)} deliveries')
+  delivered_times = through_proxy(events, buffer)
+  print(f'buffer {buffer:6,} B: first bytes at {delivered_times[0]:5.2f} s, the last at {delivered_times[-1]:5.2f} s, '
+        f'{len(delivered_times)} deliveries')
 '''),
 
     ('d6', '''
@@ -261,10 +266,14 @@ SOLUTIONS = {
     'd1': '''
 ### What happens
 
-| where the tokenizer runs | tokenize | the worst gap of each stream |
-|---|---|---|
-| in the event loop | 177 ms | 188 ms, in all 8 streams |
-| in a worker thread | 238 ms | 23 ms, one normal step |
+| where the tokenizer runs | the worst gap of each stream |
+|---|---|
+| in the event loop | the time of the tokenization, plus about one step, in all 8 streams |
+| in a worker thread | one normal step |
+
+The tokenization itself depends on the CPU. In the reference runs it took
+119 ms and 177 ms on the same laptop, on two days, and the rule held both
+times: the freeze equals the tokenization plus one step.
 
 - **Crash?** No.
 - **When?** At the moment the document arrives, in **every** stream at once.
@@ -272,10 +281,9 @@ SOLUTIONS = {
   start the next step either. Every stream freezes for the time of the
   tokenization. The engine itself did nothing wrong.
 
-In a thread, the tokenization takes a little longer, because it shares the
-CPU, and nobody waits for it. It works because the Rust tokenizer releases
-the GIL. A pure-Python function in a thread would still block the loop, and it
-needs another process.
+In a thread, the tokenization takes about as long, and nobody waits for it.
+It works because the Rust tokenizer releases the GIL. A pure-Python function
+in a thread would still block the loop, and it needs another process.
 
 **The fingerprint.** All streams stall together, for the time of one CPU call.
 **The guard.** A monitor of the event loop lag.
@@ -405,7 +413,7 @@ FINGERPRINTS_SOL = '''
 | tokenize in the event loop | no | a long prompt arrives | all streams stall together | the event loop lag |
 | no abort when the user stops | no | users press stop | 32% delivered; a busy engine with nobody | delivered / generated |
 | the TTFT clock starts at admission | no | under a queue | a TTFT of one step, always | a probe from the outside |
-| the average of the p99s | no | one bad pod | 405 ms instead of 1,651 ms | merge the histograms |
+| the average of the p99s | no | one bad pod | 4x below the true p99 | merge the histograms |
 | a proxy that buffers | no | behind the proxy only | TTFT = total time | a probe through the public path |
 | a load test with no think time | no | always | 4x the real load | report the offered load |
 

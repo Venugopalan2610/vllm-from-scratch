@@ -80,7 +80,7 @@ assert not missing, f'these jobs have no owner yet: {missing}'
 by_owner = {}
 for job, owner in OWNER.items():
     by_owner.setdefault(owner, []).append(job)
-for owner, jobs in sorted(by_owner.items(), key=lambda item: -len(item[1])):
+for owner, jobs in sorted(by_owner.items(), key=lambda owner_and_jobs: -len(owner_and_jobs[1])):
     print(f'{owner:45s} {", ".join(jobs)}')
 print(f'\\n{len(by_owner)} components for {len(OWNER)} jobs')
 '''
@@ -115,7 +115,7 @@ source = (ROOT / 'app' / 's22_engine.py').read_text()
 tree = ast.parse(source)
 for node in tree.body:
     if isinstance(node, ast.ClassDef):
-        methods = [item.name for item in node.body if isinstance(item, ast.FunctionDef)]
+        methods = [statement.name for statement in node.body if isinstance(statement, ast.FunctionDef)]
         print(f'{node.name}: {", ".join(methods)}')
 '''
 
@@ -251,7 +251,7 @@ The solution cells above fill in the split of stage 22. Its reasons:
 
 if __name__ == '__main__':
     build([('code', SETUP)] + CELLS,
-          'course/Part8_TheCapstone/1_engine/part8_eng_3_CCdesignTheEngine_helper.ipynb',
+          'course/Part8_TheCapstone/1_engine/part8_eng_3_CCdesignTheEngine_challenge.ipynb',
           'course/Part8_TheCapstone/1_engine/solutions/part8_eng_3_CCdesignTheEngine.ipynb',
           'One engine from the parts', 'design the engine, then compare')
     print('the design notebook is built')

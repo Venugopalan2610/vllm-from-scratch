@@ -234,3 +234,29 @@ def test_virtual_memory_cu_mem_map_lifecycle():
 
     # Virtual slot 5 remains valid and mapped
     assert 5 in vmm.mapped_physical_pages
+
+
+def test_the_four_lines():
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import math
+    import random
+
+    from cudalib import Facts
+    from app.s06_blocks import four_lines
+    from tests.helpers import check_four_count_lines
+
+    from app.s06_blocks import BlockAllocator, BlockTable
+
+    facts = Facts(block_size=16)
+
+    def count_at(num_tokens):
+        table = BlockTable(BlockAllocator(1000, facts.block_size))
+        for _ in range(num_tokens):
+            table.append_token()
+        return len(table.blocks)
+
+    predicted = math.ceil(100 / facts.block_size)
+
+    check_four_count_lines(four_lines, "blocks", count_at, 100, facts, predicted,
+                           "1.0: a new block comes only when the last one is full")

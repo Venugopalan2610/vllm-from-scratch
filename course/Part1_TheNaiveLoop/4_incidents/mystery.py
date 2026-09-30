@@ -1,7 +1,7 @@
 """Three generation loops. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part1_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 11.
+part1_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 11.
 
 In a real incident you do not get the source of the broken thing first. You
 get its behaviour. Find the fault from the behaviour. Then open this file and

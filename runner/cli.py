@@ -6,6 +6,13 @@
     vc test          run the checks of the current stage
     vc submit        run the checks. If they pass, bank the stage, open the next
 
+  YOUR NOTES
+    vc note "text"   write down a confusion, or a prediction that was wrong
+    vc note          read your notes
+
+  YOUR ENGINE SO FAR
+    vc run           your parts in one live engine, with and without your newest
+
   BACKENDS
     vc backend       the track that you are on: torch or jax
     vc backend jax   change to it. Each track has its own progress.
@@ -41,6 +48,7 @@ from runner.notebooks import notebooks_for_stage  # noqa: E402
 from runner.style import paint  # noqa: E402  (needs ROOT on the path)
 
 PROGRESS_FILE = ROOT / ".progress.json"
+NOTES_FILE = ROOT / ".notes.md"
 PYTHON = ROOT / ".venv" / "bin" / "python"
 BACKENDS = ("torch", "jax")
 
@@ -425,6 +433,16 @@ def cmd_guide(ladder, progress, stage_id=None):
     if not stage:
         return 1
     print_stage_banner(stage, progress, progress_counts(ladder, progress)[1])
+    heading("YOU ARE HERE")
+    print(wrap(stage["layer"] + ".   The map: docs/MAP.md"))
+    heading("THE PROBLEM THAT ASKS FOR THIS STAGE")
+    print(wrap(" ".join(stage["because"].split())))
+    heading("WHAT IS GIVEN")
+    for item in stage["given"]:
+        print(wrap("- " + item).replace("\n  ", "\n    ", -1))
+    heading("WHAT IS ASKED")
+    print(wrap(stage_text(stage, progress, "deliver")))
+    print_files(stage, progress)
     print_terms(ladder, stage)
     heading("WHY THIS STAGE EXISTS")
     print(wrap(" ".join(stage["insight"].split())))
@@ -432,9 +450,6 @@ def cmd_guide(ladder, progress, stage_id=None):
         heading("WHAT CHANGES IN JAX")
         print(wrap(" ".join(stage["jax_insight"].split())))
     print_notebooks(stage)
-    heading("WHAT YOU ARE BUILDING")
-    print(wrap(stage_text(stage, progress, "deliver")))
-    print_files(stage, progress)
     heading("HOW YOU WILL KNOW IT WORKED")
     print(wrap(stage["measure"]))
     print_checks(stage, progress)
@@ -524,6 +539,9 @@ def cmd_submit(ladder, progress):
     print(f"\n  {progress_bar(done, total)}  {count_text(ladder, progress)}\n")
     say(momentum.after_submit(momentum.stage_record(progress, stage["id"]),
                               stage_label(stage)))
+    if any("./vc run" in item for item in stage.get("given", [])):
+        print("\n  " + paint("./vc run", "cyan") + "   your new part, inside the live engine, "
+              "against the engine without it")
     following = current_stage(ladder, progress)
     if following is None or following["arc_id"] != stage["arc_id"]:
         print()
@@ -533,6 +551,27 @@ def cmd_submit(ladder, progress):
     print()
     say(momentum.finished(progress))
     print()
+    return 0
+
+
+def cmd_note(ladder, progress, words):
+    """A confusion, or a prediction that was wrong, is information. Write it
+    down at the moment it happens, with the stage, and continue. Read the list
+    later: some notes show a gap in you, and some show a gap in the course."""
+    from datetime import date
+    if not words:
+        if not NOTES_FILE.exists():
+            print("\n  No notes yet. When a sentence confuses you, or a "
+                  "prediction is wrong:\n  " + paint('./vc note "what and why"',
+                                                    "cyan") + "\n")
+            return 0
+        print("\n" + NOTES_FILE.read_text())
+        return 0
+    stage = current_stage(ladder, progress)
+    where = f"stage {stage_label(stage)}" if stage else "after the ladder"
+    with NOTES_FILE.open("a") as notes:
+        notes.write(f"- {date.today().isoformat()}, {where}: {' '.join(words)}\n")
+    print(paint(f"  noted, at {where}. Continue.", "dim"))
     return 0
 
 
@@ -756,7 +795,7 @@ def cmd_reset(ladder, progress, stage_id):
 SCRIPTS = {"info": "envinfo.py", "cliff": "cliff.py", "ncu": "ncu.py",
            "nsys": "nsys.py",
            "bench": "bench.py", "serve": "serve.py", "math": "timings.py",
-           "doctor": "doctor.py", "tui": "tui.py", "ui": "tui.py"}
+           "doctor": "doctor.py", "tui": "tui.py", "ui": "tui.py", "run": "live_run.py"}
 NO_ARGUMENTS = ("info", "cliff", "doctor", "nsys", "tui", "ui")
 
 
@@ -801,6 +840,7 @@ def main():
                              if "--apply" in arguments
                              else cmd_peek(ladder, progress, stage_id)),
             "reset": lambda: cmd_reset(ladder, progress, stage_id),
+            "note": lambda: cmd_note(ladder, progress, arguments[1:]),
         }
         if command not in commands:
             print(__doc__)

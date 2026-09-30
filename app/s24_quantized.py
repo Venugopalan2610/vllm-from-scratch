@@ -97,3 +97,51 @@ def continuation_logits(model, token_ids, prompt_len):
     attention, and ask model.forward for the logits of the output rows only.
     Stage 18 gives you fidelity() to compare two of these."""
     raise NotImplementedError("stage 24: implement continuation_logits")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: one graphed decode step of your int8 model, for n
+    sequences.
+
+    GIVEN
+        step_at(n)
+            -> a function with no arguments. It runs one
+            graphed decode step of your int8 model, for n
+            sequences.
+        n
+            the size to measure at
+        facts
+            facts.bandwidth_bytes_per_s   the read bandwidth of this card
+            facts.weight_bytes         the bytes that one step reads of the weights
+            facts.kv_bytes_per_token   the KV cache bytes of one token
+            facts.context_len          the tokens in the context of each sequence
+        cudalib.bench_ms(function)
+            -> the milliseconds of one call: warmed up, waited for, repeated
+
+    ASKED: one line for each number
+        decode_step_floor_ms
+            predict: which bytes must this step read, at the
+            least?
+        decode_step_measured_ms
+            measure: the time of step_at(n)
+        decode_step_measured_over_floor
+            divide
+        decode_step_ms_2n_over_n
+            double: the time at 2n over the time at n
+    """
+    import cudalib
+
+    decode_step_floor_ms = ...
+    decode_step_measured_ms = ...
+    decode_step_measured_over_floor = ...
+    decode_step_ms_2n_over_n = ...
+    return {
+        "decode_step_floor_ms": decode_step_floor_ms,
+        "decode_step_measured_ms": decode_step_measured_ms,
+        "decode_step_measured_over_floor": decode_step_measured_over_floor,
+        "decode_step_ms_2n_over_n": decode_step_ms_2n_over_n,
+    }

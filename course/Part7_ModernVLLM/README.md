@@ -4,7 +4,25 @@ Stages: stages 17-20, 18b.
 
 Open the sections in the order of their numbers. In each section, open the
 notebooks in the order of their numbers. The last notebook of a section is
-its challenge (`CC..._helper`). Its solution is in `solutions/`.
+its challenge (`CC..._challenge`). Its solution is in `solutions/`.
+
+## Start here: a ticket that you cannot solve yet
+
+**Ticket 7.3: int8 weights that made decode 2.4x slower.** Reported by the team that quantized the model:
+
+> Llama-3-8B in bf16 decodes at 104 tokens/s on an A100. With int8
+> weights it decodes at 44 tokens/s. Half the bytes gave less than half
+> the speed.
+
+You do not have the tools for this yet. Keep it in mind while you work. Each
+section of this Part gives you a piece of the answer. At the end,
+[`5_incidents/`](5_incidents/) asks you to find the cause and prove it with a
+number.
+
+First, one guess: which layer of the engine would you look at?
+([the map](../../docs/MAP.md))
+
+## The sections
 
 | | |
 |---|---|

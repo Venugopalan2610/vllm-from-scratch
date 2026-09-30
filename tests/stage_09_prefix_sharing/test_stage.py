@@ -229,3 +229,42 @@ def test_cache_saves_prefill_on_a_shared_system_prompt():
     print("  so small.\033[0m")
     assert reused == len(hashes) * 9
     assert cache.hits > cache.misses
+
+
+def test_the_four_lines():
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import math
+    import random
+
+    from cudalib import Facts
+    from app.s09_prefix import four_lines
+    from tests.helpers import check_four_count_lines
+
+    import math
+
+    from app.s09_prefix import PrefixCache, RefCountedAllocator, block_hashes
+
+    facts = Facts(system_len=100, question_len=20, block_size=16)
+    system_ids = list(range(1000, 1000 + facts.system_len))
+
+    def count_at(num_requests):
+        allocator = RefCountedAllocator(4096, facts.block_size)
+        cache = PrefixCache(allocator)
+        computed = 0
+        for index in range(num_requests):
+            first_id = 5000 + index * facts.question_len
+            token_ids = system_ids + list(range(first_id, first_id + facts.question_len))
+            hashes = block_hashes(token_ids, facts.block_size)
+            hits = cache.lookup(hashes)
+            computed += len(token_ids) - len(hits) * facts.block_size
+            blocks = hits + allocator.allocate(math.ceil(len(token_ids) / facts.block_size) - len(hits))
+            for position, block_hash in enumerate(hashes):
+                if position >= len(hits):
+                    cache.insert(block_hash, blocks[position])
+        return computed
+
+    predicted = facts.system_len + 10 * facts.question_len
+
+    check_four_count_lines(four_lines, "prompt_tokens_computed", count_at, 10, facts, predicted,
+                           "above 1: the end of the system prompt shares a block with each question, so it is computed again")

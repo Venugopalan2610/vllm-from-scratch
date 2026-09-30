@@ -1,7 +1,7 @@
 """Three metric functions. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part6_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 7.
+part6_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 7.
 
 A log is a list of dicts: arrival, first, finish, tokens, done.
 """

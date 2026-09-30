@@ -4,7 +4,25 @@ Stages: stages 04-05.
 
 Open the sections in the order of their numbers. In each section, open the
 notebooks in the order of their numbers. The last notebook of a section is
-its challenge (`CC..._helper`). Its solution is in `solutions/`.
+its challenge (`CC..._challenge`). Its solution is in `solutions/`.
+
+## Start here: a ticket that you cannot solve yet
+
+**Ticket 2.4: the job that took nine times longer.** Reported by the data team:
+
+> We summarize 10,000 support tickets each night with a static batch of
+> 32. The plan said 3.5 hours. It took 31 hours. The GPU was at 100%
+> utilization the whole time.
+
+You do not have the tools for this yet. Keep it in mind while you work. Each
+section of this Part gives you a piece of the answer. At the end,
+[`3_incidents/`](3_incidents/) asks you to find the cause and prove it with a
+number.
+
+First, one guess: which layer of the engine would you look at?
+([the map](../../docs/MAP.md))
+
+## The sections
 
 | | |
 |---|---|

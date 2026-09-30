@@ -171,3 +171,33 @@ def test_prefill_first_policy_is_worse_for_streaming():
     # With prefill_first and a budget of 512, the chunk takes the whole budget.
     assert scheduler.step()["prefill"], (
         "prefill_first must schedule the prefill chunks first")
+
+
+def test_the_four_lines():
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import math
+    import random
+
+    from cudalib import Facts
+    from app.s11_chunked import four_lines
+    from tests.helpers import check_four_count_lines
+
+    import math
+
+    facts = Facts(token_budget=64)
+
+    def count_at(prompt_len):
+        scheduler = ChunkedScheduler(BlockAllocator(10_000, 16), max_num_seqs=8,
+                                     token_budget=facts.token_budget)
+        scheduler.add_request(0, prompt_len, 1)
+        steps = 0
+        while scheduler.has_work():
+            scheduler.step()
+            steps += 1
+        return steps
+
+    predicted = math.ceil(200 / facts.token_budget)
+
+    check_four_count_lines(four_lines, "prefill_steps", count_at, 200, facts, predicted,
+                           "1.0: each step is full until the last chunk")

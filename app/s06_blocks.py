@@ -165,3 +165,43 @@ class VirtualMemoryBlockManager:
     @property
     def physical_pages_in_use(self) -> int:
         raise NotImplementedError("stage 06: implement physical_pages_in_use")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: the blocks that one BlockTable holds after n
+    tokens.
+
+    GIVEN
+        count_at(n)
+            -> the blocks that one BlockTable holds after n
+            tokens
+        n
+            the size to count at
+        facts
+            facts.block_size   the tokens in one block
+
+    ASKED: one line for each number
+        blocks_predicted
+            predict: the blocks that n tokens need, at the
+            least: n / facts.block_size, rounded up
+        blocks_measured
+            measure: count_at(n)
+        blocks_measured_over_predicted
+            divide
+        blocks_2n_over_n
+            double: count_at(2n) over count_at(n)
+    """
+    blocks_predicted = ...
+    blocks_measured = ...
+    blocks_measured_over_predicted = ...
+    blocks_2n_over_n = ...
+    return {
+        "blocks_predicted": blocks_predicted,
+        "blocks_measured": blocks_measured,
+        "blocks_measured_over_predicted": blocks_measured_over_predicted,
+        "blocks_2n_over_n": blocks_2n_over_n,
+    }

@@ -151,3 +151,34 @@ def test_a_big_batch_is_not_slower(nvcc, tmodel, qmodel):
     nothing."""
     bf16_ms, int8_ms = _step_ms(tmodel, 32), _step_ms(qmodel, 32)
     assert bf16_ms / int8_ms >= 0.93
+
+
+def test_the_four_lines(nvcc, qmodel):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s24_quantized import four_lines
+    from tests.helpers import check_four_lines
+
+    from tests.helpers import CAPSTONE_PROMPTS
+
+    model = qmodel
+    prompt_ids = model.tokenizer(CAPSTONE_PROMPTS[0]).input_ids
+    context_len = len(prompt_ids) + 1
+    facts = cudalib.card_facts(weight_bytes=model.weight_bytes(),
+                               kv_bytes_per_token=model.kv_bytes_per_token(), context_len=context_len)
+    floor_ms = ((facts.weight_bytes + 1 * context_len * facts.kv_bytes_per_token)
+                / facts.bandwidth_bytes_per_s * 1e3)
+
+    def step_at(num_seqs):
+        runner = GraphedModelRunner(model, 16 * num_seqs + 16, max_model_len=256, buckets=(num_seqs,))
+        runner.capture()
+        block_lists = [list(range(1 + index * 16, 1 + (index + 1) * 16)) for index in range(num_seqs)]
+        runner.execute([SeqChunk(prompt_ids, 0, blocks) for blocks in block_lists])
+        decodes = [SeqChunk([11], len(prompt_ids), blocks) for blocks in block_lists]
+        return lambda: runner.execute(decodes)
+
+    check_four_lines(four_lines, "decode_step", step_at, 1, facts, floor_ms,
+                     "against stage 23: fewer weight bytes, so a lower floor")

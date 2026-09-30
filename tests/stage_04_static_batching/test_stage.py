@@ -105,3 +105,25 @@ def test_the_bill_padding_waste(hf, device):
     print("\n  \033[2mYou paid for a batch of 8 and got the throughput of "
           "about 2.")
     print("  Stage 05 evicts a sequence at the moment that it finishes.\033[0m")
+
+
+def test_the_four_lines(hf, device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s04_static_batch import four_lines
+    from tests.helpers import check_four_lines
+
+    model, _ = hf
+    weight_bytes = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
+    facts = cudalib.card_facts(weight_bytes=weight_bytes)
+    floor_ms = weight_bytes / facts.bandwidth_bytes_per_s * 1e3
+
+    def step_at(num_rows):
+        token_ids = torch.randint(0, 1000, (num_rows, 1), device=device)
+        return torch.inference_mode()(lambda: model(token_ids, use_cache=False))
+
+    check_four_lines(four_lines, "batch_step", step_at, 8, facts, floor_ms,
+                     "above 1 is the Python and the launches around the weight read. A doubling near 1: the rows are almost free")

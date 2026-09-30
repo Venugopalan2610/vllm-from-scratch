@@ -1,7 +1,7 @@
 """Build the incident-file notebooks of every Part from its tickets.yaml.
 
 Each Part has a folder `course/Part*/N_incidents/` with a `tickets.yaml`. This
-script writes two notebooks from it: the challenge (`..._helper.ipynb`) and
+script writes two notebooks from it: the challenge (`..._challenge.ipynb`) and
 the solution (`solutions/...ipynb`). The /incident skill in
 `.claude/skills/incident/` reads the same file, so a ticket is written once.
 
@@ -64,6 +64,13 @@ ANSWER = md('''
 ''')
 
 
+LABEL = '''
+> **Educational scenarios.** The tickets in this file are invented for teaching.
+> No ticket describes a real incident, a real company or a real person. Each
+> ticket is built on a class of failure that LLM serving systems can have.
+'''
+
+
 def colleague(part):
     return f'''
 **The on-call colleague.** In Claude Code, type `/incident {part}.1` (or any
@@ -89,9 +96,10 @@ def build(path):
     data = yaml.safe_load(path.read_text())
     part, name = data['part'], data['part_name']
     folder = ROOT / data['folder']
-    intro = data['intro'].strip('\n') + '\n\n' + colleague(part).strip('\n')
+    intro = (LABEL.strip('\n') + '\n\n' + data['intro'].strip('\n') + '\n\n'
+             + colleague(part).strip('\n'))
 
-    helper = [header(part, name, 'CodeChallenge HELPER: the incident file'),
+    helper = [header(part, name, 'CodeChallenge: the incident file'),
               md(intro), md(data['reference'])]
     solution = [header(part, name, 'CodeChallenge: the incident file'),
                 md(intro), md(data['reference'])]
@@ -105,7 +113,7 @@ def build(path):
     helper.append(md(data['outro']))
     solution.append(md(data['patterns']))
 
-    save(folder / f'part{part}_inc_1_CCtheIncidentFile_helper.ipynb', helper)
+    save(folder / f'part{part}_inc_1_CCtheIncidentFile_challenge.ipynb', helper)
     save(folder / 'solutions' / f'part{part}_inc_1_CCtheIncidentFile.ipynb', solution)
     return part, len(data['tickets'])
 

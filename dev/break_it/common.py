@@ -116,7 +116,7 @@ def fingerprints(rows):
 
 def build(spec, with_solutions):
     title = ('CodeChallenge: break it on purpose' if with_solutions
-             else 'CodeChallenge HELPER: break it on purpose')
+             else 'CodeChallenge: break it on purpose')
     cells = [header(spec.PART, spec.NAME, title), setup(spec.FOLDER, spec.IMPORTS),
              md(spec.INTRO), code(spec.LOAD)]
     for key, text, drill in spec.DRILLS:
@@ -135,6 +135,6 @@ def build(spec, with_solutions):
 
 def write(spec):
     folder = ROOT / spec.FOLDER
-    save(folder / f'part{spec.PART}_inc_2_CCbreakItOnPurpose_helper.ipynb', build(spec, False))
+    save(folder / f'part{spec.PART}_inc_2_CCbreakItOnPurpose_challenge.ipynb', build(spec, False))
     if getattr(spec, 'SOLUTIONS', None):
         save(folder / 'solutions' / f'part{spec.PART}_inc_2_CCbreakItOnPurpose.ipynb', build(spec, True))

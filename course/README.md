@@ -23,11 +23,11 @@ the notebooks in the order of their numbers:
 
 ```
 Part0_FromAProgramToAModel/          Part 0, first
+  0_map/                             section 0: the map, before anything else
+    part0_map_1_theMapInWordsYouKnow notebook 1: a demo
+    part0_map_2_whereYourInstinctBreaks  notebook 2: a demo
+    part0_map_3_CCwhichLayer_challenge   notebook 3: the challenge, always last
   1_model/                           section 1
-    part0_mdl_1_aModelIsAFunction    notebook 1: a demo
-    part0_mdl_2_theGenerationLoop    notebook 2: a demo
-    part0_mdl_3_CCwriteTheLoop_helper  notebook 3: the challenge, always last
-  2_attention/                       section 2
 ```
 
 Read the notebooks of a Part before you build its stages.
@@ -74,7 +74,7 @@ Each section holds three kinds of file. The name tells you which kind:
 Part3_PagedAttention/3_kernels/
   part3_kern_1_memoryTransactions.ipynb            demo: run it, read it
   part3_kern_2_fillingTheMachine.ipynb             demo
-  part3_kern_3_CCcoalesceTheGather_helper.ipynb    challenge: fill the blanks
+  part3_kern_3_CCcoalesceTheGather_challenge.ipynb    challenge: fill the blanks
   solutions/
     part3_kern_3_CCcoalesceTheGather.ipynb         the same notebook, complete
 ```
@@ -98,13 +98,35 @@ Each notebook finds the repo root by itself. The directory you start from does
 not matter. A notebook that compiles CUDA needs `nvcc`. The other notebooks
 need a GPU. Some of them need no GPU at all.
 
+## The method
+
+The engine stays in this repository. The method is what you take with you.
+[`docs/METHOD.md`](../docs/METHOD.md) has all of it on one page: the first
+question to ask when your mind is empty, six moves, and when to use each one.
+
+Three habits carry the method through every notebook:
+
+- **Given first, asked second.** Before an exercise, write what you have and
+  what you must produce. When the given is clear, the asked becomes easy.
+- **Predict first.** Before a cell measures something, a cell asks you for
+  your number. Write it before you run the measurement. The gap between your
+  number and the measurement is the lesson. In the early Parts the notebook
+  tells you what to predict. In the later Parts it does not, and you choose.
+- **Keep a log.** When a prediction is wrong, or a sentence confuses you,
+  write one line with `./vc note "..."`, and continue. Read the log at the
+  end of each Part.
+
 ## The words
 
 This course uses the words of two fields that are not software engineering:
-machine learning and GPU programming. Three things help you with them:
+machine learning and GPU programming. Four things help you with them:
 
 - **Part 0** teaches the basic words, for a software engineer with no ML
-  background. Start there if a word in Part 1 is new to you.
+  background. Its first section, `0_map`, gives you the whole engine in the
+  words of a web service: router, service, repo, database.
+- **The plain words come first.** A notebook gives you the idea in software
+  words, and then the name that GPU people use: "a memo table for each
+  request. GPU people call it the **KV cache**."
 - **[GLOSSARY.md](GLOSSARY.md)** defines each term, gives an analogy from
   software, and names the notebook and the stage that teach it.
 - **The first use of a term** in a notebook is in bold with a definition, or

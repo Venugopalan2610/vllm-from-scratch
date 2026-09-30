@@ -315,3 +315,31 @@ def test_the_counters_agree(nvcc, device):
     print()
     for name, value in counters.items():
         print(f"  {name.split('.')[0][-44:]:>44}  {value:>14}")
+
+
+def test_the_four_lines(nvcc, device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s08c_cuda_warps import four_lines
+    from tests.helpers import check_four_lines
+
+    from app.s08c_cuda_warps import paged_attention_split
+    from tests.helpers import paged_problem
+
+    # Larger than any L2 cache: the floor is a read of main memory.
+    context_len, num_heads, num_kv_heads, head_dim = 16384, 16, 8, 128
+    facts = cudalib.card_facts(context_len=context_len, num_kv_heads=num_kv_heads, head_dim=head_dim,
+                               value_bytes=2)
+    floor_ms = (2 * context_len * 2 * num_kv_heads * head_dim * 2
+                / facts.bandwidth_bytes_per_s * 1e3)
+
+    def step_at(num_seqs):
+        query, _, _, paged = paged_problem(num_seqs, num_heads, num_kv_heads, head_dim, context_len,
+                                           16, device, dtype=torch.float16)
+        return lambda: paged_attention_split(query, *paged)
+
+    check_four_lines(four_lines, "attention_call", step_at, 2, facts, floor_ms,
+                     "at few sequences: near 1 means that your split gives the whole card work")

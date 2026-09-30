@@ -1,7 +1,7 @@
 """Three samplers. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part5_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 10.
+part5_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 10.
 
 Each sampler takes (logits, params, generator). logits: (batch, vocab).
 params: one dict for each row, with temperature, top_k (0 is off), top_p,

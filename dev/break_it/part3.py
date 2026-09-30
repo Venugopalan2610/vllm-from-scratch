@@ -100,10 +100,10 @@ pool_list = list(range(63, -1, -1))                                    # pops 0,
 cache = lab.new_cache(64)
 prompts = [30, 32, 45, 48, 16, 17]
 tables, lengths, truth = [], [], []
-for n in prompts:
-  tables.append([pool_list.pop() for _ in range(math.ceil(n / BLOCK))])
-  lengths.append(n)
-  truth.append((torch.randn(n, 8, 128, device=device), torch.randn(n, 8, 128, device=device)))
+for prompt_len in prompts:
+  tables.append([pool_list.pop() for _ in range(math.ceil(prompt_len / BLOCK))])
+  lengths.append(prompt_len)
+  truth.append((torch.randn(prompt_len, 8, 128, device=device), torch.randn(prompt_len, 8, 128, device=device)))
 width = 8
 def padded(row):                                                       # the tensor the kernel sees
   return tables[row] + [0] * (width - len(tables[row]))
@@ -121,10 +121,10 @@ for step in range(20):
     lab.write(cache, padded(row), lengths[row] - 1, k_new, v_new)
 
 q = torch.randn(8, 128, device=device)
-for row, n in enumerate(prompts):
+for row, prompt_len in enumerate(prompts):
   k, v = lab.gather(cache, padded(row), lengths[row])
   error = (lab.attend(q, k, v) - lab.attend(q, *truth[row])).abs().max().item()
-  print(f'prompt {n:2d} (n mod 16 = {n % 16:2d}), blocks {tables[row]}: error {error:.3f}')
+  print(f'prompt {prompt_len:2d} (n mod 16 = {prompt_len % 16:2d}), blocks {tables[row]}: error {error:.3f}')
 '''),
 
     ('d3', '''
@@ -143,10 +143,10 @@ This is Ticket 3. Predict three things: how different the K of the hit blocks
 is in the first layer and in a deep layer, the [KL](../../GLOSSARY.md#kl-divergence) between the two next-token
 distributions, and the answer of ChefBot.
 ''', '''
-def fixed(text, n):
+def fixed(text, num_tokens):
   ids = tokenizer(text).input_ids
-  assert len(ids) >= n, len(ids)
-  return ids[:n]
+  assert len(ids) >= num_tokens, len(ids)
+  return ids[:num_tokens]
 
 legal = fixed('You are LegalBot, the contract assistant of a law firm. You answer in formal legal '
               'language, cite the clauses of the agreement between the parties, and never give '
@@ -166,7 +166,7 @@ lookup = ['hit' if hash(tuple(prompt_b[i:i + BLOCK])) in hashes_a else 'miss'
           for i in range(0, 48 + 128, BLOCK)]                          # THE FAULT: no parent hash
 print('lookup of the ChefBot blocks 0 to 10:', lookup)
 
-ids = lambda t: torch.tensor([t], device=device)
+ids = lambda token_ids: torch.tensor([token_ids], device=device)
 stop = set(model.generation_config.eos_token_id)
 kv_a = lab.model_kv(model, ids(prompt_a))
 kv_b = lab.model_kv(model, ids(prompt_b[:-1]))
@@ -187,7 +187,7 @@ print(f'KL of the next-token distribution: {(good.exp() * (good - bad)).sum().it
 
 correct = lab.continue_greedy(model, lab.cache_from([kv_b]), prompt_b[-1], 60, stop)
 wrong = lab.continue_greedy(model, spliced(), question[-1], 60, stop)
-print('first difference at:', next((i for i, (a, b) in enumerate(zip(correct, wrong)) if a != b), None))
+print('first difference at:', next((i for i, (correct_token, wrong_token) in enumerate(zip(correct, wrong)) if correct_token != wrong_token), None))
 print('correct:', repr(tokenizer.decode(correct)))
 print('hashed :', repr(tokenizer.decode(wrong)))
 '''),
@@ -209,25 +209,25 @@ def request(session, question, id_first):
   return tokenizer(head + ' ' + body + tail + '\\nUser: ' + question).input_ids
 
 def hit_rate(requests):
-  cache, hit_tokens, total = set(), 0, 0
+  cache, hit_tokens, total_tokens = set(), 0, 0
   for ids in requests:
     parent, missed = None, False
     for i in range(0, len(ids) - len(ids) % BLOCK, BLOCK):
-      h = hash((parent, tuple(ids[i:i + BLOCK])))
-      if not missed and h in cache:
+      block_hash = hash((parent, tuple(ids[i:i + BLOCK])))
+      if not missed and block_hash in cache:
         hit_tokens += BLOCK
       else:
         missed = True
-        cache.add(h)
-      parent = h
-    total += len(ids)
-  return hit_tokens / total
+        cache.add(block_hash)
+      parent = block_hash
+    total_tokens += len(ids)
+  return hit_tokens / total_tokens
 
 rng = random.Random(0)
 sessions = [f'{rng.getrandbits(32):08x}' for _ in range(500)]
 questions = [f'What is the status of order {rng.randint(1000, 9999)}?' for _ in range(500)]
 for id_first in (True, False):                                         # THE FAULT when True
-  requests = [request(s, q, id_first) for s, q in zip(sessions, questions)]
+  requests = [request(session, question, id_first) for session, question in zip(sessions, questions)]
   print(f'session id {"first" if id_first else "last "}: {len(requests[0])} tokens per request, '
         f'hit rate {hit_rate(requests):.1%}')
 '''),
@@ -284,7 +284,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run_a", &run_a); m.def("run_b"
 kernels = cudalib.build_source('inc3_rows', KERNELS)
 
 keys = torch.randn(1 << 20, 128, device=device, dtype=torch.bfloat16)
-out = torch.empty(1 << 20, device=device)
+kernel_output = torch.empty(1 << 20, device=device)
 
 def ms_per_call(fn, iters=20):
   fn()
@@ -295,11 +295,11 @@ def ms_per_call(fn, iters=20):
   torch.cuda.synchronize()
   return (time.perf_counter() - start) / iters * 1000
 
-for name, fn in [('A, one thread for each row', lambda: kernels.run_a(keys, out)),
-                 ('B, 16 threads for each row', lambda: kernels.run_b(keys, out, 1 << 16))]:
-  ms = ms_per_call(fn)
-  print(f'{name}: {ms:.2f} ms, {keys.numel() * 2 / ms / 1e6:4.0f} GB/s')
-print('the same answer:', torch.allclose(out, keys.float().sum(1), atol=1e-2))
+for name, fn in [('A, one thread for each row', lambda: kernels.run_a(keys, kernel_output)),
+                 ('B, 16 threads for each row', lambda: kernels.run_b(keys, kernel_output, 1 << 16))]:
+  call_ms = ms_per_call(fn)
+  print(f'{name}: {call_ms:.2f} ms, {keys.numel() * 2 / call_ms / 1e6:4.0f} GB/s')
+print('the same answer:', torch.allclose(kernel_output, keys.float().sum(1), atol=1e-2))
 '''),
 
     ('d6', '''
@@ -315,9 +315,9 @@ Predict the GB/s for each grid.
 SMS = torch.cuda.get_device_properties(0).multi_processor_count
 print('SMs on this card:', SMS)
 for blocks in (16, SMS, 4 * SMS, 1 << 16):
-  ms = ms_per_call(lambda: kernels.run_b(keys, out, blocks))
-  print(f'{blocks:6d} blocks: {ms:6.2f} ms, {keys.numel() * 2 / ms / 1e6:4.0f} GB/s')
-del keys, out
+  call_ms = ms_per_call(lambda: kernels.run_b(keys, kernel_output, blocks))
+  print(f'{blocks:6d} blocks: {call_ms:6.2f} ms, {keys.numel() * 2 / call_ms / 1e6:4.0f} GB/s')
+del keys, kernel_output
 '''),
 
     ('d7', '''
@@ -332,13 +332,13 @@ This is Ticket 7. Predict the sequences that fit with blocks of 16 and of 256.
 rng = random.Random(0)
 seqs = [rng.randint(1, 800) for _ in range(5000)]
 for block in (16, 32, 256):                                            # 256: THE FAULT
-  used = count = tokens = 0
-  for n in seqs:
-    need = math.ceil(n / block) * block
+  used = num_fit = tokens = 0
+  for seq_len in seqs:
+    need = math.ceil(seq_len / block) * block
     if used + need > 400_000:
       break
-    used, count, tokens = used + need, count + 1, tokens + n
-  print(f'block {block:3d}: {count} sequences fit, {tokens / used:.1%} of the allocated slots hold a token')
+    used, num_fit, tokens = used + need, num_fit + 1, tokens + seq_len
+  print(f'block {block:3d}: {num_fit} sequences fit, {tokens / used:.1%} of the allocated slots hold a token')
 '''),
 
     ('d8', '''
@@ -356,26 +356,26 @@ for prompt_len in (37, 48):
   cache = lab.new_cache(64)
   pool.allocate('prompt', prompt_len)
   k0, v0 = torch.randn(prompt_len, 8, 128, device=device), torch.randn(prompt_len, 8, 128, device=device)
-  for p in range(prompt_len):
-    lab.write(cache, pool.tables['prompt'], p, k0[p], v0[p])
+  for position in range(prompt_len):
+    lab.write(cache, pool.tables['prompt'], position, k0[position], v0[position])
   samples = [f's{i}' for i in range(4)]
   truth = {}
-  for s in samples:
-    pool.fork('prompt', s)
-    truth[s] = (k0.clone(), v0.clone())
+  for sample in samples:
+    pool.fork('prompt', sample)
+    truth[sample] = (k0.clone(), v0.clone())
   for step in range(5):
-    for s in samples:
-      position = pool.lengths[s]
-      pool.append(s)                                                   # THE FAULT: no copy-on-write
+    for sample in samples:
+      position = pool.lengths[sample]
+      pool.append(sample)                                                   # THE FAULT: no copy-on-write
       k, v = torch.randn(8, 128, device=device), torch.randn(8, 128, device=device)
-      lab.write(cache, pool.tables[s], position, k, v)
-      truth[s] = (torch.cat([truth[s][0], k[None]]), torch.cat([truth[s][1], v[None]]))
+      lab.write(cache, pool.tables[sample], position, k, v)
+      truth[sample] = (torch.cat([truth[sample][0], k[None]]), torch.cat([truth[sample][1], v[None]]))
   q = torch.randn(8, 128, device=device)
   errors = []
-  for s in samples:
-    k, v = lab.gather(cache, pool.tables[s], pool.lengths[s])
-    errors.append((lab.attend(q, k, v) - lab.attend(q, *truth[s])).abs().max().item())
-  print(f'prompt {prompt_len}: errors of the 4 samples {[round(e, 3) for e in errors]}')
+  for sample in samples:
+    k, v = lab.gather(cache, pool.tables[sample], pool.lengths[sample])
+    errors.append((lab.attend(q, k, v) - lab.attend(q, *truth[sample])).abs().max().item())
+  print(f'prompt {prompt_len}: errors of the 4 samples {[round(error, 3) for error in errors]}')
 '''),
 ]
 
@@ -509,21 +509,19 @@ measurement is far below it.
     'd5': '''
 ### What happens
 
-On my card (RTX 4080 Laptop GPU, 294 GB/s in `./vc info`):
+Both kernels give the same answer. In the reference runs, A reached **66% to
+86%** of the bandwidth of B. The range comes from one card before and after a
+repair of its cooling: B stayed the same, and A got faster.
 
-| kernel | ms | GB/s |
-|---|---|---|
-| A, one thread for each row | 1.29 | 209 |
-| B, 16 threads for each row | 0.85 | 317 |
+A is slower, and far less slow than the 6.25% sector efficiency of Ticket 5
+suggests. The L1 cache saves A: a thread reads 2 bytes of a sector, and its
+next 15 loads find the rest of the sector in L1. How much the cache can hide
+depends on the card and on its clocks, so the penalty moves, while its
+direction does not. The loads of A still wait for the cache, and on a busier
+kernel, with less L1 for each thread, the penalty grows.
 
-Both give the same answer. A reaches 66% of B. That is less bad than the 6.25%
-sector efficiency of Ticket 5 suggests. The L1 cache saves A: a thread reads
-2 bytes of a sector, and its next 15 loads find the rest of the sector in L1.
-The cache hides part of the cost, and the loads still wait for it.
-
-B reads at 317 GB/s, more than the 294 of `./vc info`. The streaming copy of
-`./vc info` reads and writes. B only reads, and a pure read is a little
-faster.
+B reads at close to the streaming bandwidth of the card. A copy reads and
+writes; B only reads, and a pure read can be a little faster than a copy.
 
 **The fingerprint.** A kernel below the bandwidth of the card, with a high L1
 hit rate. The cache hit rate is high **because** the pattern is bad.
@@ -531,21 +529,23 @@ hit rate. The cache hit rate is high **because** the pattern is bad.
     'd6': '''
 ### What happens
 
-The card has 58 SMs.
+The card of the reference runs has 58 SMs. The bandwidth of each grid,
+against the best grid:
 
-| blocks | ms | GB/s |
-|---|---|---|
-| 16 | 2.02 | 133 |
-| 58 | 0.93 | 289 |
-| 232 | 0.85 | 314 |
-| 65,536 | 0.85 | 318 |
+| blocks | against the best |
+|---|---|
+| 16 | 42% to 49% |
+| 58 (one for each SM) | 91% to 97% |
+| 232 (four for each SM) | 99% |
+| 65,536 | 100% |
 
 With 16 blocks, 42 of the 58 SMs have nothing to do, and the kernel reaches
-42% of its best. The same code reaches its best at 4 blocks for each SM. The
-work is the same. Only the shape of the grid changed.
+less than half of its best. The same code reaches its best at 4 blocks for
+each SM. The work is the same. Only the shape of the grid changed.
 
-The ratio is better than 16 / 58 = 28%, because one SM can pull more than its
-share of the bandwidth. But it cannot pull all of it.
+The fraction is better than 16 / 58 = 28%, because one SM can pull more than
+its share of the bandwidth. But it cannot pull all of it. On a card with more
+SMs, the fraction with 16 blocks is lower.
 
 **The fingerprint.** A good kernel that is slow only at a small batch.
 **The guard.** Count the blocks of the grid against the SMs, at batch 1.
@@ -601,14 +601,14 @@ tokens into one block: Ticket 2 of Part 1, from the allocator.
 
 **`PoolA` frees every block of a sequence, whatever its refcount.** Without
 forks, a refcount is always 1, so it is correct. The experiment:
-`lab.workload(PoolA(4000), forks=True)`. On my run it gave 13,145 violations:
+`lab.workload(PoolA(4000), forks=True)`. In the reference run it gave 13,145 violations:
 blocks that are in a table **and** on the free list. When a child ends, the
 parent loses its shared blocks, and the next allocation gives them to a
 stranger.
 
 **`PoolB` never grows a table beyond 32 blocks in `append`.** Sequences below
 512 tokens never see it. The experiment: longer sequences,
-`lab.workload(PoolB(8000), lengths=(400, 700))`. On my run: `seq 0: 623
+`lab.workload(PoolB(8000), lengths=(400, 700))`. In the reference run: `seq 0: 623
 tokens in 38 blocks`. The table stopped growing, and every later token has no
 block. The limit came from the width of a kernel's table, and it silently
 became a limit on the context.

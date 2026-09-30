@@ -3,8 +3,10 @@
 `./vc lore 21` for the insight. `./vc test 21` to check yourself.
 
 Stages 06 to 08c built a block allocator, a KV write kernel and a paged
-attention kernel. Each one passed its checks on random tensors. Not one of
-them ran inside a model. This stage puts them there.
+attention kernel. Each one passed its checks on random tensors, and the live
+engine (tvllm/live.py) ran them inside the model with slow glue: one row for
+each prefill token, and every input built again in Python at each step. This
+stage builds the real runner.
 
 Read tvllm/model.py first. The model takes a FLAT batch: every token of every
 sequence in one (num_tokens,) tensor. For each layer it calls your backend:
@@ -212,3 +214,51 @@ class ModelRunner:
     def copy_block(self, source, destination):
         """Copy one physical block in every layer. Copy-on-write needs it."""
         raise NotImplementedError("stage 21: implement ModelRunner.copy_block")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: one eager decode step of your ModelRunner, for n
+    sequences.
+
+    GIVEN
+        step_at(n)
+            -> a function with no arguments. It runs one
+            eager decode step of your ModelRunner, for n
+            sequences.
+        n
+            the size to measure at
+        facts
+            facts.bandwidth_bytes_per_s   the read bandwidth of this card
+            facts.weight_bytes         the bytes that one step reads of the weights
+            facts.kv_bytes_per_token   the KV cache bytes of one token
+            facts.context_len          the tokens in the context of each sequence
+        cudalib.bench_ms(function)
+            -> the milliseconds of one call: warmed up, waited for, repeated
+
+    ASKED: one line for each number
+        decode_step_floor_ms
+            predict: which bytes must this step read, at the
+            least?
+        decode_step_measured_ms
+            measure: the time of step_at(n)
+        decode_step_measured_over_floor
+            divide
+        decode_step_ms_2n_over_n
+            double: the time at 2n over the time at n
+    """
+    import cudalib
+
+    decode_step_floor_ms = ...
+    decode_step_measured_ms = ...
+    decode_step_measured_over_floor = ...
+    decode_step_ms_2n_over_n = ...
+    return {
+        "decode_step_floor_ms": decode_step_floor_ms,
+        "decode_step_measured_ms": decode_step_measured_ms,
+        "decode_step_measured_over_floor": decode_step_measured_over_floor,
+        "decode_step_ms_2n_over_n": decode_step_ms_2n_over_n,
+    }

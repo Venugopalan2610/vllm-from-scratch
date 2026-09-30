@@ -51,9 +51,9 @@ def chat(text):
 def seconds(fn):
   torch.cuda.synchronize()
   start = time.perf_counter()
-  result = fn()
+  returned = fn()
   torch.cuda.synchronize()
-  return result, time.perf_counter() - start
+  return returned, time.perf_counter() - start
 
 PARAGRAPH = ('The old cat sat by the window every morning. The cat watched the birds in the garden, '
              'and the cat never tried to catch them. In the evening the cat slept on the warm stones near the fire.')
@@ -74,9 +74,9 @@ This is Ticket 1 of the incident file. Predict the acceptance rate, the tokens
 for each step and the speedup of each run, and whether the output equals
 plain greedy.
 ''', '''
-for name, ids, n in [('edit, n=3', EDIT, 3), ('poem, n=3', POEM, 3), ('poem, n=1', POEM, 1)]:
+for name, ids, num_samples in [('edit, n=3', EDIT, 3), ('poem, n=3', POEM, 3), ('poem, n=1', POEM, 1)]:
   plain, t_plain = seconds(lambda: lab.greedy(model, ids, 120))
-  (fast, stats), t_fast = seconds(lambda: lab.speculative(model, ids, 120, n=n))
+  (fast, stats), t_fast = seconds(lambda: lab.speculative(model, ids, 120, n=num_samples))
   rate = stats['accepted'] / max(stats['proposed'], 1)
   print(f'{name}: {stats["proposed"]:3d} drafts, accepted {rate:4.0%}, {stats["tokens_per_step"]:.2f} tokens '
         f'per step, speedup {t_plain / t_fast:.2f}x, the same as greedy: {fast == plain}')
@@ -88,29 +88,30 @@ for name, ids, n in [('edit, n=3', EDIT, 3), ('poem, n=3', POEM, 3), ('poem, n=1
 A target distribution with two tokens: A with 0.6, B with 0.4. The draft
 always proposes A. The correct rule accepts A with probability
 min(1, p/q), and after a rejection it samples from the residual
-max(0, p - q). The fault samples from p again. Draw 100,000 tokens with each
+max(0, p - q). The fault samples from p again. (In the code, p is
+`target_probs` and q is `draft_probs`.) Draw 100,000 tokens with each
 rule.
 
 This is Ticket 2. Predict the frequency of A for each rule.
 ''', '''
 rng = random.Random(0)
-p, q = {'A': 0.6, 'B': 0.4}, {'A': 1.0, 'B': 0.0}
+target_probs, draft_probs = {'A': 0.6, 'B': 0.4}, {'A': 1.0, 'B': 0.0}
 def draw(dist):
   return 'A' if rng.random() < dist['A'] else 'B'
 
-for name, after_rejection in [('the residual', 'residual'), ('p again', 'p')]:   # 'p': THE FAULT
-  count = 0
+for name, after_rejection in [('the residual', 'residual'), ('the target again', 'target')]:   # 'target': THE FAULT
+  num_a = 0
   for _ in range(100_000):
-    if rng.random() < min(1.0, p['A'] / q['A']):
+    if rng.random() < min(1.0, target_probs['A'] / draft_probs['A']):
       token = 'A'
-    elif after_rejection == 'p':
-      token = draw(p)
+    elif after_rejection == 'target':
+      token = draw(target_probs)
     else:
-      residual = {t: max(0.0, p[t] - q[t]) for t in p}
-      total = sum(residual.values())
-      token = draw({t: v / total for t, v in residual.items()})
-    count += token == 'A'
-  print(f'after a rejection, sample {name:12s}: A in {count / 100_000:.4f} of the draws (the target is 0.6)')
+      residual = {token_name: max(0.0, target_probs[token_name] - draft_probs[token_name]) for token_name in target_probs}
+      residual_total = sum(residual.values())
+      token = draw({token_name: mass / residual_total for token_name, mass in residual.items()})
+    num_a += token == 'A'
+  print(f'after a rejection, sample {name:12s}: A in {num_a / 100_000:.4f} of the draws (the target is 0.6)')
 '''),
 
     ('d3', '''
@@ -125,18 +126,18 @@ This is Ticket 3. Predict the time of each, against bf16.
 ''', '''
 gemv = cudalib.build_source('inc7_gemv_int8', lab.GEMV_INT8)
 W = torch.randn(4096, 14336, device=device, dtype=torch.bfloat16) * 0.02
-x = torch.randn(1, 14336, device=device, dtype=torch.bfloat16)
-q, scale = lab.quantize(W, per_channel=True)
-scale = scale.flatten().contiguous()
-y = torch.empty(4096, device=device, dtype=torch.bfloat16)
-gemv.run(q, scale, x.flatten(), y)
+activation = torch.randn(1, 14336, device=device, dtype=torch.bfloat16)
+int8_weight, row_scales = lab.quantize(W, per_channel=True)
+row_scales = row_scales.flatten().contiguous()
+gemv_output = torch.empty(4096, device=device, dtype=torch.bfloat16)
+gemv.run(int8_weight, row_scales, activation.flatten(), gemv_output)
 print('the int8 GEMV agrees with the dequantized matmul:',
-      torch.allclose(y.float(), (x.float() @ (q.float() * scale[:, None]).t()).flatten(), atol=0.05))
+      torch.allclose(gemv_output.float(), (activation.float() @ (int8_weight.float() * row_scales[:, None]).t()).flatten(), atol=0.05))
 
 params = W.numel()
-versions = [('bf16', lambda: x @ W.t()),
-            ('dequantize, then matmul', lambda: x @ (q.to(torch.bfloat16) * scale[:, None].to(torch.bfloat16)).t()),  # THE FAULT
-            ('int8 GEMV, scale at the end', lambda: gemv.run(q, scale, x.flatten(), y))]
+versions = [('bf16', lambda: activation @ W.t()),
+            ('dequantize, then matmul', lambda: activation @ (int8_weight.to(torch.bfloat16) * row_scales[:, None].to(torch.bfloat16)).t()),  # THE FAULT
+            ('int8 GEMV, scale at the end', lambda: gemv.run(int8_weight, row_scales, activation.flatten(), gemv_output))]
 base = None
 for name, fn in versions:
   us = lab.ms_per_call(fn, 50) * 1000
@@ -159,23 +160,23 @@ PROMPTS = ['The three largest cities in Japan are', 'My favourite recipe for pan
            'The capital of France is', 'def fibonacci(n):\\n    if n <= 1:\\n        return',
            'Once upon a time, in a small village,', 'The chemical symbol for gold is']
 reference = lab.log_probs(model, PROMPTS, tokenizer)
-linears = [(name, m) for name, m in model.named_modules()
-           if isinstance(m, torch.nn.Linear) and 'lm_head' not in name]
-original = {name: m.weight.data.clone().cpu() for name, m in linears}
+linears = [(name, linear) for name, linear in model.named_modules()
+           if isinstance(linear, torch.nn.Linear) and 'lm_head' not in name]
+original = {name: linear.weight.data.clone().cpu() for name, linear in linears}
 
 for per_channel in (False, True):                                      # False: THE FAULT
   zeros = []
-  for name, m in linears:
-    q, s = lab.quantize(m.weight.data, per_channel)
-    zeros.append(((q == 0).float().mean().item(), name, m.weight.abs().max().item()))
-    m.weight.data = (q.float() * s).to(torch.bfloat16)
+  for name, linear in linears:
+    int8_weight, scales = lab.quantize(linear.weight.data, per_channel)
+    zeros.append(((int8_weight == 0).float().mean().item(), name, linear.weight.abs().max().item()))
+    linear.weight.data = (int8_weight.float() * scales).to(torch.bfloat16)
   kl = lab.next_token_kl(model, PROMPTS, tokenizer, reference)
   worst = max(zeros)
   print(f'{"one scale per channel" if per_channel else "one scale per matrix "}: KL {kl:.4f} nats, '
-        f'weights at 0: {100 * sum(z[0] for z in zeros) / len(zeros):.1f}% on average, '
+        f'weights at 0: {100 * sum(entry[0] for entry in zeros) / len(zeros):.1f}% on average, '
         f'{100 * worst[0]:.1f}% in {worst[1]} (its largest weight {worst[2]:.2f})')
-  for name, m in linears:
-    m.weight.data = original[name].to(device)
+  for name, linear in linears:
+    linear.weight.data = original[name].to(device)
 '''),
 
     ('d5', '''
@@ -202,27 +203,27 @@ values = [layer.values.clone() for layer in cache.layers]
 print('the largest |K| of each layer:', [round(k.abs().max().item()) for k in keys])
 print('the same for the code prompt :', [round(layer.keys.abs().max().item()) for layer in code_cache.layers][:6], '...')
 
-def fp8(x, scale):
-  return ((x.float() / scale).to(torch.float8_e4m3fn).float() * scale).to(x.dtype)
+def fp8(tensor, fp8_scale):
+  return ((tensor.float() / fp8_scale).to(torch.float8_e4m3fn).float() * fp8_scale).to(tensor.dtype)
 
 @torch.inference_mode()
 def next_logp(k_list, v_list):
-  c = DynamicCache()
+  fresh_cache = DynamicCache()
   for layer, (k, v) in enumerate(zip(k_list, v_list)):
-    c.update(k, v, layer)
-  return model(ids[:, -1:], past_key_values=c).logits[0, -1].float().log_softmax(-1)
+    fresh_cache.update(k, v, layer)
+  return model(ids[:, -1:], past_key_values=fresh_cache).logits[0, -1].float().log_softmax(-1)
 
 good = next_logp(keys, values)
 def kl(logp):
   return (good.exp() * (good - logp)).sum().item()
 
-scale_of = lambda t: (t.abs().max().float() / 448).item()
-for name, scale in [('a scale of 1', lambda t: 1.0),                       # THE FAULT of Ticket 5
+scale_of = lambda tensor: (tensor.abs().max().float() / 448).item()
+for name, scale_rule in [('a scale of 1', lambda tensor: 1.0),                       # THE FAULT of Ticket 5
                     ('a scale for each layer', scale_of),
-                    ('a scale of 0.5, too small', lambda t: 0.5)]:
-  clamped = sum((k.abs() / scale(k) > 448).sum().item() for k in keys)
-  q_keys = [fp8(k, scale(k)) for k in keys]
-  q_values = [fp8(v, scale(v)) for v in values]
+                    ('a scale of 0.5, too small', lambda tensor: 0.5)]:
+  clamped = sum((k.abs() / scale_rule(k) > 448).sum().item() for k in keys)
+  q_keys = [fp8(k, scale_rule(k)) for k in keys]
+  q_values = [fp8(v, scale_rule(v)) for v in values]
   print(f'FP8 with {name:24s}: KL {kl(next_logp(q_keys, q_values)):.4f} nats, {clamped} key values clamped at 448')
 '''),
 
@@ -255,18 +256,18 @@ CLOSE = {'word': '"]}', 'after': ']}', 'comma': ' "x"]}', 'next': '"x"]}', 'item
 def guided(ids, automaton, max_tokens, force_close):
   state, text = automaton.start(), ''
   cache = DynamicCache()
-  out = model(ids, past_key_values=cache, use_cache=True)
+  forward_pass = model(ids, past_key_values=cache, use_cache=True)
   for used in range(max_tokens):
     suffix = CLOSE.get(state[0], '')
     if force_close and len(tokenizer(suffix).input_ids) >= max_tokens - used:
       return text + suffix
-    logits = out.logits[0, -1].masked_fill(~mask_for(automaton, state), float('-inf'))
+    logits = forward_pass.logits[0, -1].masked_fill(~mask_for(automaton, state), float('-inf'))
     token = int(logits.argmax())
     text += texts[token]
     state = automaton.walk(state, texts[token])
     if automaton.finished(state):
       return text
-    out = model(torch.tensor([[token]], device=device), past_key_values=cache, use_cache=True)
+    forward_pass = model(torch.tensor([[token]], device=device), past_key_values=cache, use_cache=True)
   return text                                                           # THE FAULT: cut at the limit
 
 ask = chat('List twenty skills of a good chef, as JSON: {"skills": [...]}. Lowercase words only.')
@@ -293,7 +294,9 @@ state saves over an answer of 30 tokens.
 start = time.perf_counter()
 lab.build_mask(lists, ('word', 3), texts)                               # THE FAULT: once for every step
 build = time.perf_counter() - start
-print(f'one mask build: {build * 1000:.0f} ms, against a decode step of about 13 ms')
+tokens, elapsed_s = seconds(lambda: lab.greedy(model, EDIT, 40))
+step_ms = elapsed_s / len(tokens) * 1000                                       # one decode step on this card
+print(f'one mask build: {build * 1000:.0f} ms = {build * 1000 / step_ms:.0f} decode steps of this card ({step_ms:.1f} ms each)')
 print(f'masks in the cache after Exercise 6: {len(masks)} different states')
 print(f'30 tokens with a build at every step: {30 * build:.1f} s of CPU; with the cache: {len(masks) * build:.1f} s, once')
 '''),
@@ -313,15 +316,15 @@ ask = chat('What color is an elephant? Answer as JSON: {"color": ...}')
 @torch.inference_mode()
 def enum_answer(first_char_only, max_tokens=12):
   state, text, cache = colors.start(), '', DynamicCache()
-  out = model(ask, past_key_values=cache, use_cache=True)
+  forward_pass = model(ask, past_key_values=cache, use_cache=True)
   for _ in range(max_tokens):
     allowed = padded(lab.build_mask(colors, state, texts, first_char_only=first_char_only))   # THE FAULT when True
-    token = int(out.logits[0, -1].masked_fill(~allowed, float('-inf')).argmax())
+    token = int(forward_pass.logits[0, -1].masked_fill(~allowed, float('-inf')).argmax())
     text += texts[token]
     state = colors.walk(state, texts[token])
     if state is None or colors.finished(state):
       break
-    out = model(torch.tensor([[token]], device=device), past_key_values=cache, use_cache=True)
+    forward_pass = model(torch.tensor([[token]], device=device), past_key_values=cache, use_cache=True)
   return text, state
 
 for first in (True, False):
@@ -344,13 +347,14 @@ This is Ticket 9. Predict whether two GPUs are faster.
 ''', '''
 measured = lab.allreduce_latency_us(1024)                             # 1,024 values, as floats: 4 KB
 print(f'one all-reduce between 2 CPU processes (gloo) here: {measured:.0f} us')
-BANDWIDTH = 294e9
+BANDWIDTH = cudalib.read_bandwidth()                                   # bytes/s, measured now
 for label, latency in [('gloo on this CPU', measured), ('NCCL over PCIe, the reference sheet', 25)]:
   print(f'with {label} ({latency:.0f} us):')
   for name, weight_bytes, layers in [('Qwen3-0.6B', 1.5e9, 28), ('Llama-3-8B', 16.1e9, 32)]:
     one = weight_bytes / BANDWIDTH * 1000
     two = weight_bytes / 2 / BANDWIDTH * 1000 + layers * 2 * latency / 1000   # THE FAULT: shard a small model
-    print(f'   {name}: 1 GPU {one:5.1f} ms, 2 GPUs {two:5.1f} ms -> {one / two:.2f}x')
+    print(f'   {name}: 1 GPU {one:5.1f} ms, 2 GPUs {two:5.1f} ms -> {one / two:.2f}x   '
+          f'(break-even at {one * 1000 / (4 * layers):.0f} us for each all-reduce)')
 '''),
 
     ('d10', '''
@@ -374,20 +378,20 @@ fused = torch.cat([Wq, Wk, Wv])                                        # 2,048 +
 def kind(row):
   return 'Q' if row < 2048 else 'K' if row < 3072 else 'V'
 
-def attention(x, wq, wk, wv, heads, kv_heads):
-  L = x.shape[0]
-  q = (x @ wq.t()).view(L, heads, 128).transpose(0, 1)
-  k = (x @ wk.t()).view(L, kv_heads, 128).transpose(0, 1).repeat_interleave(heads // kv_heads, 0)
-  v = (x @ wv.t()).view(L, kv_heads, 128).transpose(0, 1).repeat_interleave(heads // kv_heads, 0)
-  mask = torch.ones(L, L, device=x.device).triu(1).bool()
+def attention(hidden, wq, wk, wv, heads, kv_heads):
+  L = hidden.shape[0]
+  q = (hidden @ wq.t()).view(L, heads, 128).transpose(0, 1)
+  k = (hidden @ wk.t()).view(L, kv_heads, 128).transpose(0, 1).repeat_interleave(heads // kv_heads, 0)
+  v = (hidden @ wv.t()).view(L, kv_heads, 128).transpose(0, 1).repeat_interleave(heads // kv_heads, 0)
+  mask = torch.ones(L, L, device=hidden.device).triu(1).bool()
   scores = (q @ k.transpose(-1, -2) / math.sqrt(128)).masked_fill(mask, float('-inf'))
   return (scores.softmax(-1) @ v).transpose(0, 1).reshape(L, heads * 128)
 
-x = torch.randn(12, Wq.shape[1], device=device) * 0.5
-full = attention(x, Wq, Wk, Wv, 16, 8) @ Wo.t()
+hidden = torch.randn(12, Wq.shape[1], device=device) * 0.5
+full = attention(hidden, Wq, Wk, Wv, 16, 8) @ Wo.t()
 
 for name in ('chunk(2)', 'by heads'):
-  total = torch.zeros_like(full)
+  summed_over_ranks = torch.zeros_like(full)
   for rank in range(2):
     if name == 'chunk(2)':                                             # THE FAULT
       rows = list(range(rank * 2048, (rank + 1) * 2048))
@@ -396,11 +400,11 @@ for name in ('chunk(2)', 'by heads'):
               + list(range(3072 + rank * 512, 3072 + (rank + 1) * 512)))
     shard = fused[rows]
     wq, wk, wv = shard[:1024], shard[1024:1536], shard[1536:]         # what the config promises
-    reads = {part: sorted({kind(r) for r in rows[a:b]}) for part, (a, b) in
+    reads = {part: sorted({kind(row) for row in rows[start:end]}) for part, (start, end) in
              {'as Q': (0, 1024), 'as K': (1024, 1536), 'as V': (1536, 2048)}.items()}
     print(f'{name} rank {rank} reads: {reads}')
-    total += attention(x, wq, wk, wv, 8, 4) @ Wo[:, rank * 1024:(rank + 1) * 1024].t()   # the all-reduce
-  print(f'   relative error against one rank: {((total - full).norm() / full.norm()).item():.2e}')
+    summed_over_ranks += attention(hidden, wq, wk, wv, 8, 4) @ Wo[:, rank * 1024:(rank + 1) * 1024].t()   # the all-reduce
+  print(f'   relative error against one rank: {((summed_over_ranks - full).norm() / full.norm()).item():.2e}')
 '''),
 ]
 
@@ -449,11 +453,16 @@ SOLUTIONS = {
     'd1': '''
 ### What happens
 
+In the reference runs (one card, before and after a repair of its cooling):
+
 | run | drafts | accepted | tokens per step | speedup | the same as greedy |
 |---|---|---|---|---|---|
-| edit, n=3 | 32 | 59% | 1.83 | 1.69x | yes |
+| edit, n=3 | 32 | 59% | 1.83 | 1.7x to 1.9x | yes |
 | poem, n=3 | 16 | 0% | 1.00 | 1.00x | yes |
-| poem, n=1 | 187 | 3% | 1.04 | 0.99x | **no** |
+| poem, n=1 | 187 | 3% | 1.04 | 0.99x to 1.03x | **no** |
+
+The drafts, the acceptance and the tokens per step do not depend on the card.
+The speedup does, a little.
 
 - The edit repeats its input, and the drafts hit. The poem is new text, and
   they miss.
@@ -481,22 +490,23 @@ second.
     'd3': '''
 ### What happens
 
-On my card, one matrix of 4,096 x 14,336 at batch 1:
+One matrix of 4,096 x 14,336 at batch 1, against bf16, in the reference runs:
 
-| version | time | against bf16 |
-|---|---|---|
-| bf16 | 281 us | 1.00x |
-| dequantize, then matmul | 1,350 us | **0.21x** |
-| int8 GEMV, scale at the end | 169 us | 1.67x |
+| version | against bf16 |
+|---|---|
+| bf16 | 1.00x |
+| dequantize, then matmul | **0.21x** (almost 5x slower) |
+| int8 GEMV, scale at the end | 1.7x to 2.0x faster |
 
-The dequantized path is 4.8x **slower** than bf16. It runs three kernels:
+The dequantized path is almost 5x **slower** than bf16. It runs three kernels:
 the conversion (read 1 byte, write 2), the scale (read 2, write 2) and the
-matmul (read 2). That is 9 bytes for each weight, against 2 for bf16. The
-fused kernel reads 1 byte for each weight, and applies the scale to one
-register value at the end.
+matmul (read 2). That is 9 bytes for each weight, against 2 for bf16, and
+9 / 2 = 4.5. The fused kernel reads 1 byte for each weight, and applies the
+scale to one register value at the end.
 
-The fused kernel reaches 1.67x, not 2x, because it also reads the input and
-spends time on the conversion of each int8 value.
+The fused kernel reaches up to 2x, the ratio of the bytes, when the card is
+cool. When the card lowers its clock, the conversion of each int8 value costs
+more, and the gain falls toward 1.7x (stage 24 found the same).
 ''',
     'd4': '''
 ### What happens
@@ -548,9 +558,10 @@ suffix, and it chooses it before the model starts a new item.
     'd7': '''
 ### What happens
 
-- One mask build: **138 ms**, a walk of the automaton over 151,669 tokens in
-  Python. A decode step takes about 13 ms. A build at every step makes each
-  token 10x slower.
+- One mask build: a walk of the automaton over 151,669 tokens in Python. It
+  takes about **10 to 12 decode steps** of the model (140 ms against about 13 ms on
+  the card of the reference runs; the CPU and the GPU of your machine set your
+  ratio). A build at every step makes each token about 10x slower or more.
 - The answer of Exercise 6 visited **7 states**. With a cache of masks by
   state, the answer builds 7 masks, once, and every later answer reuses them.
 ''',
@@ -568,24 +579,27 @@ characters whose first character was legal.
     'd9': '''
 ### What happens
 
-One all-reduce between 2 CPU processes (gloo) on my machine: **566 us**.
+The rule, for 2 GPUs: half the weight read is saved, and each layer pays 2
+all-reduces. So tensor parallel wins while
 
-| latency | model | 1 GPU | 2 GPUs | speedup |
-|---|---|---|---|---|
-| gloo, 566 us | Qwen3-0.6B | 5.1 ms | 34.3 ms | 0.15x |
-| gloo, 566 us | Llama-3-8B | 54.8 ms | 63.6 ms | 0.86x |
-| NCCL over PCIe, 25 us | Qwen3-0.6B | 5.1 ms | 4.0 ms | 1.29x |
-| NCCL over PCIe, 25 us | Llama-3-8B | 54.8 ms | 29.0 ms | 1.89x |
+    one all-reduce  <  the step on one GPU / (4 x layers)
 
-- With a slow link, even the 8B model gets slower. The all-reduces are
-  latency, not bandwidth: 4 KB each, 56 or 64 times for each token.
-- With 25 us, the 0.6B model **gains** 1.29x on this card. The step of this
-  card is slow (294 GB/s), so half the weight read saves 2.55 ms, more than
-  the 1.4 ms of the all-reduces. On the L40S of Ticket 9 (864 GB/s), the same
-  model saves only 0.87 ms, and it loses.
+That is the break-even latency. The cell prints it for each model. On the card
+of the reference runs it was about 40 us for Qwen3-0.6B and about 400 us for
+Llama-3-8B. A small model has a short step, so its break-even is short.
 
-The answer of Ticket 9 is right for its card and wrong for this one. The
-formula, not the conclusion, is what travels.
+The two latencies to compare with it:
+
+| link | latency | Qwen3-0.6B | Llama-3-8B |
+|---|---|---|---|
+| gloo between 2 CPU processes, measured | 326 to 566 us | far above: 2 GPUs 4x to 7x slower | near the break-even: 0.9x to 1.1x |
+| NCCL over PCIe, the reference sheet | 25 us | below: 1.2x to 1.3x faster | far below: about 1.9x faster |
+
+The gloo latency itself changed by 1.7x on the same laptop between two days (a
+cooler CPU after a repair). The rule did not change. With a faster GPU the
+step gets shorter and the break-even with it, so a small model gains less
+from tensor parallel on a fast card. That is why Ticket 9 reached a different
+answer on an L40S. The formula, not the conclusion, is what travels.
 ''',
     'd10': '''
 ### What happens
@@ -612,7 +626,7 @@ MYSTERY_SOL = '''
 All three agree with greedy on "Name one planet.", because that answer has
 no repeated 3-gram, so no draft is ever proposed. The experiment for all three
 is the task where drafts are proposed and **partly** rejected: the edit of
-Exercise 1. On my run, against plain greedy on the edit:
+Exercise 1. In the reference run, against plain greedy on the edit:
 
 | | the same as greedy | first difference | tokens per step | speedup |
 |---|---|---|---|---|
@@ -658,7 +672,7 @@ FINGERPRINTS_SOL = '''
 | one scale for a whole matrix | no | layers with an outlier | 11x the KL of per-channel | KL and zeros for each layer |
 | an FP8 KV cache with the wrong scale | no | keys above 448 | little on Qwen3, which has 10% headroom | calibrate; count the clamped values |
 | a valid prefix is not a valid answer | no | long answers | JSON that ends in the middle | finish reason `length` for guided requests |
-| build the mask at every step | no | always | 138 ms of CPU for each token | the mask time, and the cache hit rate |
+| build the mask at every step | no | always | 10 to 12 decode steps of CPU for each token | the mask time, and the cache hit rate |
 | check the first character only | no | multi-character tokens | `gray` in an enum of `green` | walk every character |
 | tensor parallel for a small model | no | slow links, fast cards | 2 GPUs slower than 1 | the formula before you shard |
 | cut the fused QKV in the middle | no | tp = 2 | error 1.10 with every shape right | tp = 2 against tp = 1 in fp32 |

@@ -171,3 +171,28 @@ def test_degrades_gracefully_rather_than_collapsing():
     print("\n  \033[2mMore pressure costs more steps and more preemptions,")
     print("  but every request still completes. That is the property that")
     print("  you want: degrade, do not collapse.\033[0m")
+
+
+def test_the_four_lines():
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import math
+    import random
+
+    from cudalib import Facts
+    from app.s10_scheduler import four_lines
+    from tests.helpers import check_four_count_lines
+
+    facts = Facts(max_tokens=20)
+
+    def count_at(num_requests):
+        scheduler = Scheduler(BlockAllocator(100_000, 16), max_num_seqs=64)
+        for rid in range(num_requests):
+            scheduler.add_request(rid, 32, facts.max_tokens)
+        scheduler.run_to_completion()
+        return scheduler.steps
+
+    predicted = facts.max_tokens + 1
+
+    check_four_count_lines(four_lines, "steps", count_at, 8, facts, predicted,
+                           "near 1: the requests share each step")

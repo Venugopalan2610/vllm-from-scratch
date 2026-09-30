@@ -1,7 +1,7 @@
 """Three block allocators. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part3_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 9.
+part3_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 9.
 
 Each pool has the methods of lab.Allocator: allocate, append, fork, free and
 num_free.

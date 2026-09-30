@@ -53,6 +53,7 @@ jobs:
                            tests/stage_11_chunked_prefill \
                            tests/stage_13_sampling \
                            tests/stage_14_detokenization \
+                           tests/stage_15_async_engine \
                            tests/stage_16_observability \
                            tests/stage_17_speculative_decoding \
                            tests/stage_19_guided_decoding \
@@ -62,4 +63,4 @@ jobs:
       - name: Run harness tests
         run: |
           source .venv/bin/activate
-          python -m pytest tests/test_harness.py tests/test_momentum.py -q --timeout=60
+          python -m pytest tests/test_harness.py tests/test_momentum.py tests/test_docs.py -q --timeout=60

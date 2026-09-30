@@ -125,3 +125,24 @@ def test_graphs_are_faster_than_eager(runner, stack, device):
     print("  \033[2mNo arithmetic changed. You removed CPU work that the GPU")
     print("  waited on. That is the gap that stage 03 measured between the")
     print("  decode time and its roofline floor.\033[0m")
+
+
+def test_the_four_lines(runner, device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s12_cudagraph import four_lines
+    from tests.helpers import check_four_lines
+
+    weight_bytes = 32 * (WIDTH * WIDTH * 2 + WIDTH * 2)
+    facts = cudalib.card_facts(weight_bytes=weight_bytes)
+    floor_ms = weight_bytes / facts.bandwidth_bytes_per_s * 1e3
+
+    def step_at(batch_size):
+        inputs = _random_batch(batch_size, device)
+        return lambda: runner.run(inputs)
+
+    check_four_lines(four_lines, "graph_replay", step_at, 4, facts, floor_ms,
+                     "above 1: the weights are small, so the launches and the copies set the time")

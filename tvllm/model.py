@@ -4,11 +4,11 @@ The repo gives you this file. Read it. Do not edit it.
 
 WHY THIS FILE EXISTS
 
-Stages 06 to 20 built the parts of an engine. Each part passed its checks
-alone. None of them ran inside a model, because the HuggingFace model cannot
-host them. Its cache grows by concatenation, and it hides the attention call.
+Stages 06 to 20 built the parts of an engine. The HuggingFace model cannot
+host them: its cache grows by concatenation, and it hides the attention call.
 
-This model is the host. It does three things differently:
+This model is the host. The live engine (tvllm/live.py) uses it from stage 06
+on, and your capstone runner uses it from stage 21. It does three things differently:
 
   - It takes a FLAT, RAGGED batch. All tokens of all sequences sit in one
     (num_tokens,) tensor. There is no padding and no batch dimension.

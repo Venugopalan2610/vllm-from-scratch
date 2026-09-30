@@ -347,9 +347,21 @@ class VcTUI:
                 f"ARC:        {cur_stage['arc_id']} - {cur_stage['arc']}",
                 f"DIFFICULTY: {'★' * cur_stage['difficulty']}{'☆' * (5 - cur_stage['difficulty'])}",
                 f"FILES:      {', '.join(stage_files(cur_stage, self.progress))}",
+                f"YOU ARE HERE: {cur_stage.get('layer', '')}",
                 "",
-                "THE INSIGHT:",
+                "THE PROBLEM THAT ASKS FOR THIS STAGE:",
             ]
+            for wl in textwrap.wrap(" ".join(cur_stage.get("because", "").split()),
+                                    width=inner_w - 4):
+                lines.append(f"  {wl}")
+            lines += ["", "WHAT IS GIVEN:"]
+            for item in cur_stage.get("given", []):
+                for index, wl in enumerate(textwrap.wrap(item, width=inner_w - 6)):
+                    lines.append(("  - " if index == 0 else "    ") + wl)
+            lines += ["", "WHAT IS ASKED:"]
+            for wl in textwrap.wrap(" ".join(cur_stage.get("deliver", "").split()), width=inner_w - 4):
+                lines.append(f"  {wl}")
+            lines += ["", "THE INSIGHT:"]
             for l in cur_stage.get("insight", "").strip().splitlines():
                 for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
                     lines.append(f"  {wl}")

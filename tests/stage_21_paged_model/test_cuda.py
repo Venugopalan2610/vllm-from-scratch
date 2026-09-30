@@ -171,3 +171,33 @@ def test_bf16_decode_is_sane(nvcc, tmodel, hf):
     prompts = CAPSTONE_PROMPTS[:3]
     generated = _greedy(ModelRunner(tmodel, 64), tmodel.tokenizer, prompts, 1)
     _assert_matches_hf(hf, generated, prompts, 1)
+
+
+def test_the_four_lines(nvcc, tmodel):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s21_paged_runner import four_lines
+    from tests.helpers import check_four_lines
+
+    from tests.helpers import CAPSTONE_PROMPTS
+
+    model = tmodel
+    prompt_ids = model.tokenizer(CAPSTONE_PROMPTS[0]).input_ids
+    context_len = len(prompt_ids) + 1
+    facts = cudalib.card_facts(weight_bytes=model.weight_bytes(),
+                               kv_bytes_per_token=model.kv_bytes_per_token(), context_len=context_len)
+    floor_ms = ((facts.weight_bytes + 2 * context_len * facts.kv_bytes_per_token)
+                / facts.bandwidth_bytes_per_s * 1e3)
+
+    def step_at(num_seqs):
+        runner = ModelRunner(model, 16 * num_seqs + 16)
+        block_lists = [list(range(1 + index * 16, 1 + (index + 1) * 16)) for index in range(num_seqs)]
+        runner.execute([SeqChunk(prompt_ids, 0, blocks) for blocks in block_lists])
+        decodes = [SeqChunk([11], len(prompt_ids), blocks) for blocks in block_lists]
+        return lambda: runner.execute(decodes)
+
+    check_four_lines(four_lines, "decode_step", step_at, 2, facts, floor_ms,
+                     "how far your eager step is from the bytes that it must read")

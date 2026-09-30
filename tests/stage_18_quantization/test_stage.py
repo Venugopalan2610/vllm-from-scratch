@@ -191,3 +191,31 @@ def test_quantizing_the_whole_model_keeps_its_choices(device):
     print("  decode time is proportional to the weight bytes, so this is")
     print("  almost a free 2x. That is why every production deployment does")
     print("  it.\033[0m")
+
+
+def test_the_four_lines(device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s18_quantization import four_lines
+    from tests.helpers import check_four_lines
+
+    from app.s18_quantization import QuantizedLinear
+
+    # 128 MB of int8 weights: larger than any L2 cache.
+    in_features, out_features = 16384, 8192
+    facts = cudalib.card_facts(in_features=in_features, out_features=out_features,
+                               bytes_per_weight=1, bytes_per_scale=4)
+    floor_ms = ((out_features * in_features + out_features * 4)
+                / facts.bandwidth_bytes_per_s * 1e3)
+    dense = torch.nn.Linear(in_features, out_features, bias=False, device=device, dtype=torch.bfloat16)
+    layer = QuantizedLinear.from_linear(dense)
+
+    def step_at(num_rows):
+        inputs = torch.randn(num_rows, in_features, device=device, dtype=torch.bfloat16)
+        return torch.inference_mode()(lambda: layer(inputs))
+
+    check_four_lines(four_lines, "int8_linear_call", step_at, 1, facts, floor_ms,
+                     "far above 1: PyTorch builds a bf16 copy of the weight first. Stage 18b removes the copy")

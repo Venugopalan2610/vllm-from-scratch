@@ -46,12 +46,12 @@ device = 'cuda'
 
 def summary(name, requests, log, scheduler):
   computed = sum(tokens for _, tokens, _ in log)
-  useful = sum(r.prompt + r.output - 1 for r in requests)
-  ttft = sorted(r.first_token - r.arrival for r in requests)
-  gaps = [g for r in requests for g in r.gaps]
+  useful = sum(request.prompt + request.output - 1 for request in requests)
+  ttft = sorted(request.first_token - request.arrival for request in requests)
+  gaps = [gap for request in requests for gap in request.gaps]
   print(f'{name}: done at {log[-1][0]:5.0f} s, TTFT median {ttft[len(ttft) // 2]:5.1f} s, '
-        f'preempted {sum(r.preemptions > 0 for r in requests) / len(requests):4.0%} of the requests '
-        f'(one of them {max(r.preemptions for r in requests)} times), '
+        f'preempted {sum(request.preemptions > 0 for request in requests) / len(requests):4.0%} of the requests '
+        f'(one of them {max(request.preemptions for request in requests)} times), '
         f'recomputed {1 - useful / computed:4.0%} of the work, longest gap {max(gaps):5.1f} s')
 '''
 
@@ -89,7 +89,10 @@ chunks = lab.prefill_ms(model, 12_000, chunk=512)
 print(f'one pass: {whole:6.0f} ms   -> every stream waits this long')
 print(f'chunks of 512: {len(chunks)} steps, the longest {max(chunks):4.0f} ms, the total {sum(chunks):6.0f} ms')
 flop = 2 * 1.72e9 * 12_000
-print(f'the matmul FLOP alone: {flop / 1e12:.1f} TFLOP -> {flop / 49e12 * 1000:.0f} ms at 49 TFLOP/s')
+import cudalib
+FLOPS = cudalib.matmul_flops(heat_seconds=5)                           # sustained bf16 on this card, now
+print(f'the matmul FLOP alone: {flop / 1e12:.1f} TFLOP -> {flop / FLOPS * 1000:.0f} ms at {FLOPS / 1e12:.0f} TFLOP/s; '
+      f'the prefill took {whole / (flop / FLOPS * 1000):.1f}x that')
 kv = 12_000 * 114_688
 print(f'a swap of the same request: {kv / 1e9:.2f} GB')
 '''),
@@ -120,8 +123,8 @@ for stream in range(64):
 gaps.sort()
 at = lambda q: gaps[int(q * (len(gaps) - 1))] * 1000
 print(f'{len(gaps):,} gaps: p50 {at(0.5):.0f} ms, p99 {at(0.99):.0f} ms, p99.9 {at(0.999):.0f} ms, max {gaps[-1] * 1000:.0f} ms')
-print(f'the frozen gaps are {sum(g > 1 for g in gaps) / len(gaps):.3%} of all gaps')
-print(f'streams with a gap above 1 s: {sum(w > 1 for w in worst)} of 64')
+print(f'the frozen gaps are {sum(gap > 1 for gap in gaps) / len(gaps):.3%} of all gaps')
+print(f'streams with a gap above 1 s: {sum(worst_gap > 1 for worst_gap in worst)} of 64')
 '''),
 
     ('d4', '''
@@ -171,9 +174,9 @@ for admission, front in [('prompt', False), ('prompt', True), ('final', True)]:
   requests = workload()
   scheduler = lab.Scheduler(3000, budget=1024, admission=admission, preempted_to_front=front)
   requests, log = lab.run(scheduler, requests)
-  slowest = max(requests, key=lambda r: r.finish - r.arrival)
+  slowest = max(requests, key=lambda request: request.finish - request.arrival)
   print(f'admit on {admission:6s}, victim to the {"front" if front else "back ":5s}: '
-        f'{scheduler.preemptions:5d} preemptions, the most for one request {max(r.preemptions for r in requests):3d}, '
+        f'{scheduler.preemptions:5d} preemptions, the most for one request {max(request.preemptions for request in requests):3d}, '
         f'the slowest request {slowest.finish - slowest.arrival:5.0f} s, all done at {log[-1][0]:5.0f} s')
 '''),
 
@@ -205,7 +208,7 @@ def chunked_greedy(ids, chunk, reset_positions, max_tokens=30):
     first = 0 if reset_positions else start                             # THE FAULT when True
     positions = torch.arange(first, first + part.shape[1], device=device)[None]
     model(part, past_key_values=cache, position_ids=positions, use_cache=True, logits_to_keep=1)
-  token, out = ids[-1], []
+  token, generated = ids[-1], []
   for step in range(max_tokens):
     position = torch.tensor([[len(ids) - 1 + step]], device=device)
     logits = model(torch.tensor([[token]], device=device), past_key_values=cache,
@@ -213,8 +216,8 @@ def chunked_greedy(ids, chunk, reset_positions, max_tokens=30):
     token = int(logits[0, -1].argmax())
     if token in stop:
       break
-    out.append(token)
-  return out
+    generated.append(token)
+  return generated
 
 for name, ids in [('long prompt', long_prompt), ('short prompt', short_prompt)]:
   good = chunked_greedy(ids, 64, reset_positions=False)
@@ -242,9 +245,9 @@ for pinned in (False, True):                                           # False: 
   host.copy_(kv, non_blocking=True)
   returned = time.perf_counter() - start
   torch.cuda.synchronize()
-  total = time.perf_counter() - start
+  total_s = time.perf_counter() - start
   print(f'{"pinned  " if pinned else "pageable"}: the call returned after {returned * 1000:6.1f} ms, '
-        f'the copy took {total * 1000:6.1f} ms = {kv.numel() * 2 / total / 1e9:5.1f} GB/s')
+        f'the copy took {total_s * 1000:6.1f} ms = {kv.numel() * 2 / total_s / 1e9:5.1f} GB/s')
   del host
 del kv
 torch.cuda.empty_cache()
@@ -317,26 +320,30 @@ of each request.
     'd2': '''
 ### What happens
 
-On my card:
+In the reference runs (one card, before and after a repair of its cooling):
 
-- One pass of 12,000 tokens: **1,876 ms**. Every other stream waits that long.
-- In chunks of 512: 24 steps, the longest 138 ms, the total 2,240 ms.
-- The matmul FLOP alone would take 842 ms at 49 TFLOP/s. The rest is the
-  attention, which grows with the square of the length, and the efficiency.
+- One pass of 12,000 tokens takes **2.2x to 2.3x** the time of its matmul FLOP
+  alone at the sustained rate of the card. The rest is the attention, which
+  grows with the square of the length, and the efficiency.
+- In chunks of 512: 24 steps. The longest chunk takes **1/13 to 1/14** of the
+  one pass, and all the chunks together take **1.19x to 1.22x** the one pass.
 
-Chunking costs 19% more time in total, and it cuts the longest freeze by
-14x. The stall of one pass is the fingerprint of Ticket 2: every stream
-freezes for the time of one whole prefill.
+Chunking costs about 20% more time in total, and it cuts the longest freeze
+by more than 10x. The stall of one pass is the fingerprint of Ticket 2: every
+stream freezes for the time of one whole prefill, whatever the card.
 ''',
     'd3': '''
 ### What happens
 
-- 5.2 million gaps: p50 22 ms, **p99 22 ms, p99.9 22 ms**, max 1,898 ms.
-- The frozen gaps are 0.011% of all the gaps.
+- 5.2 million gaps: the p50, the **p99 and the p99.9 all equal one step**. The
+  largest gap equals one whole prefill (Exercise 2).
+- The frozen gaps are 0.011% of all the gaps: one step in about 8,000.
 - **64 of 64** streams saw a gap above 1 s.
 
-Every user sees the freeze, and no percentile over the steps can see it. The
-p99.9 ignores the worst 0.1%, and the freezes are ten times rarer than that.
+These ratios do not depend on the card: a faster card makes the step and the
+freeze shorter together. Every user sees the freeze, and no percentile over
+the steps can see it. The p99.9 ignores the worst 0.1%, and the freezes are
+ten times rarer than that.
 
 **The guard.** The worst gap **of each request**, and the fraction of
 requests with a gap above 1 s.
@@ -344,22 +351,26 @@ requests with a gap above 1 s.
     'd4': '''
 ### What happens
 
-| budget | prefill tokens per step | one step | document TTFT |
+The time to the first token of the document, against the best budget, and one
+step, against the step at a budget of 128. In the reference runs:
+
+| budget | prefill tokens per step | TTFT against the best | one step against budget 128 |
 |---|---|---|---|
-| 128 | 64 | 50 ms | 12.4 s |
-| 256 | 192 | 62 ms | 5.2 s |
-| 512 | 448 | 102 ms | 3.7 s |
-| 1,024 | 960 | 229 ms | 3.9 s |
-| 2,048 | 1,984 | 478 ms | 4.3 s |
+| 128 | 64 | 3.4x to 3.7x | 1.0x |
+| 256 | 192 | 1.4x to 1.6x | about 1.2x |
+| 512 | 448 | 1.0x to 1.06x | about 2x |
+| 1,024 | 960 | 1.0x to 1.05x | 4.0x to 4.6x |
+| 2,048 | 1,984 | 1.06x to 1.16x | 8x to 10x |
 
 With a budget of 128, the 64 decodes take half of each step, and the document
-needs 250 steps: 12.4 s. The steps at the small budgets are also expensive
-for the few tokens they carry, because each step reads all the weights.
+needs 250 steps. The steps at the small budgets also cost a lot for the few
+tokens they carry, because each step reads all the weights.
 
 Above 512 the document gets **no faster**. A larger chunk at a context of
 8,000 tokens costs more than linearly, because the attention of each chunk
-reads the whole context. The chat users pay for it: 478 ms between their
-tokens at 2,048. On this card, 512 is the knee of the dial.
+reads the whole context. The chat users pay for it: at 2,048 their step is 8
+to 10 times longer. The knee of the dial is at 512 to 1,024 on the card of the
+reference runs. On a faster card the knee can move, so find it on yours.
 ''',
     'd5': '''
 ### What happens
@@ -399,22 +410,22 @@ against a prefill in one pass, in fp32.
     'd7': '''
 ### What happens
 
-On my laptop:
+In the reference runs:
 
-| host memory | the call returned after | the copy took | GB/s |
-|---|---|---|---|
-| pageable | 134.6 ms | 134.6 ms | 10.2 |
-| pinned | 0.0 ms | 105.7 ms | 13.0 |
+| host memory | the call returns after | the copy, against pinned |
+|---|---|---|
+| pageable | the whole copy | 1.0x to 1.3x slower |
+| pinned | at once | 1.0x |
 
 - With pageable memory, `non_blocking=True` does nothing: the CPU waits for
   the whole copy. With pinned memory, the call returns at once, and the CPU
   can schedule the next step during the copy.
-- The bandwidth differs less than in Ticket 8 (1.3x, not 4x). The bus of this
-  laptop is the limit, at 13 GB/s. On a server with a PCIe 4.0 x16 slot, the
-  pinned copy is faster, and the gap grows.
+- The bandwidth differs little on this laptop: 1.3x before a repair of its
+  cooling, and 1.02x after it. The bus is the limit here. On a server with a
+  full PCIe 4.0 x16 slot, the gap is larger.
 
 So on this machine, the main cost of pageable memory is not the bandwidth. It
-is the 135 ms that the scheduler thread cannot use.
+is the time that the scheduler thread cannot use: the whole copy, every time.
 ''',
 }
 
@@ -425,14 +436,14 @@ MYSTERY_SOL = '''
 pending tokens. On a light load it is identical to the lab scheduler. The
 experiment: a mix of long and short prompts under load, for example one prompt
 of 6,000 tokens in every 20, a request every 50 ms, and a pool of 3,000
-blocks. On my run, the median time to the first token **fell** from 13.9 s to
+blocks. In the reference run, the median time to the first token **fell** from 13.9 s to
 0.4 s, and the long prompts waited 38 s at the median instead of 14 s. A
 fault that improves the headline number is the hardest kind to find. Look at
 the tail of each class of request, not at the median of all.
 
 **`SchedulerB`: decodes do not count against the budget.** On a light load,
 the steps are small anyway. The experiment: many running decodes and a
-prefill at the same time, then read the step log. On my run, with 400 requests
+prefill at the same time, then read the step log. In the reference run, with 400 requests
 and a budget of 256, one step carried 448 tokens. The budget is the promise
 about the time between tokens, and a scheduler that breaks it breaks that
 promise with no error.
@@ -440,7 +451,7 @@ promise with no error.
 **`SchedulerC`: preemption does not reset the computed tokens.** It frees the
 blocks and keeps the count, so on resume the request skips its recompute, and
 it gets new blocks full of garbage. The experiment: force preemption, then
-count the work. On my run, with the workload of Exercise 1: 106 preemptions,
+count the work. In the reference run, with the workload of Exercise 1: 106 preemptions,
 and the total computed tokens were **exactly** the minimum, 474,810. A
 preemption by recompute that costs nothing is impossible. In a real engine
 this request would attend to empty blocks and write nonsense.
@@ -464,7 +475,7 @@ FINGERPRINTS_SOL = '''
 |---|---|---|---|---|
 | admit on the prompt | no | under load | preemptions, 35% recompute, gaps of 49 s | preemption rate; worst gap of each request |
 | a recompute in one piece | no | when a long request resumes | every stream freezes for one prefill | prefill tokens per step <= budget |
-| a percentile over all the steps | no | always | p99.9 = 22 ms, and 64 of 64 streams froze | the worst gap of each request |
+| a percentile over all the steps | no | always | p99.9 = one step, and 64 of 64 streams froze | the worst gap of each request |
 | a budget of 128 tokens | no | long prompts | TTFT 12.4 s, 3x the knee | TTFT per prompt length, and the step time |
 | admission that loops preemptions | no | under load | one request preempted 23 to 70 times | preemptions per request |
 | every chunk starts at position 0 | no | prompts longer than one chunk | the prompt reads as garbled | chunked against one pass, in fp32 |

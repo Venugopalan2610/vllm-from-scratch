@@ -94,3 +94,43 @@ class UnchunkedScheduler(ChunkedScheduler):
 
     def step(self):
         raise NotImplementedError
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: the steps that one prompt of n tokens needs, under
+    your token budget.
+
+    GIVEN
+        count_at(n)
+            -> the steps that one prompt of n tokens needs,
+            under your token budget
+        n
+            the size to count at
+        facts
+            facts.token_budget   the most tokens that one step may process
+
+    ASKED: one line for each number
+        prefill_steps_predicted
+            predict: the steps for n prompt tokens, at most
+            facts.token_budget in each step
+        prefill_steps_measured
+            measure: count_at(n)
+        prefill_steps_measured_over_predicted
+            divide
+        prefill_steps_2n_over_n
+            double: count_at(2n) over count_at(n)
+    """
+    prefill_steps_predicted = ...
+    prefill_steps_measured = ...
+    prefill_steps_measured_over_predicted = ...
+    prefill_steps_2n_over_n = ...
+    return {
+        "prefill_steps_predicted": prefill_steps_predicted,
+        "prefill_steps_measured": prefill_steps_measured,
+        "prefill_steps_measured_over_predicted": prefill_steps_measured_over_predicted,
+        "prefill_steps_2n_over_n": prefill_steps_2n_over_n,
+    }

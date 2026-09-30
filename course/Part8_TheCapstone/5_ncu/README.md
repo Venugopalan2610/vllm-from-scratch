@@ -4,7 +4,7 @@
 
 ## The notebook
 
-Open [`part8_ncu_1_CCreadTheCounters_helper.ipynb`](part8_ncu_1_CCreadTheCounters_helper.ipynb).
+Open [`part8_ncu_1_CCreadTheCounters_challenge.ipynb`](part8_ncu_1_CCreadTheCounters_challenge.ipynb).
 It compiles three small kernels: an uncoalesced read, a coalesced read, and a
 shared-memory tile with and without bank conflicts. You measure them with a
 clock, then with the counters of Nsight Compute (`ncu`):

@@ -7,12 +7,13 @@ intro: |
   You finished Part 1. You can build the loop. Now you must see when a loop is
   broken from the outside, with only the symptoms.
 
-  That is the real job. In production nobody tells you "the position ids are off
-  by one". A user tells you "the answers got worse on Tuesday".
+  That is the skill to practice. A user of a serving system does not say "the
+  position ids are off by one". A user says "the answers got worse on Tuesday".
 
-  Each ticket below is a real class of failure in LLM serving. Each ticket gives
-  you a **symptom** and some **evidence**. Some of the evidence is noise, as in a
-  real incident. Write four lines for each ticket:
+  Each ticket below is an invented scenario, built on a class of failure that
+  LLM serving can have. Each ticket gives you a **symptom** and some
+  **evidence**. Some of the evidence is noise, on purpose. Write four lines for
+  each ticket:
 
   1. **Root cause.** One sentence.
   2. **The number that proves it.** Not "it looks like". A computation.
@@ -319,14 +320,14 @@ tickets:
       the 40-iteration number agrees with main. A card that throttles is slower than
       main, not equal to it.
 
-      I measured these three times on an RTX 4080 Laptop GPU. On your card the
-      milliseconds differ, but the pattern is the same: the error shrinks as the
-      number of iterations grows.
+      On your card the milliseconds differ, and the pattern does not: the error
+      shrinks as the number of iterations grows, and a result above the sustained
+      peak of the card is always a broken measurement.
     code: |
       params = 3.44e9 / 2
       flop = 2 * params * 2048
-      for label, ms in [('PR, 1 iteration', 123), ('PR, 40 iterations', 183), ('main', 188)]:
-        print(f'{label:18s} {ms:4d} ms  ->  {flop / (ms/1000) / 1e12:5.1f} TFLOP/s   (sustained peak 49)')
+      for label, measured_ms in [('PR, 1 iteration', 123), ('PR, 40 iterations', 183), ('main', 188)]:
+        print(f'{label:18s} {measured_ms:4d} ms  ->  {flop / (measured_ms/1000) / 1e12:5.1f} TFLOP/s   (sustained peak 49)')
   - id: "1.5"
     title: "Ticket 5: the customer"
     ticket: |
@@ -513,8 +514,9 @@ tickets:
       you can compute how much. When the observed growth is 10 times the computed
       growth, the theory is wrong.
 
-      I measured on an RTX 4080 Laptop GPU with a correct cache: 12.9 ms at 128,
-      13.2 ms at 2048, 17.4 ms at 8192.
+      With a correct cache, measured: the step at 2,048 tokens takes about 1.02x
+      the step at 128, and the step at 8,192 about 1.35x. The ratio of the log is
+      11x.
     code: |
       weights = 3.44e9
       kv_per_token = 2 * 28 * 8 * 128 * 2
@@ -581,7 +583,7 @@ tickets:
 
       **Why it is hard to see.** The answer does not become nonsense. The first few
       tokens are correct, because the new prompt dominates. Then the old context
-      leaks in. In my run of this exact case, the pancake answer was correct for 4
+      leaks in. In one run of this exact case, the pancake answer was correct for 4
       tokens. Then it wrote "I have a cat named Momo. I have a dog named Kiki". The
       model took Japanese names from the earlier request about Japan.
   - id: "1.9"
@@ -634,8 +636,9 @@ tickets:
         `prompt_len x vocab x bytes`. At startup, run one prefill at the maximum
         prompt length and check the peak memory.
 
-      On an RTX 4080 Laptop GPU, a prefill of 8,192 tokens needs 3.46 GB of extra
-      memory with all the logits. It needs 1.38 GB with `logits_to_keep=1`.
+      Measured with Qwen3-1.7B, a prefill of 8,192 tokens needs 3.46 GB of extra
+      memory with all the logits, and 1.38 GB with `logits_to_keep=1`: 2.5x. Bytes
+      do not depend on the card, so you get the same numbers.
 
       **The lesson.** The vocabulary of a modern model is large. Qwen3 has 151,936
       entries. One row of logits is small, but a row for each prompt token is not.
@@ -751,8 +754,8 @@ tickets:
     code: |
       import math
       layers, heads, kv_heads, head_dim = 32, 32, 8, 128
-      for name, h in [('plan: attention heads', heads), ('correct: KV heads', kv_heads)]:
-        per_token = 2 * layers * h * head_dim * 2
+      for name, num_heads in [('plan: attention heads', heads), ('correct: KV heads', kv_heads)]:
+        per_token = 2 * layers * num_heads * head_dim * 2
         users = int(60e9 // (per_token * 8192))
         print(f'{name:22s} {per_token//1024:4d} KiB/token  {users:3d} users/GPU  {math.ceil(500/users):3d} GPUs')
       print(f'peak KV use predicted by the correct formula: {13/55:.0%} of the planned budget')
@@ -760,8 +763,8 @@ outro: |
   ### Before you open the solution
 
   Go back to each ticket and write one more line: **which piece of evidence was
-  noise, and why did it look relevant?** In real incidents the noise costs more
-  time than the bug.
+  noise, and why did it look relevant?** In a diagnosis, the noise often costs
+  more time than the bug.
 
   Then do the second notebook of this section. In that notebook you make the
   bugs yourself and watch them.

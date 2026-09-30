@@ -28,7 +28,7 @@ def header(section, lecture):
 
 def build(cells, helper_path, solution_path, section, title):
     """cells: a list of ('md', text) or ('code', helper_text, solution_text)."""
-    helper = [header(section, f'CodeChallenge HELPER: {title}')]
+    helper = [header(section, f'CodeChallenge: {title}')]
     solution = [header(section, f'CodeChallenge: {title}')]
     for cell in cells:
         if cell[0] == 'md':
@@ -96,10 +96,10 @@ def run(mode, cpu_ms, batch, profiled=True):
         command = ['nsys', 'profile', '--trace=cuda,nvtx', '--capture-range=cudaProfilerApi',
                    '--capture-range-end=stop',            # let the program finish, and print
                    '--export=sqlite', '--force-overwrite=true', '-o', str(trace)] + command
-    result = subprocess.run(command, capture_output=True, text=True, cwd=TRACES)
-    step = [float(line.split()[1]) for line in result.stdout.splitlines() if line.startswith('STEP_MS')]
+    process = subprocess.run(command, capture_output=True, text=True, cwd=TRACES)
+    step = [float(value) for value in re.findall(r'STEP_MS ([0-9.]+)', process.stdout)]   # nsys can share the line
     if not step:
-        raise RuntimeError(result.stdout[-1500:] + result.stderr[-1500:])
+        raise RuntimeError(process.stdout[-1500:] + process.stderr[-1500:])
     return (Path(f'{trace}.sqlite') if profiled else None), step[0]
 
 def query(db, sql, *arguments):
@@ -108,7 +108,7 @@ def query(db, sql, *arguments):
 
 SETUP_I = '''
 # find the repo root. The directory you start from does not matter.
-import sys, sqlite3, statistics, subprocess, shutil
+import re, sys, sqlite3, statistics, subprocess, shutil
 from pathlib import Path
 ROOT = next(folder for folder in [Path.cwd(), *Path.cwd().parents]
             if (folder/'cudalib').is_dir())
@@ -184,19 +184,19 @@ EX2_SOLUTION = '''
 def step_profile(db):
     steps = ranges(db, 'step')
     start, end = steps[0][0], steps[-1][1]
-    inside = [(max(s, start), min(e, end)) for s, e in kernel_intervals(db) if e > start and s < end]
-    busy = sum(e - s for s, e in merge(inside))
+    inside = [(max(interval_start, start), min(interval_end, end)) for interval_start, interval_end in kernel_intervals(db) if interval_end > start and interval_start < end]
+    busy = sum(interval_end - interval_start for interval_start, interval_end in merge(inside))
     forwards = ranges(db, 'forward')
     launches = [(launch / 1e6, done / 1e6) for launch, done in query(
         db, 'SELECT r.start, k.end FROM CUPTI_ACTIVITY_KIND_KERNEL k '
             'JOIN CUPTI_ACTIVITY_KIND_RUNTIME r ON k.correlationId = r.correlationId')]
     lags = []
-    for s, e in forwards:
-        ends = [done for launch, done in launches if s <= launch <= e]
+    for interval_start, interval_end in forwards:
+        ends = [done for launch, done in launches if interval_start <= launch <= interval_end]
         if ends:
-            lags.append(max(ends) - e)
+            lags.append(max(ends) - interval_end)
     return dict(step_ms=(end - start) / len(steps), gpu_ms=busy / len(steps),
-                cpu_forward_ms=statistics.mean(e - s for s, e in forwards),
+                cpu_forward_ms=statistics.mean(interval_end - interval_start for interval_start, interval_end in forwards),
                 lag_ms=statistics.mean(lags), idle=1 - busy / (end - start))
 
 profiles = {}
@@ -210,7 +210,8 @@ EX3_HELPER = '''
 CPU_MS = 8.0
 
 def slower_side(profile):
-    \"\"\"-> 'CPU' or 'GPU', from the profile of the loop with no work.\"\"\"
+    \"\"\"-> 'CPU' or 'GPU', from the profile of the loop with no work. A GPU that
+    is idle for a real part of the step waits for the CPU.\"\"\"
     ...
 
 def predict_extra(profile, cpu_ms, mode):
@@ -235,7 +236,7 @@ EX3_SOLUTION = '''
 CPU_MS = 8.0
 
 def slower_side(profile):
-    return 'CPU' if profile['idle'] > 0.2 else 'GPU'     # an idle GPU waits for the CPU
+    return 'CPU' if profile['idle'] > 0.1 else 'GPU'     # a GPU idle for 10% of the step waits for the CPU
 
 def predict_extra(profile, cpu_ms, mode):
     cpu_slower = slower_side(profile) == 'CPU'
@@ -390,33 +391,45 @@ functions of Exercise 1, with `text LIKE 'engine_step_%'`, and answer:
    still valid? Which conclusions survive, and which do not?
 '''),
     ('solution', '''
-### What I measured
+### What the reference runs showed
 
-On an RTX 4080 Laptop GPU, under Nsight Systems, with 8 ms of CPU work, in two runs:
+With 8 ms of CPU work, under Nsight Systems, on one laptop before and after a
+repair of its cooling. The repair made both the GPU and the CPU faster, and it
+changed the balance between them. The extra time is a fraction of the CPU
+work, so that it compares across machines:
 
-| batch | the slower side | GPU idle, no work | series loop | overlap loop | `forward`: none / series / overlap |
-|---|---|---|---|---|---|
-| 1 | CPU | 36% to 38% | +8.0 to +8.8 ms | +6.8 to +7.8 ms | 17.3 / 15.7 / 17.1 ms |
-| 256 | GPU | 4% | +9.5 to +9.7 ms | +3.1 to +3.2 ms | 35.7 / 17.3 / 30.9 ms |
+| batch | the slower side | GPU idle, no work | series loop | overlap loop |
+|---|---|---|---|---|
+| 1, before the repair | CPU | 36% to 38% | +1.0x to +1.1x the work | +0.85x to +0.98x |
+| 1, after | CPU | 14% to 18% | +1.2x to +1.3x | +1.0x |
+| 256, before the repair | GPU | 4% | +1.2x | +0.4x |
+| 256, after | GPU | 4% | +0.9x | +0.03x |
 
 - **At batch 1 the CPU is the slower side.** One step launches about 1,600
   kernels, and the CPU needs longer to launch them than the GPU needs to run
   them. The overlap cannot hide the CPU work, because the CPU is the critical
-  path. It pays most of the 8 ms, like the series loop.
-- **At batch 256 the GPU is the slower side**, and the overlap hides 60% of the
-  work. Not all of it. The `forward` column shows why. The pure launch time is
-  17.3 ms: the series loop shows it, because it launches into an empty queue.
-  In the loop with no work and in the overlap loop, `forward` takes 30.9 to
-  35.7 ms, because the launches block: the queue of launched kernels is full.
-  A full queue holds a limited amount of GPU work. During the 8 ms of CPU work,
-  the GPU finishes the queue and then waits for about 3 ms. A CPU that runs
-  ahead can hide work only up to the depth of that queue.
+  path. It pays the whole CPU work, like the series loop.
+- **At batch 256 the GPU is the slower side**, and the overlap hides the CPU
+  work, but only while the GPU has queued work to run. The `forward` range of
+  the series loop shows the pure launch time, because it launches into an
+  empty queue. In the loop with no work, `forward` takes about twice as long,
+  because the launches block: the queue of launched kernels is full. During
+  the CPU work, the GPU runs off that queue. Before the repair the CPU was
+  slow, the queue ran dry, and the overlap hid only 60% of the work. After it,
+  the CPU launched faster, and the overlap hid almost all of it. The rule: the
+  overlap hides the CPU work while the GPU time of a step is larger than the
+  launch time plus the CPU work.
 - **The series loop pays the CPU work plus a small tail**: at batch 1, the
   last kernels of the step (the lag); at both sizes, the copy of the tokens to
   the CPU.
-- **The profiler costs 35% to 36%** of the step at batch 1 (Exercise 4). It adds work
-  to every launch, so it makes the CPU side look slower than it is. Compare a
-  trace with a trace, and a clock with a clock.
+- **The profiler costs 8% to 36%** of the step at batch 1 (Exercise 4): 36%
+  with the slow CPU, 8% with the fast one. It adds work to every launch, so it
+  makes the CPU side look slower than it is. Compare a trace with a trace, and
+  a clock with a clock.
+- **The slower side depends on the machine.** The rule of `slower_side` (a
+  GPU idle for more than 10% of the step waits for the CPU) held on both days,
+  but the idle time at batch 1 fell from 37% to 16%. On a desktop with a fast
+  CPU, batch 1 can be GPU-bound. Find the slower side on yours.
 
 The cure for a CPU-bound decode step is stage 23: a CUDA graph replaces the
 1,600 launches with one. Then the CPU side almost disappears, and the queue
@@ -505,9 +518,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 """
 kernels = cudalib.build_source('practicum_j', KERNELS)
 keys = torch.randn(1 << 20, 128, device='cuda', dtype=torch.bfloat16)     # 268 MB, far more than L2
-out = torch.empty(1 << 20, device='cuda')
+kernel_output = torch.empty(1 << 20, device='cuda')
 tile_out = torch.empty(4096 * 32, device='cuda')
-PEAK = cudalib.peak_bandwidth()
+PEAK = cudalib.peak_bandwidth(fresh=True)             # measured now, not a cached value
 print(f'the kernels are built. The streaming copy of this card: {PEAK:.0f} GB/s')
 '''
 
@@ -516,22 +529,22 @@ def gbs(fn, num_bytes):
     """The GB/s of `fn`, which reads `num_bytes`. Use cudalib.bench_ms."""
     ...
 
-a = gbs(lambda: kernels.run_a(keys, out), keys.numel() * 2)
-b = gbs(lambda: kernels.run_b(keys, out), keys.numel() * 2)
+gbs_a = gbs(lambda: kernels.run_a(keys, kernel_output), keys.numel() * 2)
+gbs_b = gbs(lambda: kernels.run_b(keys, kernel_output), keys.numel() * 2)
 c128 = cudalib.bench_ms(lambda: kernels.run_c(tile_out, 128, 64))
 c129 = cudalib.bench_ms(lambda: kernels.run_c(tile_out, 129, 64))
-print(f'A {a:.0f} GB/s, B {b:.0f} GB/s ({b / a:.2f}x);  C with rows of 128: {c128:.2f} ms, of 129: {c129:.2f} ms ({c128 / c129:.1f}x)')
+print(f'A {gbs_a:.0f} GB/s, B {gbs_b:.0f} GB/s ({gbs_b / gbs_a:.2f}x);  C with rows of 128: {c128:.2f} ms, of 129: {c129:.2f} ms ({c128 / c129:.1f}x)')
 '''
 
 EX1J_SOLUTION = '''
 def gbs(fn, num_bytes):
     return num_bytes / (cudalib.bench_ms(fn) / 1000) / 1e9
 
-a = gbs(lambda: kernels.run_a(keys, out), keys.numel() * 2)
-b = gbs(lambda: kernels.run_b(keys, out), keys.numel() * 2)
+gbs_a = gbs(lambda: kernels.run_a(keys, kernel_output), keys.numel() * 2)
+gbs_b = gbs(lambda: kernels.run_b(keys, kernel_output), keys.numel() * 2)
 c128 = cudalib.bench_ms(lambda: kernels.run_c(tile_out, 128, 64))
 c129 = cudalib.bench_ms(lambda: kernels.run_c(tile_out, 129, 64))
-print(f'A {a:.0f} GB/s, B {b:.0f} GB/s ({b / a:.2f}x);  C with rows of 128: {c128:.2f} ms, of 129: {c129:.2f} ms ({c128 / c129:.1f}x)')
+print(f'A {gbs_a:.0f} GB/s, B {gbs_b:.0f} GB/s ({gbs_b / gbs_a:.2f}x);  C with rows of 128: {c128:.2f} ms, of 129: {c129:.2f} ms ({c128 / c129:.1f}x)')
 '''
 
 PROBE_J = '''
@@ -559,32 +572,32 @@ torch.cuda.synchronize()
 
 def counters(kernel_regex):
     """-> {metric: float} for the first kernel that matches, or None."""
-    values, output = cudalib.run_ncu(DRIVER, list(METRICS), kernel=f'regex:{kernel_regex}')
+    values, ncu_log = cudalib.run_ncu(DRIVER, list(METRICS), kernel=f'regex:{kernel_regex}')
     if not values:
-        return None, output
-    return {name: float(str(value).replace(',', '')) for name, (value, _unit) in values.items()}, output
+        return None, ncu_log
+    return {name: float(str(value).replace(',', '')) for name, (value, _unit) in values.items()}, ncu_log
 
-first, output = counters('rows_by_thread')
+first, ncu_log = counters('rows_by_thread')
 HAVE_COUNTERS = first is not None
 if not HAVE_COUNTERS:
     print('Nsight Compute cannot read the counters here.')
-    if cudalib.probe.NO_COUNTER_PERMISSION in output:
+    if cudalib.probe.NO_COUNTER_PERMISSION in ncu_log:
         print("The driver lets only an administrator read them. To change it:\\n"
               "    echo 'options nvidia NVreg_RestrictProfilingToAdminUsers=0' | sudo tee /etc/modprobe.d/nvidia-profiling.conf\\n"
               "    sudo update-initramfs -u     # then reboot\\n"
               "Until then, the checks of this notebook use the clock only.")
     else:
-        print(output[-1500:])
+        print(ncu_log[-1500:])
 else:
     print('Nsight Compute can read the counters.')
 '''
 
 EX2J_HELPER = '''
 if HAVE_COUNTERS:
-    results = {name: counters(regex)[0] for name, regex in
+    counters_by_kernel = {name: counters(regex)[0] for name, regex in
                [('A', 'rows_by_thread'), ('B', 'rows_by_16_threads'),
                 ('C128', 'tile_rows_128'), ('C129', 'tile_rows_129')]}
-    for name, values in results.items():
+    for name, values in counters_by_kernel.items():
         print(name, {metric.split('__')[1][:40]: round(value, 2) for metric, value in values.items()})
 
 def sector_use(values):
@@ -602,10 +615,10 @@ def dram_fraction(values):
 
 EX2J_SOLUTION = '''
 if HAVE_COUNTERS:
-    results = {name: counters(regex)[0] for name, regex in
+    counters_by_kernel = {name: counters(regex)[0] for name, regex in
                [('A', 'rows_by_thread'), ('B', 'rows_by_16_threads'),
                 ('C128', 'tile_rows_128'), ('C129', 'tile_rows_129')]}
-    for name, values in results.items():
+    for name, values in counters_by_kernel.items():
         print(name, {metric.split('__')[1][:40]: round(value, 2) for metric, value in values.items()})
 
 def sector_use(values):
@@ -622,15 +635,15 @@ def dram_fraction(values):
 CHECK_J = '''
 ### THE CHECKS. Do not edit this cell.
 
-assert all(value > 0 for value in (a, b, c128, c129)), 'run Exercise 1 first'
-assert b > 1.25 * a, f'B must stream faster than A: {b:.0f} against {a:.0f} GB/s'
+assert all(value > 0 for value in (gbs_a, gbs_b, c128, c129)), 'run Exercise 1 first'
+assert gbs_b > 1.05 * gbs_a, f'B must stream faster than A: {gbs_b:.0f} against {gbs_a:.0f} GB/s'
 assert c128 > 4 * c129, f'rows of 128 floats must be much slower: only {c128 / c129:.1f}x'
 if HAVE_COUNTERS:
-    assert sector_use(results['A']) < 40, 'A uses a small part of each sector'
-    assert sector_use(results['B']) > 90, 'B uses almost all of each sector'
-    assert conflicts_per_load(results['C128']) > 20, 'rows of 128: about 31 conflicts per load'
-    assert conflicts_per_load(results['C129']) < 1, 'rows of 129: no conflict'
-    assert dram_fraction(results['B']) > dram_fraction(results['A'])
+    assert sector_use(counters_by_kernel['A']) < 40, 'A uses a small part of each sector'
+    assert sector_use(counters_by_kernel['B']) > 90, 'B uses almost all of each sector'
+    assert conflicts_per_load(counters_by_kernel['C128']) > 20, 'rows of 128: about 31 conflicts per load'
+    assert conflicts_per_load(counters_by_kernel['C129']) < 1, 'rows of 129: no conflict'
+    assert dram_fraction(counters_by_kernel['B']) > dram_fraction(counters_by_kernel['A'])
     print('All the checks pass, with the counters and with the clock.')
 else:
     print('The checks with the clock pass. The counter checks did not run: '
@@ -668,7 +681,7 @@ they check the counters when they can.
 
 Measure A and B in GB/s, and the two versions of C in ms. Before you run it,
 predict the ratio B / A and the ratio of C with rows of 128 to C with rows of
-129.
+129. Your absolute numbers belong to your card; compare the ratios.
 '''),
     ('code', EX1J_HELPER, EX1J_SOLUTION),
     ('md', '''
@@ -715,10 +728,12 @@ attention kernels. Answer:
     ('solution', '''
 ### What I measured
 
-On an RTX 4080 Laptop GPU with the clock: A about 210 GB/s, B about 320 GB/s
-(1.5x); C with rows of 128 about 8 ms, with rows of 129 about 0.5 ms (15x). This
-machine does not let a normal user read the counters, so I could not run the
-counter cells here. With the counters, expect a sector use near 6% for A (the L1
+With the clock, on one laptop card before and after a repair of its cooling:
+B was 1.16x to 1.55x faster than A, and C with rows of 128 was 15x to 17x
+slower than with rows of 129. The bank conflict is a large, stable effect. The
+coalescing penalty is smaller and it moves with the card's state, because the
+L1 cache hides part of it. That machine did not let a normal user read the
+counters, so the counter cells did not run there. With the counters, expect a sector use near 6% for A (the L1
 cache serves the rest of each sector to the next loads of the same thread, which
 is why A is not 16x slower), near 100% for B, about 31 conflicts for each load
 for C with rows of 128 (32 accesses to one bank: one of them is not a conflict),
@@ -729,11 +744,11 @@ and 0 with rows of 129.
 
 if __name__ == '__main__':
     build([('code', SETUP_I)] + PRACTICUM_I,
-          'course/Part8_TheCapstone/4_nsys/part8_nsys_1_CCreadTheTimeline_helper.ipynb',
+          'course/Part8_TheCapstone/4_nsys/part8_nsys_1_CCreadTheTimeline_challenge.ipynb',
           'course/Part8_TheCapstone/4_nsys/solutions/part8_nsys_1_CCreadTheTimeline.ipynb',
           'Timeline profiling', 'read the timeline')
     build([('code', SETUP_J)] + PRACTICUM_J,
-          'course/Part8_TheCapstone/5_ncu/part8_ncu_1_CCreadTheCounters_helper.ipynb',
+          'course/Part8_TheCapstone/5_ncu/part8_ncu_1_CCreadTheCounters_challenge.ipynb',
           'course/Part8_TheCapstone/5_ncu/solutions/part8_ncu_1_CCreadTheCounters.ipynb',
           'Kernel counters', 'read the counters')
     print('practicums I and J built')

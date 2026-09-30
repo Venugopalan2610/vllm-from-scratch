@@ -409,3 +409,75 @@ CAPSTONE_PROMPTS = [
     "Photosynthesis is the process",
     "Once upon a time",
 ]
+
+
+# ---- the four lines of a stage (docs/METHOD.md) ------------------------
+
+
+def _four_values(lines, names):
+    assert isinstance(lines, dict), "four_lines() must return the dict of its four numbers"
+    values = []
+    for name in names:
+        assert name in lines, f"four_lines() must return `{name}`"
+        value = lines[name]
+        assert value is not Ellipsis, f"`{name}` is still `...`: write its line"
+        assert isinstance(value, (int, float)) and value == value, f"`{name}` must be a number"
+        values.append(float(value))
+    return values
+
+
+def check_four_lines(four_lines, subject, step_at, n, facts, floor_ms, meaning):
+    """The four lines of a TIMED stage.
+
+    four_lines   the learner's function: four_lines(step_at, n, facts) -> dict
+    subject      the name stem: `attention_call` gives `attention_call_floor_ms`, ...
+    floor_ms     the floor that the facts give. The prediction must be exact.
+    meaning      one sentence: what the ratio to the floor says here
+    """
+    names = [f"{subject}_floor_ms", f"{subject}_measured_ms",
+             f"{subject}_measured_over_floor", f"{subject}_ms_2n_over_n"]
+    lines = four_lines(step_at, n, facts)
+    floor, measured, over, doubling = _four_values(lines, names)
+    assert abs(floor - floor_ms) <= 0.02 * floor_ms, (
+        f"`{names[0]}` is {floor:.4f} ms. The bytes in the facts give {floor_ms:.4f} ms. "
+        "Which bytes must this work move, at the least?")
+    reference = bench_ms(step_at(n))
+    assert 0.5 < measured / reference < 2.0, (
+        f"`{names[1]}` is {measured:.4f} ms, and an honest stopwatch gives {reference:.4f} ms. "
+        "Did you warm up, and wait for the GPU? cudalib.bench_ms does both.")
+    assert abs(over - measured / floor) <= 0.01 * over + 1e-9, (
+        f"`{names[2]}` must be `{names[1]}` / `{names[0]}` = {measured / floor:.3f}")
+    reference_doubling = bench_ms(step_at(2 * n)) / reference
+    assert abs(doubling - reference_doubling) <= 0.35 * reference_doubling, (
+        f"`{names[3]}` is {doubling:.2f}, and an honest measurement gives "
+        f"{reference_doubling:.2f}. Time the step at 2n and at n, and divide.")
+    print(f"\n  \033[36mthe four lines\033[0m, on {subject.replace('_', ' ')} at n = {n}:")
+    print(f"    predict   floor              {floor:9.4f} ms")
+    print(f"    measure   measured           {measured:9.4f} ms")
+    print(f"    divide    measured / floor   {over:9.2f}    {meaning}")
+    print(f"    double    t(2n) / t(n)       {doubling:9.2f}    "
+          "(about 1: flat, about 2: linear, about 4: quadratic)")
+
+
+def check_four_count_lines(four_lines, subject, count_at, n, facts, predicted, meaning):
+    """The four lines of a COUNTED stage: the same four moves, on a count.
+    A count has no noise, so every line must be exact."""
+    names = [f"{subject}_predicted", f"{subject}_measured",
+             f"{subject}_measured_over_predicted", f"{subject}_2n_over_n"]
+    lines = four_lines(count_at, n, facts)
+    guess, measured, over, doubling = _four_values(lines, names)
+    assert abs(guess - predicted) <= 1e-6 * max(1, abs(predicted)), (
+        f"`{names[0]}` is {guess}. The facts give {predicted}.")
+    reference = count_at(n)
+    assert abs(measured - reference) <= 1e-9 * max(1, reference), (
+        f"`{names[1]}` is {measured}, and count_at({n}) gives {reference}")
+    assert abs(over - measured / guess) <= 1e-6 * max(1, abs(over)), (
+        f"`{names[2]}` must be `{names[1]}` / `{names[0]}`")
+    reference_doubling = count_at(2 * n) / reference
+    assert abs(doubling - reference_doubling) <= 1e-6 * max(1, reference_doubling), (
+        f"`{names[3]}` must be count_at(2n) / count_at(n) = {reference_doubling:.3f}")
+    print(f"\n  \033[36mthe four lines\033[0m, on {subject.replace('_', ' ')} at n = {n}:")
+    print(f"    predict   predicted            {guess:10.2f}")
+    print(f"    measure   measured             {measured:10.2f}")
+    print(f"    divide    measured / predicted {over:10.3f}   {meaning}")
+    print(f"    double    count(2n) / count(n) {doubling:10.3f}")

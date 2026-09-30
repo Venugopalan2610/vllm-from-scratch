@@ -6,11 +6,6 @@ __pycache__/
 .pytest_cache/
 .cudacache/
 
-# runtime
-.venv/
-.progress.json
-.measurements.json
-
 # reference solutions live on the `solutions` branch
 .solutions/
 
@@ -19,3 +14,9 @@ __pycache__/
 
 # incident drills: your own progress log
 .incidents.md
+
+# ./vc note: your confusions and wrong predictions
+.notes.md
+
+# ./vc run: the oracle tokens, computed once
+.live_oracle.json

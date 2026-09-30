@@ -112,3 +112,48 @@ def sample(logits, params, prev_tokens=None):
     The same seed and the same logits must give the same token, every time.
     """
     raise NotImplementedError("stage 13: implement sample")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: one call of your sample() on n rows of logits.
+
+    GIVEN
+        step_at(n)
+            -> a function with no arguments. It runs one
+            call of your sample() on n rows of logits.
+        n
+            the size to measure at
+        facts
+            facts.bandwidth_bytes_per_s   the read bandwidth of this card
+            facts.vocab_size    the logits in one row
+            facts.logit_bytes   the bytes of one logit (float32: 4)
+        cudalib.bench_ms(function)
+            -> the milliseconds of one call: warmed up, waited for, repeated
+
+    ASKED: one line for each number
+        sampler_call_floor_ms
+            predict: which bytes must one call read, at the
+            least? Use facts.vocab_size and facts.logit_bytes.
+        sampler_call_measured_ms
+            measure: the time of step_at(n)
+        sampler_call_measured_over_floor
+            divide
+        sampler_call_ms_2n_over_n
+            double: the time at 2n over the time at n
+    """
+    import cudalib
+
+    sampler_call_floor_ms = ...
+    sampler_call_measured_ms = ...
+    sampler_call_measured_over_floor = ...
+    sampler_call_ms_2n_over_n = ...
+    return {
+        "sampler_call_floor_ms": sampler_call_floor_ms,
+        "sampler_call_measured_ms": sampler_call_measured_ms,
+        "sampler_call_measured_over_floor": sampler_call_measured_over_floor,
+        "sampler_call_ms_2n_over_n": sampler_call_ms_2n_over_n,
+    }

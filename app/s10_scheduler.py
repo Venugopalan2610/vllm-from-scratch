@@ -90,3 +90,44 @@ class Scheduler:
 
     def run_to_completion(self, max_steps=100000):
         raise NotImplementedError
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(count_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: the steps that your scheduler needs to finish n
+    requests, with a large pool.
+
+    GIVEN
+        count_at(n)
+            -> the steps that your scheduler needs to finish
+            n requests, with a large pool
+        n
+            the size to count at
+        facts
+            facts.max_tokens   the output tokens of each request
+
+    ASKED: one line for each number
+        steps_predicted
+            predict: the steps if every request runs in every
+            step: one prefill step, then one step for each
+            output token. Use facts.max_tokens.
+        steps_measured
+            measure: count_at(n)
+        steps_measured_over_predicted
+            divide
+        steps_2n_over_n
+            double: count_at(2n) over count_at(n)
+    """
+    steps_predicted = ...
+    steps_measured = ...
+    steps_measured_over_predicted = ...
+    steps_2n_over_n = ...
+    return {
+        "steps_predicted": steps_predicted,
+        "steps_measured": steps_measured,
+        "steps_measured_over_predicted": steps_measured_over_predicted,
+        "steps_2n_over_n": steps_2n_over_n,
+    }

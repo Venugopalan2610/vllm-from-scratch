@@ -53,8 +53,8 @@ PROMPTS = ['The three largest cities in Japan are',
            'The first person to walk on the moon was',
            'The chemical symbol for gold is',
            'In 1492, Columbus']
-lengths = [len(tokenizer(p).input_ids) for p in PROMPTS]
-alone = [lab.greedy_alone(model, tokenizer, p, TOKENS) for p in PROMPTS]
+lengths = [len(tokenizer(prompt).input_ids) for prompt in PROMPTS]
+alone = [lab.greedy_alone(model, tokenizer, prompt, TOKENS) for prompt in PROMPTS]
 print('prompt lengths:', lengths)
 
 def compare(name, rows, reference, lengths):
@@ -81,17 +81,17 @@ def fault_right_padding(prompts, max_tokens):
   tokenizer.padding_side = 'right'                                    # THE FAULT
   batch = tokenizer(prompts, return_tensors='pt', padding=True).to(device)
   mask = batch.attention_mask
-  out = model(batch.input_ids, attention_mask=mask, use_cache=True)
-  cache = out.past_key_values
-  next_tokens = out.logits[:, -1].argmax(-1)
+  forward_pass = model(batch.input_ids, attention_mask=mask, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_tokens = forward_pass.logits[:, -1].argmax(-1)
   rows = [[] for _ in prompts]
   for _ in range(max_tokens):
     for row, token in enumerate(next_tokens.tolist()):
       rows[row].append(token)
     mask = torch.cat([mask, mask.new_ones(len(prompts), 1)], dim=1)
-    out = model(next_tokens[:, None], attention_mask=mask, past_key_values=cache, use_cache=True)
-    cache = out.past_key_values
-    next_tokens = out.logits[:, -1].argmax(-1)
+    forward_pass = model(next_tokens[:, None], attention_mask=mask, past_key_values=cache, use_cache=True)
+    cache = forward_pass.past_key_values
+    next_tokens = forward_pass.logits[:, -1].argmax(-1)
   tokenizer.padding_side = 'left'
   return rows
 
@@ -108,22 +108,22 @@ This is Ticket 2. Predict the first different token of each row. Run it in
 float32 on Qwen3-0.6B, so that a correct row matches exactly.
 ''', '''
 exact = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-0.6B', dtype=torch.float32).cuda().eval()
-alone_fp32 = [lab.greedy_alone(exact, tokenizer, p, TOKENS) for p in PROMPTS]
+alone_fp32 = [lab.greedy_alone(exact, tokenizer, prompt, TOKENS) for prompt in PROMPTS]
 
 @torch.inference_mode()
-def fault_prefill_mask_only(m, prompts, max_tokens):
+def fault_prefill_mask_only(model_under_test, prompts, max_tokens):
   tokenizer.padding_side = 'left'
   batch = tokenizer(prompts, return_tensors='pt', padding=True).to(device)
-  out = m(batch.input_ids, attention_mask=batch.attention_mask, use_cache=True)
-  cache = out.past_key_values
-  next_tokens = out.logits[:, -1].argmax(-1)
+  forward_pass = model_under_test(batch.input_ids, attention_mask=batch.attention_mask, use_cache=True)
+  cache = forward_pass.past_key_values
+  next_tokens = forward_pass.logits[:, -1].argmax(-1)
   rows = [[] for _ in prompts]
   for _ in range(max_tokens):
     for row, token in enumerate(next_tokens.tolist()):
       rows[row].append(token)
-    out = m(next_tokens[:, None], past_key_values=cache, use_cache=True)   # THE FAULT: no mask
-    cache = out.past_key_values
-    next_tokens = out.logits[:, -1].argmax(-1)
+    forward_pass = model_under_test(next_tokens[:, None], past_key_values=cache, use_cache=True)   # THE FAULT: no mask
+    cache = forward_pass.past_key_values
+    next_tokens = forward_pass.logits[:, -1].argmax(-1)
   return rows
 
 compare('mask in the prefill only, float32', fault_prefill_mask_only(exact, PROMPTS, TOKENS), alone_fp32, lengths)
@@ -141,23 +141,24 @@ every sequence, divided by the bandwidth of `./vc info`.
 This is Ticket 3. Predict the gain in tokens/s from 32 to 64, and from 64 to
 80.
 ''', '''
-BANDWIDTH = 294e9            # replace with the streaming bandwidth of ./vc info on your card
+import cudalib
+BANDWIDTH = cudalib.read_bandwidth()     # bytes/s of a streaming read on this card, measured now
 CONTEXT = 512
-weights = sum(p.numel() * p.element_size() for p in model.parameters())
+weights = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
 kv_per_token = 2 * 28 * 8 * 128 * 2
 
 steps = {}
 previous = None
 for batch in (1, 8, 32, 64, 80):
-  ms = lab.decode_step_ms(model, batch, CONTEXT)
-  steps[batch] = ms
+  step_ms = lab.decode_step_ms(model, batch, CONTEXT)
+  steps[batch] = step_ms
   kv = batch * CONTEXT * kv_per_token
   floor = (weights + kv) / BANDWIDTH * 1000
-  rate = batch / ms * 1000
+  rate = batch / step_ms * 1000
   gain = f'  x{rate / previous:.2f}' if previous else ''
   previous = rate
-  print(f'batch {batch:3d}: KV {kv / 1e9:4.2f} GB   step {ms:5.1f} ms   floor {floor:5.1f} ms '
-        f'({floor / ms:.0%})   {rate:6.0f} tok/s{gain}')
+  print(f'batch {batch:3d}: KV {kv / 1e9:4.2f} GB   step {step_ms:5.1f} ms   floor {floor:5.1f} ms '
+        f'({floor / step_ms:.0%})   {rate:6.0f} tok/s{gain}')
 '''),
 
     ('d4', '''
@@ -185,7 +186,7 @@ print(f'mean answer {mean:.0f} tokens; the plan: {batches} batches x {mean:.0f} 
 print(f'static batches: {steps_static:,} steps, {steps_static / (batches * mean):.1f}x the plan')
 print(f'useful slots: {useful / (steps_static * 32):.0%}')
 print(f'the same answers sorted by length first: '
-      f'{sum(max(sorted(answers)[s:s + 32]) for s in range(0, len(answers), 32)):,} steps')
+      f'{sum(max(sorted(answers)[batch_start:batch_start + 32]) for batch_start in range(0, len(answers), 32)):,} steps')
 '''),
 
     ('d5', '''
@@ -204,9 +205,9 @@ rng = random.Random(1)
 backlog = [(0.0, min(1024, max(8, int(rng.lognormvariate(math.log(180), 0.6)))), 1024) for _ in range(1000)]
 
 for evict in (True, False):
-  result = lab.serve(backlog, slots=32, step_ms=25, evict_on_stop=evict)   # THE FAULT when False
-  print(f'evict on stop = {evict!s:5s}: backlog done after {result["end"] / 60:5.1f} min, '
-        f'useful tokens {result["useful"] / result["total"]:.0%}')
+  served = lab.serve(backlog, slots=32, step_ms=25, evict_on_stop=evict)   # THE FAULT when False
+  print(f'evict on stop = {evict!s:5s}: backlog done after {served["end"] / 60:5.1f} min, '
+        f'useful tokens {served["useful"] / served["total"]:.0%}')
 '''),
 
     ('d6', '''
@@ -220,11 +221,11 @@ This is Ticket 6. Predict the time to the first token at minutes 5, 15 and
 30.
 ''', '''
 arrivals = lab.poisson_arrivals(rate=12, seconds=30 * 60)
-requests = [(t, 64, 64) for t in arrivals]
-result = lab.serve(requests, slots=16, step_ms=25)
+requests = [(arrival, 64, 64) for arrival in arrivals]
+served = lab.serve(requests, slots=16, step_ms=25)
 for minute in (1, 5, 15, 30):
-  window = [f - a for (a, _, _), f in zip(requests, result['first'])
-            if minute * 60 - 30 <= a < minute * 60]
+  window = [first_token_at - arrival for (arrival, _, _), first_token_at in zip(requests, served['first'])
+            if minute * 60 - 30 <= arrival < minute * 60]
   print(f'arrived at minute {minute:2d}: time to the first token {sum(window) / len(window):6.1f} s')
 print(f'predicted slope: (12 - 10) / 10 = 0.2 s of wait for each second of overload')
 '''),
@@ -246,29 +247,29 @@ long_chat = [{'role': 'user', 'content': 'My name is Priya and I live in Lisbon.
              {'role': 'assistant', 'content': 'Bento is a lovely name for a dog.'},
              {'role': 'user', 'content': 'What is my name, where do I live, and what is my dog called?'}]
 short_chat = [{'role': 'user', 'content': 'Say hello.'}]
-texts = [tokenizer.apply_chat_template(c, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-         for c in (long_chat, short_chat)]
-reference = [lab.greedy_alone(exact, tokenizer, t, 40) for t in texts]
+texts = [tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+         for chat in (long_chat, short_chat)]
+reference = [lab.greedy_alone(exact, tokenizer, text, 40) for text in texts]
 
 PAD = 151645                                                          # <|im_end|>
-token_lists = [tokenizer(t).input_ids for t in texts]
-width = max(len(t) for t in token_lists)
-ids = torch.tensor([[PAD] * (width - len(t)) + t for t in token_lists], device=device)
+token_lists = [tokenizer(text).input_ids for text in texts]
+width = max(len(token_list) for token_list in token_lists)
+ids = torch.tensor([[PAD] * (width - len(token_list)) + token_list for token_list in token_lists], device=device)
 mask = (ids != PAD).long()                                            # THE FAULT
-print('pads:', [width - len(t) for t in token_lists], '  zeros in the mask:', (mask == 0).sum(1).tolist())
+print('pads:', [width - len(token_list) for token_list in token_lists], '  zeros in the mask:', (mask == 0).sum(1).tolist())
 
 @torch.inference_mode()
 def run(ids, mask, max_tokens):
-  out = exact(ids, attention_mask=mask, use_cache=True)
-  cache, rows = out.past_key_values, [[] for _ in ids]
-  next_tokens = out.logits[:, -1].argmax(-1)
+  forward_pass = exact(ids, attention_mask=mask, use_cache=True)
+  cache, rows = forward_pass.past_key_values, [[] for _ in ids]
+  next_tokens = forward_pass.logits[:, -1].argmax(-1)
   for _ in range(max_tokens):
     for row, token in enumerate(next_tokens.tolist()):
       rows[row].append(token)
     mask = torch.cat([mask, mask.new_ones(len(ids), 1)], dim=1)
-    out = exact(next_tokens[:, None], attention_mask=mask, past_key_values=cache, use_cache=True)
-    cache = out.past_key_values
-    next_tokens = out.logits[:, -1].argmax(-1)
+    forward_pass = exact(next_tokens[:, None], attention_mask=mask, past_key_values=cache, use_cache=True)
+    cache = forward_pass.past_key_values
+    next_tokens = forward_pass.logits[:, -1].argmax(-1)
   return rows
 
 rows = run(ids, mask, 40)
@@ -283,19 +284,22 @@ del exact; torch.cuda.empty_cache()
     ('d8', '''
 # Exercise 8: the fastest batch against the promise to each user
 
-Take the step times of Exercise 3. The promise to the users is 25 tokens each
-second for each user, so a step must take at most 40 ms.
+Take the step times of Exercise 3. The promise to the users: each user gets at
+least a third of the speed of a user who is alone on the card. A promise in
+tokens each second would give a different answer on every card; a promise
+relative to batch 1 gives the same kind of answer everywhere.
 
 This is Ticket 8. Predict the largest batch that keeps the promise, and how
 much total throughput the promise costs.
 ''', '''
-PROMISE = 25                                                          # tokens each second for each user
-best = max(steps, key=lambda b: b / steps[b])
-for batch, ms in steps.items():
-  per_user = 1000 / ms
+PROMISE = (1000 / steps[1]) / 3                                       # a third of the speed alone
+print(f'alone: {1000 / steps[1]:.0f} tok/s for the user; the promise: {PROMISE:.0f} tok/s for each user')
+best = max(steps, key=lambda batch_size: batch_size / steps[batch_size])
+for batch, step_ms in steps.items():
+  per_user = 1000 / step_ms
   flag = '' if per_user >= PROMISE else '   <- breaks the promise'
   print(f'batch {batch:3d}: {per_user:5.1f} tok/s for each user, {batch * per_user:6.0f} tok/s in total{flag}')
-kept = max(b for b in steps if 1000 / steps[b] >= PROMISE)
+kept = max(batch_size for batch_size in steps if 1000 / steps[batch_size] >= PROMISE)
 print(f'the fastest batch: {best}. The largest batch that keeps the promise: {kept}, '
       f'which costs {1 - (kept / steps[kept]) / (best / steps[best]):.0%} of the total throughput')
 '''),
@@ -388,37 +392,38 @@ test to keep.
     'd3': '''
 ### What happens
 
-On my card (294 GB/s), with 512 tokens of context:
+The gain in tokens/s from each batch size to the next, in the reference runs
+(two days on one card, before and after a repair that made its memory 30%
+faster):
 
-| batch | KV | step | floor | % of the floor | tok/s | gain |
-|---|---|---|---|---|---|---|
-| 1 | 0.06 GB | 13.1 ms | 11.9 ms | 91% | 77 | |
-| 8 | 0.47 GB | 19.3 ms | 13.3 ms | 69% | 415 | x5.42 |
-| 32 | 1.88 GB | 37.4 ms | 18.1 ms | 48% | 856 | x2.07 |
-| 64 | 3.76 GB | 64.5 ms | 24.5 ms | 38% | 992 | x1.16 |
-| 80 | 4.70 GB | 82.3 ms | 27.7 ms | 34% | 972 | x0.98 |
+| from | to | gain |
+|---|---|---|
+| batch 1 | batch 8 | x5.4 to x5.6 |
+| batch 8 | batch 32 | x2.0 to x2.1 |
+| batch 32 | batch 64 | x1.16 to x1.20 |
+| batch 64 | batch 80 | x0.98 to x1.11 |
 
 The gain falls fast, as Ticket 3 predicts: each sequence adds its own KV
-bytes, and only the weights are shared. From 64 to 80 the throughput did not
-grow at all.
+bytes, and only the weights are shared. From 64 to 80 the throughput hardly
+grew.
 
-But the fraction of the floor falls too, from 91% to 34%. Physics does not
-explain that part. A profile of the step at batch 64 does:
-
-| kernel | GPU time |
-|---|---|
-| `torch.cat` in the KV cache | 30.5 ms (55%) |
-| flash attention | 11.5 ms (21%) |
-| the matmuls | about 10 ms |
+The fraction of the floor falls too: from about 70% to 90% at batch 1 to about
+30% at batch 80. Physics does not explain that part. A profile of the step at
+batch 64 does: `torch.cat` in the KV cache takes about 55% of the GPU time,
+flash attention about 20%, and the matmuls the rest.
 
 HF's `DynamicCache` grows by concatenation. At each step it copies the whole
-cache of each layer to append one token: it reads 3.76 GB and writes 3.76 GB,
-at about 246 GB/s. The attention itself reads the cache at 327 GB/s, close to
-the card.
+cache of each layer to append one token. The attention itself reads the cache
+at close to the bandwidth of the card.
 
 So this ticket has two answers on this code. The shape of the curve is
 physics. The distance from the floor is the cache layout, and that is the
 problem that Part 3 solves: a preallocated, paged cache that never copies.
+
+The fraction at batch 1 depends on the card and even on the day: after the
+repair the memory was 30% faster, and the step at batch 1 only 5% faster,
+because at batch 1 the CPU work of HF's eager step is a large part of it. So
+compare the gains and the shape, not the percentages.
 ''',
     'd4': '''
 ### What happens
@@ -493,21 +498,24 @@ The count of zeros in the mask = pads + turns.
     'd8': '''
 ### What happens
 
-| batch | tok/s for each user | tok/s in total |
+In the reference runs, a user alone gets about 80 tokens/s, so the promise is
+about 27 tokens/s for each user:
+
+| batch | speed for each user, against alone | total, against batch 1 |
 |---|---|---|
-| 1 | 76.5 | 77 |
-| 8 | 51.8 | 415 |
-| 32 | 26.8 | 856 |
-| 64 | 15.5 | 992 |
-| 80 | 12.1 | 972 |
+| 1 | 1.00 | 1x |
+| 8 | 0.68 to 0.71 | 5.4x to 5.6x |
+| 32 | 0.35 to 0.37 | 11x to 12x |
+| 64 | 0.20 to 0.22 | 13x to 14x |
+| 80 | 0.16 to 0.20 | 13x to 16x |
 
-The fastest batch is 64. The largest batch that keeps the promise of 25
-tokens each second is 32. The promise costs 14% of the total throughput.
+The largest batch that keeps the promise is 32. The fastest batch is 64 or 80,
+and the promise costs 14% to 25% of the total throughput.
 
-On this card and this code, 14% is a large price, because the step grows
-fast (Exercise 3). With a cache that does not copy, the step grows more
-slowly, and the same promise allows a larger batch. The rule is the same:
-choose the batch from the promise to each user, then maximize the total.
+That is a large price, because the step of this code grows fast (Exercise 3).
+With a cache that does not copy, the step grows more slowly, and the same
+promise allows a larger batch. The rule is the same: choose the batch from the
+promise to each user, then maximize the total.
 ''',
 }
 
@@ -519,7 +527,7 @@ prompts by length to pad less, and it forgets to put the answers back. Each
 answer is a correct answer, to another prompt: row 0 asked about the cities of
 Japan and got the answer about boiling water. The experiment: compare each
 answer with **every** reference, not only with its own row. A match in
-another row proves a permutation. On my run, row 2 matched by chance, because
+another row proves a permutation. In the reference run, row 2 matched by chance, because
 the sort left it in place. In production this is a data leak: user A gets the
 answer of user B.
 

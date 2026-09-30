@@ -42,9 +42,10 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).cuda().eval()
 device = 'cuda'
 
-BANDWIDTH, FLOPS = 294e9, 49e12          # ./vc info: the streaming bandwidth and the sustained bf16 rate
-WEIGHTS = sum(p.numel() * p.element_size() for p in model.parameters())
-PARAMS = sum(p.numel() for p in model.parameters())
+BANDWIDTH = cudalib.read_bandwidth()                  # bytes/s of a streaming read, measured now
+FLOPS = cudalib.matmul_flops(heat_seconds=5)          # sustained bf16 FLOP/s, measured now
+WEIGHTS = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
+PARAMS = sum(parameter.numel() for parameter in model.parameters())
 KV = 2 * 28 * 8 * 128 * 2
 def floor(computed, context):
   return lab.floor_ms(computed, context, WEIGHTS, PARAMS, KV, BANDWIDTH, FLOPS)
@@ -90,12 +91,12 @@ for prefix_cache in (False, True):
   start = time.perf_counter()
   run(prefix_cache)
   torch.cuda.synchronize()
-  ms = (time.perf_counter() - start) * 1000
+  elapsed_ms = (time.perf_counter() - start) * 1000
   every_token = sum(floor(S + q.shape[1], 0) for q in question_ids)                  # THE FAULT
   computed = ((floor(S, 0) if prefix_cache else 0)
               + sum(floor(q.shape[1], S) if prefix_cache else floor(S + q.shape[1], 0) for q in question_ids))
-  print(f'prefix cache {str(prefix_cache):5s}: {ms:6.0f} ms   floor of every prompt token / time = '
-        f'{every_token / ms:5.0%}   floor of the computed tokens / time = {computed / ms:5.0%}')
+  print(f'prefix cache {str(prefix_cache):5s}: {elapsed_ms:6.0f} ms   floor of every prompt token / time = '
+        f'{every_token / elapsed_ms:5.0%}   floor of the computed tokens / time = {computed / elapsed_ms:5.0%}')
 '''),
 
     ('d2', '''
@@ -115,10 +116,10 @@ def step_ms(batch, context):
   model(torch.randint(0, 1000, (batch, context), device=device), past_key_values=cache,
         use_cache=True, logits_to_keep=1)
   token = torch.randint(0, 1000, (batch, 1), device=device)
-  ms = lab.ms_per_call(lambda: model(token, past_key_values=cache, use_cache=True), iters=20)
+  decode_ms = lab.ms_per_call(lambda: model(token, past_key_values=cache, use_cache=True), iters=20)
   del cache
   torch.cuda.empty_cache()
-  return ms
+  return decode_ms
 
 short, long = step_ms(8, 256), step_ms(8, 4096)
 weight_part, kv_part = short, long - short
@@ -136,24 +137,24 @@ CPU work: the scheduler, the detokenizer. Time three loops: no CPU work, the
 CPU work after each step (in series, as in Ticket 3), and the CPU work for
 token n while the GPU computes token n + 1.
 
-Predict the ms of each step.
+Predict how much the 4 ms of CPU work adds to each step, in each loop.
 ''', '''
-def cpu_work(ms=4.0):                                                  # busy, like Python work
-  end = time.perf_counter() + ms / 1000
+def cpu_work(busy_ms=4.0):                                                  # busy, like Python work
+  end = time.perf_counter() + busy_ms / 1000
   while time.perf_counter() < end:
     pass
 
 @torch.inference_mode()
 def loop(mode, tokens=60):
   ids = tokenizer('The three largest cities in Japan are', return_tensors='pt').input_ids.to(device)
-  out = model(ids, use_cache=True)
-  cache, token = out.past_key_values, out.logits[:, -1:].argmax(-1)
+  forward_pass = model(ids, use_cache=True)
+  cache, token = forward_pass.past_key_values, forward_pass.logits[:, -1:].argmax(-1)
   host = torch.empty(1, 1, dtype=torch.long, pin_memory=True)
   torch.cuda.synchronize()
   start = time.perf_counter()
   for _ in range(tokens):
-    out = model(token, past_key_values=cache, use_cache=True)          # the GPU starts at once
-    token = out.logits[:, -1:].argmax(-1)
+    forward_pass = model(token, past_key_values=cache, use_cache=True)          # the GPU starts at once
+    token = forward_pass.logits[:, -1:].argmax(-1)
     if mode == 'series':
       int(token)                                                       # wait for the GPU ...
       cpu_work()                                                       # THE FAULT: ... then work
@@ -180,8 +181,8 @@ Predict the free blocks at the end.
 pool = lab.Pool(8000)
 rng = random.Random(0)
 lengths = {seq: rng.randint(20, 300) for seq in range(300)}
-for seq, n in lengths.items():
-  pool.grow(seq, n)
+for seq, num_tokens in lengths.items():
+  pool.grow(seq, num_tokens)
 
 def preempt(seq):
   table = pool.tables.pop(seq)
@@ -259,10 +260,10 @@ void run(torch::Tensor out, int64_t width, int64_t repeats) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }
 """
 kernel = cudalib.build_source('inc8_banks', KERNEL)
-out = torch.empty(4096 * 32, device=device)
+kernel_output = torch.empty(4096 * 32, device=device)
 times = {}
 for width in (128, 129):                                               # 128: THE FAULT
-  times[width] = lab.ms_per_call(lambda: kernel.run(out, width, 64), iters=10)
+  times[width] = lab.ms_per_call(lambda: kernel.run(kernel_output, width, 64), iters=10)
   print(f'rows of {width} floats: {times[width]:6.2f} ms, the bank of column 0 for the 32 lanes: '
         f'{len({(lane * width) % 32 for lane in range(32)})} different bank(s)')
 print(f'ratio: {times[128] / times[129]:.1f}x')
@@ -338,7 +339,7 @@ from mystery import ratio_a, ratio_b, ratio_c
 
 card = dict(weight_bytes=WEIGHTS, params=PARAMS, kv_per_token=KV, bandwidth=BANDWIDTH, flops=FLOPS)
 simple = [dict(computed=8, cached=0, context=8 * 16, ms=13.0) for _ in range(100)]
-true = sum(floor(s['computed'], s['context']) for s in simple) / sum(s['ms'] for s in simple)
+true = sum(floor(step['computed'], step['context']) for step in simple) / sum(step['ms'] for step in simple)
 print(f'true {true:.3f}   a {ratio_a(simple, **card):.3f}   b {ratio_b(simple, **card):.3f}   c {ratio_c(simple, **card):.3f}')
 '''
 
@@ -353,53 +354,58 @@ SOLUTIONS = {
     'd1': '''
 ### What happens
 
-| | time | floor of every prompt token / time | floor of the computed tokens / time |
+In the reference runs (one card, before and after a repair of its cooling):
+
+| | time, against no cache | floor of every prompt token / time | floor of the computed tokens / time |
 |---|---|---|---|
-| no prefix cache | 1,852 ms | 81% | 81% |
-| prefix cache | 432 ms | **349%** | 67% |
+| no prefix cache | 1.0x | 81% to 90% | 81% to 90% |
+| prefix cache | 4.0x to 4.3x faster | **349% to 365%** | 64% to 67% |
 
 Without the cache the two floors are the same, because the engine computes
 every prompt token. With the cache, the engine computes the system prompt
-once, and the benchmark still charges for it 16 times. The result is 349% of
-the roof: impossible, so the measurement is broken.
+once, and the benchmark still charges for it 16 times. The result is more than
+three times the roof: impossible, so the measurement is broken.
 
-The honest ratio **falls** to 67% with the cache. The engine does 4.3x less
-work in total, but each step now has only 20 tokens, and a step of 20 tokens
-reads all the weights for very little compute. The cache is a large win in
-time, and a smaller efficiency of the steps that remain. Both are true.
+The honest ratio **falls** with the cache. The engine does about 4x less work
+in total, but each step now has only 20 tokens, and a step of 20 tokens reads
+all the weights for very little compute. The cache is a large win in time,
+and a smaller efficiency of the steps that remain. Both are true, on any card.
 ''',
     'd2': '''
 ### What happens
 
-On my card, batch 8:
+Batch 8, in the reference runs, the same on both days:
 
-- 17.4 ms at 256 tokens of context, 69.5 ms at 4,096.
-- At 4,096, the weights are about 17.4 ms (25%) and the KV cache about 52.0 ms
-  (75%).
+- At 4,096 tokens of context, the weights are about **25%** of the step and
+  the KV cache about **75%**. (The step at 256 tokens is almost all weights,
+  and the difference is the KV.)
 - int8 weights would give **1.14x**. An FP8 KV cache would give **1.60x**.
-  Both would give 2.00x.
+  Both would give **2.00x**.
 
-This is Ticket 2 on a smaller card: at long context, the KV cache is most of
-the bytes, and the optimization of the weights targets the smaller term.
+These ratios come from bytes, so they hold on any card with the same model and
+the same context. This is Ticket 2: at long context the KV cache is most of the
+bytes, and the optimization of the weights targets the smaller term.
 ''',
     'd3': '''
 ### What happens
 
-| CPU work of 4 ms | ms per step |
+The cost of 4 ms of CPU work for each step, in the reference runs:
+
+| CPU work | the step grows by |
 |---|---|
-| none | 13.7 |
-| in series | 20.3 |
-| overlapped | 14.9 |
+| in series | 1.6x to 1.65x the CPU work |
+| overlapped | 0.3x to 0.4x the CPU work |
 
 In series, each step waits for the GPU (`int(token)`), and then the GPU waits
 for the CPU. The step grows by the whole CPU work, plus the cost of the
 synchronization. Overlapped, the CPU works while the GPU computes the next
-step, and the GPU never waits: the cost falls from 6.6 ms to 1.2 ms. This is
-the gap of the Nsight Systems timeline of Ticket 3, and the reason that vLLM V1
-schedules step n + 1 while step n runs.
+step, and the GPU hardly waits. This is the gap of the Nsight Systems timeline
+of Ticket 3, and the reason that vLLM V1 schedules step n + 1 while step n
+runs.
 
 The overlap works only because the next input stays on the GPU. The loop
-never reads the token on the CPU before it launches the next step.
+never reads the token on the CPU before it launches the next step. How much
+of the work hides depends on which side is slower (Practicum I).
 ''',
     'd4': '''
 ### What happens
@@ -427,14 +433,15 @@ and never with `CUDA_LAUNCH_BLOCKING=1`, which makes every launch wait.
     'd6': '''
 ### What happens
 
-- Rows of 128 floats: **8.29 ms**. The 32 lanes read column 0 from 1 bank.
-- Rows of 129 floats: **0.53 ms**. The 32 lanes read from 32 banks.
-- The ratio is **15.6x**.
+- Rows of 128 floats: the 32 lanes read column 0 from **1 bank**.
+- Rows of 129 floats: the 32 lanes read from **32 banks**.
+- Rows of 128 are **15.6x to 16.7x slower** in the reference runs.
 
 With a row of 128 floats, `(lane x 128 + column) mod 32` is the same for every
 lane, so the 32 reads of a warp go through one bank, one after the other. One
 extra float for each row moves each lane to its own bank. The arithmetic and
-the result do not change.
+the result do not change. The ratio is close to the 32 serial reads that the
+bank arithmetic predicts, less the work that does not depend on the banks.
 ''',
     'd7': '''
 ### What happens
@@ -494,7 +501,7 @@ FINGERPRINTS_SOL = '''
 |---|---|---|---|---|
 | a floor that counts the prefix cache hits | no | with prefix hits | 349% of the roof | the ratio must stay below 100% |
 | int8 weights at long context | no | long context | 1.14x where 2x was hoped | the byte split of the real step |
-| CPU work in series with the GPU | no | always | 20.3 ms against 13.7 | the GPU idle time between steps |
+| CPU work in series with the GPU | no | always | the step grows by 1.6x the CPU work | the GPU idle time between steps |
 | preemption keeps the last block | no | after preemptions | a loss equal to the preemptions | used + free = total at idle |
 | one pinned staging buffer, reused at once | no | under load only | the next step's table | an event before each reuse |
 | a stride of 128 floats in shared memory | no | always | 15.6x slower | the bank-conflict counter |

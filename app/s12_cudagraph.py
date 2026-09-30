@@ -87,3 +87,49 @@ class CUDAGraphRunner:
 
     def run_eager(self, *inputs):
         raise NotImplementedError
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: one replay of your captured graph, for a batch of n
+    rows.
+
+    GIVEN
+        step_at(n)
+            -> a function with no arguments. It runs one
+            replay of your captured graph, for a batch of n
+            rows.
+        n
+            the size to measure at
+        facts
+            facts.bandwidth_bytes_per_s   the read bandwidth of this card
+            facts.weight_bytes   the bytes of the weights of the captured layers
+        cudalib.bench_ms(function)
+            -> the milliseconds of one call: warmed up, waited for, repeated
+
+    ASKED: one line for each number
+        graph_replay_floor_ms
+            predict: which bytes must one replay read, at the
+            least? Use facts.weight_bytes.
+        graph_replay_measured_ms
+            measure: the time of step_at(n)
+        graph_replay_measured_over_floor
+            divide
+        graph_replay_ms_2n_over_n
+            double: the time at 2n over the time at n
+    """
+    import cudalib
+
+    graph_replay_floor_ms = ...
+    graph_replay_measured_ms = ...
+    graph_replay_measured_over_floor = ...
+    graph_replay_ms_2n_over_n = ...
+    return {
+        "graph_replay_floor_ms": graph_replay_floor_ms,
+        "graph_replay_measured_ms": graph_replay_measured_ms,
+        "graph_replay_measured_over_floor": graph_replay_measured_over_floor,
+        "graph_replay_ms_2n_over_n": graph_replay_ms_2n_over_n,
+    }

@@ -1,7 +1,7 @@
 """Three batched loops. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part2_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 9.
+part2_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 9.
 
 Each loop takes a list of prompts and returns one list of token ids for each
 prompt, in the order of the prompts.

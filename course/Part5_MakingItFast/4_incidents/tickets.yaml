@@ -150,7 +150,7 @@ tickets:
     code: |
       buckets = [1, 2, 4, 8, 16, 32]
       for batch in (3, 5, 6, 7, 9, 12, 1, 2, 4, 8):
-          bucket = next(b for b in buckets if b >= batch)
+          bucket = next(bucket_size for bucket_size in buckets if bucket_size >= batch)
           print(f'batch {batch:2d} -> bucket {bucket:2d}: {bucket - batch} padding rows')
 
   - id: "5.3"
@@ -255,8 +255,8 @@ tickets:
       **The noise.** The size of the vocabulary. A sort of 128 x 151,936 values
       on the GPU takes about 1 ms. The size is not the problem; the loop is.
     code: |
-      for batch, ms in [(8, 2.6), (64, 20.5), (128, 41)]:
-          print(f'batch {batch:3d}: {ms / batch:.2f} ms per request')
+      for batch, step_ms in [(8, 2.6), (64, 20.5), (128, 41)]:
+          print(f'batch {batch:3d}: {step_ms / batch:.2f} ms per request')
 
   - id: "5.5"
     title: "Ticket 5: exclamation marks when the model is sure"

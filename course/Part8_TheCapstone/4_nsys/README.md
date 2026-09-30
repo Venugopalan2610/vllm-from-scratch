@@ -4,7 +4,7 @@
 
 ## The notebook
 
-Open [`part8_nsys_1_CCreadTheTimeline_helper.ipynb`](part8_nsys_1_CCreadTheTimeline_helper.ipynb).
+Open [`part8_nsys_1_CCreadTheTimeline_challenge.ipynb`](part8_nsys_1_CCreadTheTimeline_challenge.ipynb).
 It profiles a real decode loop of Qwen3-1.7B with Nsight Systems (`nsys`), and
 you read the trace with plain SQL. You find which side limits a step, the CPU
 or the GPU, and you predict what CPU work costs in two loops: one that waits

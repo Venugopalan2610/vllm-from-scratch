@@ -1,7 +1,7 @@
 """Three schedulers. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part4_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 8.
+part4_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 8.
 
 Each scheduler takes the arguments of lab.Scheduler.
 """

@@ -4,10 +4,27 @@ Stages: stages 21-28, 24b.
 
 Open the sections in the order of their numbers. In each section, open the
 notebooks in the order of their numbers. The last notebook of a section is
-its challenge (`CC..._helper`). Its solution is in `solutions/`.
+its challenge (`CC..._challenge`). Its solution is in `solutions/`.
 
 Stages 24 to 27 put quantization, speculative decoding and guided decoding
 into the engine. The Part 7 notebooks teach those features.
+
+## Start here: a ticket that you cannot solve yet
+
+**Ticket 8.3: the gaps between the steps.** Reported by a student with a profile:
+
+> My kernels reach 82% of the floor. The engine reaches only 59%. Where
+> does the rest go?
+
+You do not have the tools for this yet. Keep it in mind while you work. Each
+section of this Part gives you a piece of the answer. At the end,
+[`7_incidents/`](7_incidents/) asks you to find the cause and prove it with a
+number.
+
+First, one guess: which layer of the engine would you look at?
+([the map](../../docs/MAP.md))
+
+## The sections
 
 | | |
 |---|---|

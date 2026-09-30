@@ -4,7 +4,24 @@ Stages: stages 15-16.
 
 Open the sections in the order of their numbers. In each section, open the
 notebooks in the order of their numbers. The last notebook of a section is
-its challenge (`CC..._helper`). Its solution is in `solutions/`.
+its challenge (`CC..._challenge`). Its solution is in `solutions/`.
+
+## Start here: a ticket that you cannot solve yet
+
+**Ticket 6.3: the dashboard says 80 ms, the users say 3 seconds.** Reported by the product team:
+
+> The TTFT on the dashboard is 80 ms at the p50. Users say that they wait
+> about 3 seconds for the first word.
+
+You do not have the tools for this yet. Keep it in mind while you work. Each
+section of this Part gives you a piece of the answer. At the end,
+[`3_incidents/`](3_incidents/) asks you to find the cause and prove it with a
+number.
+
+First, one guess: which layer of the engine would you look at?
+([the map](../../docs/MAP.md))
+
+## The sections
 
 | | |
 |---|---|

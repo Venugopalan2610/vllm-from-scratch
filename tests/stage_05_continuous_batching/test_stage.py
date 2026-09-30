@@ -188,3 +188,33 @@ def test_beats_static_batching_on_skewed_output_lengths(hf, device):
     print("  it, because each admission pads and copies the KV cache of the")
     print("  whole batch again. Stages 06 to 09 replace that copy with a")
     print("  pointer.\033[0m")
+
+
+def test_the_four_lines(hf, device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s05_continuous import four_lines
+    from tests.helpers import check_four_lines
+
+    model, _ = hf
+    config = model.config
+    weight_bytes = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    kv_bytes_per_token = 2 * config.num_hidden_layers * config.num_key_value_heads * head_dim * 2
+    context_len = 512
+    facts = cudalib.card_facts(weight_bytes=weight_bytes, kv_bytes_per_token=kv_bytes_per_token,
+                               context_len=context_len)
+    floor_ms = (weight_bytes + 8 * context_len * kv_bytes_per_token) / facts.bandwidth_bytes_per_s * 1e3
+
+    @torch.inference_mode()
+    def step_at(num_rows):
+        prompt_ids = torch.randint(0, 1000, (num_rows, context_len), device=device)
+        cache = model(prompt_ids, use_cache=True).past_key_values
+        next_ids = torch.randint(0, 1000, (num_rows, 1), device=device)
+        return torch.inference_mode()(lambda: model(next_ids, past_key_values=cache, use_cache=True))
+
+    check_four_lines(four_lines, "engine_step", step_at, 8, facts, floor_ms,
+                     "the weights are read one time for all the rows, and the KV cache grows with them, so the doubling is above 1")

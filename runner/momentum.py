@@ -95,8 +95,8 @@ def days_away(progress, today=None):
 
 
 def notebooks_for(arc_id):
-    """The notebook folder of an arc: arc A2 is course Part 3."""
-    part_number = int(arc_id.lstrip("A")) + 1
+    """The notebook folder of an arc: arc A3 is course Part 3."""
+    part_number = int(arc_id.lstrip("A"))
     folders = sorted((ROOT / "course").glob(f"Part{part_number}_*"))
     return folders[0].relative_to(ROOT) if folders else None
 

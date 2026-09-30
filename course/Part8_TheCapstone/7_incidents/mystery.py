@@ -1,7 +1,7 @@
 """Three benchmarks of the ratio floor / time. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part8_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 8.
+part8_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 8.
 
 A step is a dict: computed, cached, context, ms. The card is given as
 weight_bytes, params, kv_per_token, bandwidth and flops.

@@ -54,3 +54,48 @@ def padding_waste(output_lens: list[int]) -> float:
     Return 0.0 for an empty list or for lengths that are all zero.
     """
     raise NotImplementedError("stage 04: implement padding_waste")
+
+
+# ---------------------------------------------------------------- the four lines
+
+
+def four_lines(step_at, n, facts):
+    """The four moves of docs/METHOD.md: predict, measure, divide, double.
+    The subject: one decode step of a batch of n rows.
+
+    GIVEN
+        step_at(n)
+            -> a function with no arguments. It runs one
+            decode step of a batch of n rows.
+        n
+            the size to measure at
+        facts
+            facts.bandwidth_bytes_per_s   the read bandwidth of this card
+            facts.weight_bytes   the bytes of every weight of the model
+        cudalib.bench_ms(function)
+            -> the milliseconds of one call: warmed up, waited for, repeated
+
+    ASKED: one line for each number
+        batch_step_floor_ms
+            predict: all the weights, one time, for all the rows
+            together: facts.weight_bytes /
+            facts.bandwidth_bytes_per_s, in ms
+        batch_step_measured_ms
+            measure: the time of step_at(n)
+        batch_step_measured_over_floor
+            divide
+        batch_step_ms_2n_over_n
+            double: the time at 2n over the time at n
+    """
+    import cudalib
+
+    batch_step_floor_ms = ...
+    batch_step_measured_ms = ...
+    batch_step_measured_over_floor = ...
+    batch_step_ms_2n_over_n = ...
+    return {
+        "batch_step_floor_ms": batch_step_floor_ms,
+        "batch_step_measured_ms": batch_step_measured_ms,
+        "batch_step_measured_over_floor": batch_step_measured_over_floor,
+        "batch_step_ms_2n_over_n": batch_step_ms_2n_over_n,
+    }

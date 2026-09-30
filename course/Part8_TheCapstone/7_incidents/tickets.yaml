@@ -338,7 +338,7 @@ tickets:
       load of a warp takes one transaction.
     code: |
       for width in (128, 129):
-          banks = {(r * width + 5) % 32 for r in range(32)}
+          banks = {(row * width + 5) % 32 for row in range(32)}
           print(f'row width {width}: the 32 threads touch {len(banks)} banks')
 
   - id: "8.7"

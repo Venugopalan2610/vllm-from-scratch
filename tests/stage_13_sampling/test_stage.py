@@ -181,3 +181,27 @@ def test_min_p_filters_low_probability_relative_to_max(device):
     assert kept_005 == 3
     kept_1 = _num_kept(apply_min_p(logits.clone(), torch.tensor([1.0], device=device)))
     assert kept_1 == 1
+
+
+def test_the_four_lines(device):
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import torch
+
+    import cudalib
+    from app.s13_sampler import four_lines
+    from tests.helpers import check_four_lines
+
+    from app.s13_sampler import SamplingParams, sample
+
+    vocab_size = 151_936
+    facts = cudalib.card_facts(vocab_size=vocab_size, logit_bytes=4)
+    floor_ms = 32 * vocab_size * 4 / facts.bandwidth_bytes_per_s * 1e3
+
+    def step_at(num_rows):
+        logits = torch.randn(num_rows, vocab_size, device=device)
+        params = [SamplingParams(temperature=0.8, top_p=0.9, seed=row) for row in range(num_rows)]
+        return lambda: sample(logits, params)
+
+    check_four_lines(four_lines, "sampler_call", step_at, 32, facts, floor_ms,
+                     "about the passes over the logits, or more if your sampler sorts them")

@@ -8,6 +8,7 @@ the arch flags and the bandwidth arithmetic are not the lesson.
 """
 
 from cudalib.build import CACHE, ROOT, build, build_source, module_path
+from cudalib.facts import Facts, card_facts
 from cudalib.probe import (
     achieved_bandwidth,
     bench_ms,
@@ -29,4 +30,5 @@ __all__ = [
     "have_nvcc", "peak_bandwidth", "read_bandwidth", "matmul_flops",
     "achieved_bandwidth", "bench_ms", "compare_ms", "copy_bandwidth",
     "kernel_stats", "occupancy", "ncu_metrics", "racecheck", "run_ncu",
+    "Facts", "card_facts",
 ]

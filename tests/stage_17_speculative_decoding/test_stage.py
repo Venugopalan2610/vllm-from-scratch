@@ -241,3 +241,31 @@ def test_tree_greedy_verification_finds_longest_valid_path():
     emitted, num_accepted = verify_tree_greedy(logits, tokens, parents)
     assert num_accepted == 3
     assert emitted == [10, 20, 40, 50]
+
+
+def test_the_four_lines():
+    """docs/METHOD.md: predict the floor, measure honestly, divide, double.
+    The same four lines as in every stage. Only the subject changes."""
+    import math
+    import random
+
+    from cudalib import Facts
+    from app.s17_speculative import four_lines
+    from tests.helpers import check_four_count_lines
+
+    facts = Facts(acceptance_rate=0.6, num_draft=4)
+
+    def count_at(num_passes):
+        rng = random.Random(0)
+        produced = 0
+        for _ in range(num_passes):
+            accepted = 0
+            while accepted < facts.num_draft and rng.random() < facts.acceptance_rate:
+                accepted += 1
+            produced += accepted + 1
+        return produced
+
+    predicted = 1000 * (1 - facts.acceptance_rate ** (facts.num_draft + 1)) / (1 - facts.acceptance_rate)
+
+    check_four_count_lines(four_lines, "tokens", count_at, 1000, facts, predicted,
+                           "near 1: the formula predicts what the drafts give")

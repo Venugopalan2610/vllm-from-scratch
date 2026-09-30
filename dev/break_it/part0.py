@@ -2,7 +2,7 @@
 
 PART = 0
 NAME = 'From a Program to a Model'
-FOLDER = 'course/Part0_FromAProgramToAModel/4_incidents'
+FOLDER = 'course/Part0_FromAProgramToAModel/5_incidents'
 IMPORTS = '''import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer'''
 
@@ -162,9 +162,12 @@ tensor that fits in L2 does not measure the memory.
 
 Predict the fractions: of the compute peak, and of the copy bandwidth.
 ''', '''
-PEAK_TFLOPS, PEAK_GBS = 49, 294        # the sustained numbers of ./vc info on your card
+import cudalib
+PEAK_GBS = cudalib.peak_bandwidth(fresh=True)                   # a streaming copy, measured now
+PEAK_TFLOPS = cudalib.matmul_flops(heat_seconds=5) / 1e12      # sustained bf16, after 5 s of heat
+print(f'this card, now: {PEAK_GBS:.0f} GB/s, {PEAK_TFLOPS:.0f} TFLOP/s sustained')
 
-x = torch.randn(32768, 2048, dtype=torch.bfloat16, device=device)
+activations = torch.randn(32768, 2048, dtype=torch.bfloat16, device=device)
 norm = model.model.norm
 compiled = torch.compile(norm)
 
@@ -179,13 +182,13 @@ def ms_per_call(fn, iters=50):
   torch.cuda.synchronize()
   return (time.perf_counter() - start) / iters * 1000
 
-bytes_moved = 2 * x.numel() * x.element_size()           # read x, write y
-flop = 4 * x.numel()
-for name, fn in [('RMSNorm, HF eager', lambda: norm(x)), ('RMSNorm, compiled', lambda: compiled(x)),
-                 ('clone            ', lambda: x.clone())]:
-  ms = ms_per_call(fn)
-  print(f'{name} {ms:.3f} ms   {flop / ms / 1e9:6.3f} TFLOP/s = {flop / ms / 1e9 / PEAK_TFLOPS:.2%} of peak   '
-        f'{bytes_moved / ms / 1e6:5.0f} GB/s = {bytes_moved / ms / 1e6 / PEAK_GBS:.0%} of ./vc info')
+bytes_moved = 2 * activations.numel() * activations.element_size()           # read x, write y
+flop = 4 * activations.numel()
+for name, fn in [('RMSNorm, HF eager', lambda: norm(activations)), ('RMSNorm, compiled', lambda: compiled(activations)),
+                 ('clone            ', lambda: activations.clone())]:
+  call_ms = ms_per_call(fn)
+  print(f'{name} {call_ms:.3f} ms   {flop / call_ms / 1e9:6.3f} TFLOP/s = {flop / call_ms / 1e9 / PEAK_TFLOPS:.2%} of peak   '
+        f'{bytes_moved / call_ms / 1e6:5.0f} GB/s = {bytes_moved / call_ms / 1e6 / PEAK_GBS:.0%} of the copy bandwidth')
 '''),
 
     ('d5', '''
@@ -197,8 +200,8 @@ the bytes of the weights, and the bytes of one MLP matrix.
 
 Predict the two totals before you run. The model has 1.72 B parameters.
 ''', '''
-def model_bytes(m):
-  return sum(p.numel() * p.element_size() for p in m.parameters())
+def model_bytes(counted_model):
+  return sum(parameter.numel() * parameter.element_size() for parameter in counted_model.parameters())
 
 for dtype in (torch.float32, torch.bfloat16):                       # float32: THE FAULT of the old default
   cpu_model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=dtype)
@@ -223,8 +226,8 @@ print('generation_config:', {k: getattr(model.generation_config, k)
                              for k in ('do_sample', 'temperature', 'top_k', 'top_p')})
 
 def run(**kwargs):
-  out = model.generate(**ids, max_new_tokens=TOKENS, **kwargs)        # THE FAULT: no do_sample
-  return out[0, ids.input_ids.shape[1]:].tolist()
+  generated = model.generate(**ids, max_new_tokens=TOKENS, **kwargs)        # THE FAULT: no do_sample
+  return generated[0, ids.input_ids.shape[1]:].tolist()
 
 plain = [run() for _ in range(3)]
 seeded = []
@@ -233,8 +236,8 @@ for _ in range(3):
   seeded.append(run())
 greedy = run(do_sample=False)
 for name, group in [('no arguments', plain), ('seed 0 each time', seeded)]:
-  print(f'{name}: {len({tuple(g) for g in group})} different answers of 3; first differences with the reference:',
-        [lab.first_difference(g, expected) for g in group])
+  print(f'{name}: {len({tuple(answer) for answer in group})} different answers of 3; first differences with the reference:',
+        [lab.first_difference(answer, expected) for answer in group])
 report('do_sample=False', greedy, expected)
 '''),
 
@@ -252,11 +255,11 @@ for prompt in ['Hello', 'The three largest cities in Japan are',
   ids = tokenizer(prompt, return_tensors='pt').to(device)
   with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
-    out = model.generate(**ids, do_sample=False)                      # THE FAULT: no max_new_tokens
+    generated = model.generate(**ids, do_sample=False)                      # THE FAULT: no max_new_tokens
   prompt_len = ids.input_ids.shape[1]
-  new = out.shape[1] - prompt_len
+  new = generated.shape[1] - prompt_len
   print(f'prompt {prompt_len:2d} + new {new:2d} = {prompt_len + new}')
-print('warnings:', {str(w.message)[:90] for w in caught})
+print('warnings:', {str(warning.message)[:90] for warning in caught})
 '''),
 
     ('d8', '''
@@ -273,9 +276,9 @@ chat = tokenizer.apply_chat_template([{'role': 'user', 'content': question}],
                                      return_tensors='pt', return_dict=True).input_ids.to(device)
 stop = set(model.generation_config.eos_token_id)
 for name, ids in [('raw text', raw), ('chat template', chat)]:
-  count = (ids == 151644).sum().item()
+  num_im_start = (ids == 151644).sum().item()
   answer = lab.greedy_ids(model, ids, 40, stop)
-  print(f'{name}: {ids.shape[1]} prompt tokens, <|im_start|> appears {count} times')
+  print(f'{name}: {ids.shape[1]} prompt tokens, <|im_start|> appears {num_im_start} times')
   print('   ', repr(tokenizer.decode(answer)))
 '''),
 
@@ -311,13 +314,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("launch", &launch); }
 """
 extension = cudalib.build_source('inc0_vector_add', KERNEL)
 
-for n in (1024, 4096, 65536, 1000, 5000, 1009, 100):
-  a, b = torch.rand(n, device=device), torch.rand(n, device=device)
-  out = torch.zeros(n, device=device)
-  extension.launch(a, b, out)
-  wrong = (out != a + b).nonzero().flatten()
+for num_values in (1024, 4096, 65536, 1000, 5000, 1009, 100):
+  first, second = torch.rand(num_values, device=device), torch.rand(num_values, device=device)
+  sums = torch.zeros(num_values, device=device)
+  extension.launch(first, second, sums)
+  wrong = (sums != first + second).nonzero().flatten()
   where = f'{wrong[0].item()} to {wrong[-1].item()}' if len(wrong) else '-'
-  print(f'n = {n:6d}: {len(wrong):4d} wrong   ({where})')
+  print(f'n = {num_values:6d}: {len(wrong):4d} wrong   ({where})')
 '''),
 ]
 
@@ -362,7 +365,7 @@ SOLUTIONS = {
     'd1': '''
 ### What happens
 
-- **Crash?** No. On my run the decode did not raise either, because the model
+- **Crash?** No. In the reference run the decode did not raise either, because the model
   wrote only ids below 32,000 (the largest was 16,252).
 - **When?** At token 0.
 - **What?** The Llama-2 ids mean other pieces to Qwen3. The model read
@@ -388,7 +391,7 @@ include a special token in that text.
 - **When?** At token 0, for **both** prompts.
 - **What?** `'!!!!!!!!!!!!!!!'`, token 0 of the vocabulary, over and over.
 
-The surprise is the short prompt. On my run the largest score was 31.5 in
+The surprise is the short prompt. In the reference run the largest score was 31.5 in
 layer 0 for a prompt of 7 tokens, and 32.5 for 344 tokens. Both are far above
 11.09, so `exp()` overflowed for both. Large scores are normal in a real
 model. The first layers often put one very large score on the first token.
@@ -424,24 +427,23 @@ the whole model against HF.
     'd4': '''
 ### What happens
 
-On my card (RTX 4080 Laptop GPU), in two runs on two days:
+The ratios, in the reference runs (two days, one card whose memory ran 30%
+faster on the second day, after a repair of its cooling):
 
-| | run 1 | run 2 | TFLOP/s (run 2) | % of the compute peak |
-|---|---|---|---|---|
-| RMSNorm, HF eager | 7.31 ms, 37 GB/s | 6.26 ms, 43 GB/s | 0.043 | 0.09% |
-| RMSNorm, compiled | 0.92 ms, 293 GB/s | 0.71 ms, 380 GB/s | 0.380 | 0.78% |
-| clone | 0.88 ms, 305 GB/s | 0.71 ms, 380 GB/s | 0.380 | 0.78% |
+| | time against a copy | % of the compute peak |
+|---|---|---|
+| RMSNorm, HF eager | 8.3x to 8.9x slower | below 0.1% |
+| RMSNorm, compiled | 1.00x to 1.05x | about 0.5% |
+| clone | 1.00x | about 0.5% |
 
 On the FLOP ruler, all three look terrible, and the ruler cannot tell them
-apart. On the GB/s ruler, the compiled norm is as fast as a copy in both runs:
+apart. On the ruler of a copy, the compiled norm is as fast as a copy:
 nothing is left to win. The **eager** norm is 8 to 9 times slower than a copy.
 That is a real problem, and only the right ruler shows it.
 
-The absolute numbers moved by 25% between the two runs, and the copy passed the
-294 GB/s that `./vc info` measured on another day. A laptop changes its
-memory clock with its temperature and its power mode. That is why the exercise
-times a copy **in the same run**: the ratio to the copy is stable, and the
-absolute number is not.
+Every absolute number of these runs moved by about 30% between the two days,
+and the ratios did not. That is why the exercise times a copy **in the same
+run**, and why the conclusion is the ratio.
 
 Why the eager norm is slow: it runs five separate operations (convert to
 float32, square, mean, multiply, convert back, multiply by the weight). Each
@@ -449,9 +451,9 @@ one reads and writes the whole tensor, some in float32. Its time says that it
 moves about 8 times the bytes of one read and one write. `torch.compile` fuses them into one
 kernel.
 
-My first version of this drill used 8,192 tokens, 33.5 MB. That fits in the
-50 MB L2 cache of this card, and the copy then ran at 139% of `./vc info`.
-A benchmark that fits in the cache measures the cache.
+A first version of this drill used 8,192 tokens, 33.5 MB. That fits in the
+50 MB L2 cache of the card, and the copy then ran at 1.4x the streaming
+bandwidth of the card. A benchmark that fits in the cache measures the cache.
 
 **The fingerprint.** A tiny fraction of the compute peak means nothing for a
 memory-bound kernel. Measure GB/s, and compare with a copy.
@@ -471,11 +473,13 @@ twice the size of a known matrix.
 ### What happens
 
 - **Crash?** No.
-- **What?** The config of Qwen3 says `do_sample: True`, temperature 0.6. On
-  my run, the three plain calls gave 3 different answers. They left the
-  reference at tokens 7, 14 and 16.
-- With `torch.manual_seed(0)` before each call, the three answers were
-  **identical** to each other, and all three left the reference at token 14.
+- **What?** The config of Qwen3 says `do_sample: True`, temperature 0.6. The
+  three plain calls give different answers, and they leave the reference at
+  different tokens. By chance one of them can match the reference for all 30
+  tokens.
+- With `torch.manual_seed(0)` before each call, the three answers are
+  **identical** to each other, and all three leave the reference at the same
+  token.
   A fixed seed makes a sampler repeat itself. It does not make it greedy.
 - With `do_sample=False`, the answer equals the reference.
 
@@ -538,7 +542,7 @@ important fact at its start. Or generate more than 57 tokens and watch the
 answer lose the start of the prompt. The fault depends on a property of the
 input, its length, and a short test cannot see it.
 
-**`attention_b`: each query also sees the next token.** On my run it left the
+**`attention_b`: each query also sees the next token.** In the reference run it left the
 reference at token 5, with fluent text: `' Tokyo, Osaka, and Osaka. What is
 the total number of letters ...'`. The experiment: compare the logits of
 **every** prefill position with the reference, not only the last one. The last
@@ -547,7 +551,7 @@ are wrong. In the decode steps, one query sees every key legally, so the
 decode arithmetic is correct. Only the K and V from the prefill are wrong.
 This is Exercise 3 in a mild form.
 
-**`attention_c`: the softmax over the queries.** On my run: `' and and and
+**`attention_c`: the softmax over the queries.** In the reference run: `' and and and
 and ...,,,,'` from token 0. The explanation is the part to find. In a decode
 step there is one query, so a softmax over the queries gives 1.0 to **every**
 key. The output is the **sum** of all the values, not an average. In the

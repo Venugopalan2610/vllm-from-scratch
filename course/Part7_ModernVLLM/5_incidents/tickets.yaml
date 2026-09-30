@@ -91,11 +91,11 @@ tickets:
       - **The guard.** Export the acceptance rate for each workload
         (stage 17). Predict the speedup from it before you enable the feature.
     code: |
-      def tokens_per_verify(a, k=4):
-          return (1 - a ** (k + 1)) / (1 - a)
-      for name, a in [('code', 0.80), ('chat', 0.15)]:
-          t = tokens_per_verify(a)
-          print(f'{name}: {t:.2f} tokens per verify, predicted speedup {t / 1.15:.2f}x')
+      def tokens_per_verify(acceptance, k=4):
+          return (1 - acceptance ** (k + 1)) / (1 - acceptance)
+      for name, acceptance in [('code', 0.80), ('chat', 0.15)]:
+          tokens_per_pass = tokens_per_verify(acceptance)
+          print(f'{name}: {tokens_per_pass:.2f} tokens per verify, predicted speedup {tokens_per_pass / 1.15:.2f}x')
 
   - id: "7.2"
     title: "Ticket 2: speculation made the answers less creative"
@@ -315,8 +315,8 @@ tickets:
       import torch
       k = torch.tensor([1150.0, 300.0])
       print('scale 1.0 :', (k / 1.0).to(torch.float8_e4m3fn).float() * 1.0)
-      scale = 1150 / 448
-      print(f'scale {scale:.2f}:', (k / scale).to(torch.float8_e4m3fn).float() * scale)
+      fp8_scale = 1150 / 448
+      print(f'scale {fp8_scale:.2f}:', (k / fp8_scale).to(torch.float8_e4m3fn).float() * fp8_scale)
 
   - id: "7.6"
     title: "Ticket 6: 3% invalid JSON from the guided mode"
@@ -417,8 +417,8 @@ tickets:
 
       **The noise.** "The GPU is too slow". The GPU time is 12 ms in every row.
     code: |
-      for n, ms in [(1, 50), (4, 164), (8, 316)]:
-          print(f'{n} guided: {(ms - 12) / n:.0f} ms for each guided request')
+      for num_guided, step_ms in [(1, 50), (4, 164), (8, 316)]:
+          print(f'{num_guided} guided: {(step_ms - 12) / num_guided:.0f} ms for each guided request')
 
   - id: "7.8"
     title: "Ticket 8: a colour that the schema forbids"

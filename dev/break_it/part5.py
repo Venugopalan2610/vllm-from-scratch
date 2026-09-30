@@ -62,16 +62,16 @@ This is Ticket 1 of the incident file. Predict what the five answers look
 like.
 ''', '''
 @torch.inference_mode()
-def fault_new_tensor(g, ids, max_tokens):
-  token = g.prefill(ids)
-  out = [int(token)]
+def fault_new_tensor(graphed, ids, max_tokens):
+  token = graphed.prefill(ids)
+  generated = [int(token)]
   for i in range(max_tokens - 1):
     input_ids = torch.tensor([[int(token)]], device=device)            # THE FAULT: a new address
-    g.position.fill_(ids.shape[1] + i)
-    g.graph.replay()
-    token = g.logits.argmax(-1)
-    out.append(int(token))
-  return out
+    graphed.position.fill_(ids.shape[1] + i)
+    graphed.graph.replay()
+    token = graphed.logits.argmax(-1)
+    generated.append(int(token))
+  return generated
 
 for prompt in PROMPTS:
   ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
@@ -126,13 +126,13 @@ This is Ticket 3. Predict the speedup of the graph at each batch size.
 ''', '''
 import gc
 for batch in (1, 4, 16, 64, 128):
-  g = lab.Graphed(model, batch, max_len=128)
-  g.prefill(torch.randint(0, 1000, (batch, 16), device=device))    # each timed call appends one token
-  g.position.fill_(16)
-  eager = lab.ms_per_call(g.eager_step)
-  graphed = lab.ms_per_call(g.graph.replay)
+  graphed = lab.Graphed(model, batch, max_len=128)
+  graphed.prefill(torch.randint(0, 1000, (batch, 16), device=device))    # each timed call appends one token
+  graphed.position.fill_(16)
+  eager = lab.ms_per_call(graphed.eager_step)
+  graphed = lab.ms_per_call(graphed.graph.replay)
   print(f'batch {batch:3d}: eager {eager:5.1f} ms, graph {graphed:5.1f} ms, speedup {eager / graphed:.2f}x')
-  del g
+  del graphed
   gc.collect()
   torch.cuda.empty_cache()
 '''),
@@ -146,22 +146,22 @@ one. The reference: `lab.sample`, one vectorized pass. A third version,
 `lab.sample_top_candidates`, sorts only the 1,024 most likely tokens of each
 row.
 
-This is Ticket 4. Predict the ms of each version at batch 8, 64 and 128.
+This is Ticket 4. Predict how much faster the vectorized version is than the loop, at batch 8, 64 and 128.
 ''', '''
 VOCAB = model.config.vocab_size
 
 def loop_sample(logits, temperature, top_p):
-  out = []
+  generated = []
   for row in range(logits.shape[0]):                                    # THE FAULT: one row at a time
     probs = torch.softmax(logits[row].float() / temperature[row], -1)
     sorted_probs, order = probs.sort(descending=True)
     before = sorted_probs.cumsum(-1) - sorted_probs
     sorted_probs[before > top_p[row]] = 0
-    out.append(order[torch.multinomial(sorted_probs, 1)].item())
-  return out
+    generated.append(order[torch.multinomial(sorted_probs, 1)].item())
+  return generated
 
 with torch.inference_mode():                                            # real next-token logits
-  real = torch.cat([model(tokenizer(p, return_tensors='pt').input_ids.to(device)).logits[:, -1] for p in PROMPTS])
+  real = torch.cat([model(tokenizer(prompt, return_tensors='pt').input_ids.to(device)).logits[:, -1] for prompt in PROMPTS])
 for batch in (8, 64, 128):
   logits = real.repeat(math.ceil(batch / len(PROMPTS)), 1)[:batch].float()
   temperature = torch.full((batch,), 0.8, device=device)
@@ -198,15 +198,15 @@ def fault_top_p(logits, top_p, generator):
 def generate(prompt, top_p, tokens=30):
   generator = torch.Generator(device=device).manual_seed(0)
   ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
-  out = model(ids, use_cache=True)
-  cache, text, sure = out.past_key_values, [], 0
+  forward_pass = model(ids, use_cache=True)
+  cache, text, sure = forward_pass.past_key_values, [], 0
   for _ in range(tokens):
-    logits = out.logits[0, -1]
+    logits = forward_pass.logits[0, -1]
     sure += int(torch.softmax(logits.float(), -1).max() > top_p)
     token = fault_top_p(logits, top_p, generator)
     text.append(token)
-    out = model(torch.tensor([[token]], device=device), past_key_values=cache, use_cache=True)
-    cache = out.past_key_values
+    forward_pass = model(torch.tensor([[token]], device=device), past_key_values=cache, use_cache=True)
+    cache = forward_pass.past_key_values
   return tokenizer.decode(text), sure
 
 for prompt in ['The capital of France is', 'def fibonacci(n):\\n    if n <= 1:\\n        return',
@@ -260,10 +260,10 @@ This is Ticket 7. Predict what the stream shows for 🫠 and for 𝄞.
 ''', '''
 text = 'Melting 🫠 and a clef 𝄞 in one line.'
 tokens = tokenizer(text).input_ids
-print('the tokens:', [tokenizer.decode([t]) for t in tokens])
-one_at_a_time = ''.join(tokenizer.decode([t]) for t in tokens)          # THE FAULT
+print('the tokens:', [tokenizer.decode([token]) for token in tokens])
+one_at_a_time = ''.join(tokenizer.decode([token]) for token in tokens)          # THE FAULT
 detokenizer = lab.Detokenizer(tokenizer)
-incremental = ''.join(detokenizer.push(t) for t in tokens)
+incremental = ''.join(detokenizer.push(token) for token in tokens)
 print('one token at a time:', repr(one_at_a_time))
 print('incremental        :', repr(incremental))
 print('the same as the full decode:', incremental == tokenizer.decode(tokens))
@@ -281,12 +281,12 @@ llama = AutoTokenizer.from_pretrained('hf-internal-testing/llama-tokenizer')
 text = 'The capital of France is Paris.'
 tokens = llama(text, add_special_tokens=False).input_ids
 print('the pieces:', llama.convert_ids_to_tokens(tokens))
-one_at_a_time = ''.join(llama.decode([t]) for t in tokens)             # THE FAULT
+one_at_a_time = ''.join(llama.decode([token]) for token in tokens)             # THE FAULT
 detokenizer = lab.Detokenizer(llama)
-incremental = ''.join(detokenizer.push(t) for t in tokens)
+incremental = ''.join(detokenizer.push(token) for token in tokens)
 for name, stream in [('one token at a time', one_at_a_time), ('incremental', incremental)]:
   print(f'{name:20s}: {stream!r}, {stream.count(" ")} spaces')
-qwen_stream = ''.join(tokenizer.decode([t]) for t in tokenizer(text).input_ids)
+qwen_stream = ''.join(tokenizer.decode([token]) for token in tokenizer(text).input_ids)
 print(f'{"Qwen3, one at a time":20s}: {qwen_stream!r}, {qwen_stream.count(" ")} spaces')
 '''),
 
@@ -306,8 +306,8 @@ STOP = '###'
 
 def per_token(tokens):
   shown = ''
-  for t in tokens:
-    piece = tokenizer.decode([t])
+  for token in tokens:
+    piece = tokenizer.decode([token])
     if STOP in piece:                                                   # THE FAULT: one token only
       return shown, 'stopped'
     shown += piece
@@ -315,16 +315,16 @@ def per_token(tokens):
 
 def on_the_text(tokens):
   text = ''
-  for t in tokens:
-    text += tokenizer.decode([t])
+  for token in tokens:
+    text += tokenizer.decode([token])
     if STOP in text:
       return text[:text.index(STOP)], 'stopped'
   return text, 'did not stop'
 
 for name, tokens in streams.items():
   for check in (per_token, on_the_text):
-    shown, result = check(tokens)
-    print(f'{name:10s} {check.__name__:12s}: {result:12s} the user sees {shown!r}')
+    shown, verdict = check(tokens)
+    print(f'{name:10s} {check.__name__:12s}: {verdict:12s} the user sees {shown!r}')
 '''),
 ]
 
@@ -363,7 +363,7 @@ from mystery import sampler_a, sampler_b, sampler_c
 torch.manual_seed(1)
 small = torch.randn(4, 8, device=device) * 1.5
 params = [dict(temperature=0.8, top_k=5, top_p=1.0, penalty=1.0, seen=[]) for _ in range(4)]
-targets = torch.stack([lab.target(small[r], **params[r]) for r in range(4)])
+targets = torch.stack([lab.target(small[row], **params[row]) for row in range(4)])
 for name, sampler in [('a', sampler_a), ('b', sampler_b), ('c', sampler_c)]:
   measured = lab.frequencies(sampler, small, params, draws=5000)
   print(f'sampler_{name}: largest difference from the target {(measured - targets).abs().max().item():.3f}')
@@ -415,46 +415,48 @@ with a known pattern, replay a padded step, and check the pattern.
     'd3': '''
 ### What happens
 
-On my card, Qwen3-0.6B:
+The speedup of the graph over eager, with Qwen3-0.6B, in the reference runs
+(one card, before and after a repair of its cooling):
 
-| batch | eager | graph | speedup |
-|---|---|---|---|
-| 1 | 10.5 ms | 5.4 ms | 1.96x |
-| 4 | 11.0 ms | 6.3 ms | 1.74x |
-| 16 | 10.9 ms | 8.6 ms | 1.27x |
-| 64 | 20.7 ms | 20.2 ms | 1.03x |
-| 128 | 36.9 ms | 36.2 ms | 1.02x |
+| batch | speedup of the graph |
+|---|---|
+| 1 | 1.87x to 1.96x |
+| 4 | 1.63x to 1.74x |
+| 16 | 1.26x to 1.27x |
+| 64 | 1.03x to 1.04x |
+| 128 | 1.02x |
 
-The eager step stays at about 11 ms from batch 1 to batch 16. That is the time
-that the CPU needs to launch the kernels of one step, and it does not depend
-on the batch. The graph shows the GPU time, which grows with the batch. At
-batch 64 the GPU needs 20 ms, more than the CPU, and the graph has nothing
-left to remove.
+The eager step takes about the same time from batch 1 to batch 16. That time
+is the CPU that launches the kernels of one step, and it does not depend on
+the batch. The graph shows the GPU time, which grows with the batch. At batch
+64 the GPU needs longer than the CPU, and the graph has nothing left to
+remove.
 
-With Qwen3-1.7B at batch 1, the graph gave only 1.07x (11.8 ms against 12.6
-ms): the GPU reads 3.4 GB of weights, and that takes longer than the launches.
-A graph helps when the CPU is the slower side, and only then.
+With Qwen3-1.7B at batch 1, the graph gave only about 1.07x: the GPU reads
+3.4 GB of weights, and that takes longer than the launches. A graph helps when
+the CPU is the slower side, and only then. On a faster GPU with the same CPU,
+the graph helps more; on a slower GPU, less.
 ''',
     'd4': '''
 ### What happens
 
-On my card, with real next-token logits:
+In the reference runs, with real next-token logits:
 
-| batch | loop | vectorized (its sort) | top 1,024 only |
+| batch | vectorized, against the loop | the sort, as part of the vectorized pass | top 1,024 only, against vectorized |
 |---|---|---|---|
-| 8 | 1.8 ms | 0.6 ms (0.2) | 0.4 ms |
-| 64 | 12.4 ms | 7.0 ms (4.1) | 0.9 ms |
-| 128 | 19.6 ms | 16.5 ms (10.0) | 2.4 ms |
+| 8 | 2x to 3x faster | about 1/3 | 1.5x to 3x faster |
+| 64 | 1.4x to 1.8x faster | about 60% | 7.5x to 8.5x faster |
+| 128 | 1.2x faster | 61% | 6.6x to 6.9x faster |
 
-The loop costs about 0.15 to 0.23 ms for each request, a constant: the
+The loop costs the same time for each request at every batch size: the
 fingerprint of Ticket 4.
 
 **The surprise.** The vectorized pass is only 1.2x faster at batch 128. It
-sorts 128 x 151,936 values, and that sort takes 10 ms. Removing the loop was
-not enough: the next bottleneck was the algorithm. Sorting only the 1,024 most
-likely tokens of each row gives 2.4 ms, and it was exact here, because those
-tokens held the top-p mass of every row. Real engines use the same idea, or a
-sampler that needs no sort at all.
+sorts 128 x 151,936 values, and that sort is 61% of its time. Removing the loop
+was not enough: the next bottleneck was the algorithm. Sorting only the 1,024
+most likely tokens of each row is about 7x faster at batch 128, and it was exact here,
+because those tokens held the top-p mass of every row. Real engines use the
+same idea, or a sampler that needs no sort at all.
 
 **The lesson.** Time the parts of a fix before you call it a fix.
 ''',
@@ -535,20 +537,20 @@ MYSTERY_SOL = '''
 **`sampler_a`: one temperature for the whole batch.** It uses the temperature
 of row 0 for every row. When all rows have the same temperature, it is
 correct. The experiment: give the rows different temperatures, for example
-0.3, 1.0, 2.0 and 0.8. On my run, the largest difference from the target was
+0.3, 1.0, 2.0 and 0.8. In the reference run, the largest difference from the target was
 0.004 for row 0 and 0.43, 0.54 and 0.22 for the others.
 
 **`sampler_b`: the penalty divides every seen logit.** For a positive logit,
 dividing lowers it, which is correct. For a negative logit, dividing brings it
 closer to 0, which **raises** it. The experiment: a seen token with a negative
-logit, and a large penalty. On my run, a token with the logit -0.44 and a
+logit, and a large penalty. In the reference run, a token with the logit -0.44 and a
 penalty of 2.0 had the probability 0.007 without a penalty, the target 0.004
 with the penalty, and `sampler_b` gave it 0.008. The penalty made the repeated
 token more likely.
 
 **`sampler_c`: `top_k=0` keeps no token.** The API says that 0 means "off".
 The code passes 0 to the filter, which then keeps nothing, and the row
-returns token 0 every time. The experiment: `top_k=0` for one row. On my run
+returns token 0 every time. The experiment: `top_k=0` for one row. In the reference run
 that row drew token 0 in 100% of the draws. This is Exercise 5 in another
 form: an empty set, and `argmax` of zeros.
 
@@ -572,7 +574,7 @@ FINGERPRINTS_SOL = '''
 | a new input tensor for each step | no | token 1 | text that ignores the prompt, then `!` | graph against eager; input addresses |
 | a padding row that writes to slot 0 | no | batches that are not a bucket | a request outside the batch drifts | a pattern in a block, replay, check |
 | a graph on a GPU-bound step | no | large batch or large model | a speedup near 1x | CPU time and GPU time of a step |
-| a Python loop over the requests | no | large batch | 0.15 ms or more for each request | the sampler time at batch 128 |
+| a Python loop over the requests | no | large batch | a constant cost for each request | the sampler time at batch 128 |
 | top-p that removes the crossing token | no | when the model is sure | `!` exactly at the certain tokens | at least one token in each row |
 | a seed in the global generator | no | in a batch with other seeds | a seeded request that changes | the same seed in two batches |
 | decode one token at a time (bytes) | no | rare characters | `���` in the stream only | stream against the full decode |

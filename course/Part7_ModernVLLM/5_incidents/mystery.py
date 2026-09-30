@@ -1,7 +1,7 @@
 """Three speculative decoders. Each one has one fault.
 
 DO NOT READ THIS FILE until you have written your diagnosis in
-part7_inc_2_CCbreakItOnPurpose_helper.ipynb, Exercise 11.
+part7_inc_2_CCbreakItOnPurpose_challenge.ipynb, Exercise 11.
 
 Each takes (model, ids, max_tokens) like lab.speculative, and returns the new
 tokens and a dict of statistics.
