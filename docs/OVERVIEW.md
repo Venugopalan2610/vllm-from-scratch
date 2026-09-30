@@ -9,7 +9,11 @@ that you need on the first day. For the shape of the engine, read
 
 ## The Ladder: What You Build
 
-You build one complete, high-performance LLM serving system from first principles across 9 arcs. Arc A1 to A8 match Part 1 to Part 8 of the notebooks:
+**35 stages:** 33 core stages and 2 optional extensions (30 and 31). The core
+stages are 01 to 29, plus 08b, 08c, 18b and 24b. The capstone is stage 21 to
+28. `./vc` counts the same way: "3/33 stages, 0/2 extensions".
+
+The stages are in 9 arcs. Arc A1 to A8 match Part 1 to Part 8 of the notebooks:
 
 | Arc | Stages | What you build |
 | :--- | :--- | :--- |
@@ -22,7 +26,7 @@ You build one complete, high-performance LLM serving system from first principle
 | **A7: Modern vLLM**| 17–20 | Tree-attention speculative decoding, quantization (**+ 18b, a custom Int8 GEMV CUDA kernel**), JSON grammar masking, and Megatron-style Tensor Parallelism |
 | **A8: The Capstone** | 21–28 | **The integrated server**: paged model, scheduler, graphs with pinned staging buffers, int8 weights, FP8 KV cache (24b), n-gram speculative decoding, guided JSON, a POSIX shared-memory event ring, and client disconnect abort |
 | **A9: Beyond the Capstone** | 29–31 | LRU prefix cache eviction & cache-aware admission (29). **Optional extensions, with thin checks:** Multi-LoRA serving with batched GEMV (30), and DeepSeek Multi-Head Latent Attention (MLA) with decode weight absorption (31) |
-| **Capstone Practicums** | I, J, K | **I:** a timeline with Nsight Systems, a notebook with checks. **J:** hardware counters with Nsight Compute, a notebook with checks. **K (optional reading):** map your engine onto TensorRT-LLM |
+| **Capstone Practicums** (notebooks, not stages) | I, J, K | **I:** a timeline with Nsight Systems, a notebook with checks. **J:** hardware counters with Nsight Compute, a notebook with checks. **K (optional reading):** map your engine onto TensorRT-LLM |
 
 ### Bare-Metal CUDA (Not Triton)
 Five stages hold **CUDA that you write yourself** in real `.cu` files, compiled directly with `nvcc`:
@@ -36,7 +40,7 @@ Five stages hold **CUDA that you write yourself** in real `.cu` files, compiled 
 
 ## Measured Proof
 
-The Capstone (Stages 21–28) connects your parts into one engine and gates your code against the hardware limits of your GPU. Every gate is measured on your card:
+The Capstone (Stages 21–28) connects your parts into one engine and gates your code against the hardware limits of your GPU. Every gate is measured on your card. [`docs/proof/`](proof/README.md) has one full run of every check, on one card, and `dev/proof.sh` makes it again on yours:
 
 | Measurement | Reference Solution | The Gate |
 | :--- | :--- | :--- |

@@ -2,13 +2,49 @@
 
 > **Disclaimer.** This course is not affiliated with the [vLLM project](https://github.com/vllm-project/vllm) (Apache-2.0). It teaches the ideas behind vLLM V1's single-GPU architecture through a clean-room implementation. See [what you build against upstream vLLM](docs/OVERVIEW.md#production-vllm-parity-what-you-built-vs-upstream).
 
-> **Do not stop. Continue. Be better than before.**
-
 Stage 01 is the slowest inference engine that you will ever write. It is slow on purpose. For each new token, it computes all the earlier tokens again.
 
 At stage 28, the capstone, the same GPU runs an OpenAI-compatible inference server that you built from your own parts. Each stage between the two must be better than the stage before it: faster, or more correct. A measurement on your own GPU proves it. Nobody tells you that your code is good. The machine tells you.
 
-You do not need to see the whole course to start. You need the next step, and `./vc` always shows it.
+- **35 stages:** 33 core stages and 2 optional extensions. The capstone is stage 21 to 28. [The full list](docs/OVERVIEW.md).
+- **Five CUDA kernels that you write by hand,** in real `.cu` files that `nvcc` compiles. Not Triton: paged attention three times (08, 08b, 08c), an int8 GEMV (18b), and paged attention over an FP8 KV cache (24b).
+- **Start with [the map](docs/MAP.md).** It is one page: the whole engine in the words of a web service (router, service, repo, database), and the stage that builds each box.
+
+---
+
+## Proof, measured on one card
+
+Every number here is from one run of the reference solutions on an NVIDIA GeForce RTX 4080 Laptop GPU, on 2026-09-30. [The full log, and what it does not prove.](docs/proof/README.md) On your card the milliseconds differ. The ratios are the lesson.
+
+**Every check of the torch track:** 904 passed, 0 failed, 2 skipped (they need GPU performance counters).
+
+**`./vc run`, with every part from stage 06 to 19:**
+
+```text
+  YOUR ENGINE SO FAR
+  memory     yours  stage 09: refcounts and the prefix cache
+  attention  yours  stage 08c: your split-K kernel
+  scheduler  yours  stage 11: token budget, chunked prefill
+  launch     yours  stage 12: CUDA graphs for decode steps
+  ...
+                                     your engine
+  tokens/s                               1,718.4
+  ...
+  most requests at once                       24
+  ...
+  graph replays                               92
+  streams = final text                     24/24
+
+  THE ORACLE  (move 6: each request alone, with the given attention)
+  identical: 10/24.  different from a near tie (a rounding flip, Part 0 assumption 6): 14.  real differences: 0.
+```
+
+| What you build | Before | After |
+|---|---|---|
+| The whole live engine, 24 requests | 139.5 tokens/s (given parts) | 1,718.4 tokens/s (every part): 12.3x |
+| Paged attention, time over the memory floor | 12.35 (PyTorch gather, stage 07) | 1.58 (your split-K kernel, stage 08c) |
+| An int8 layer, time over the memory floor | 9.71 (PyTorch, stage 18) | 1.41 (your GEMV kernel, stage 18b) |
+| Speculative decoding on a copy task (stage 17) | 64 forward passes | 20 forward passes: 3.02x faster |
 
 ---
 
@@ -47,18 +83,9 @@ The notebooks use Qwen3-1.7B. The graded checks use Qwen3-0.6B, because many che
 
 ---
 
-## Where to start
-
-Read [`docs/MAP.md`](docs/MAP.md) first. It is one page: the whole engine in
-the words of a web service (router, service, repo, database), and the box
-that each stage builds. Then open Part 0 of the notebooks, which starts with
-the same map.
-
----
-
 ## The loop
 
-Each stage is the same four commands:
+`./vc` is the path through the course. You do not need to browse the notebooks: for each stage, `./vc guide` names the ones to read first. Each stage is the same four commands:
 
 ```bash
 ./vc guide        # what to build, why it matters, and the notebooks to read first
@@ -74,6 +101,25 @@ Three rules:
 1. **You edit `app/`. You never edit `tests/`.** The checks are the specification.
 2. **Build the slow version first, then measure.** Every improvement is a number, not an opinion.
 3. **If you are stuck after repeated attempts, `./vc peek` shows the reference solution.** A stage where you study the answer and understand the mechanism is better than an abandoned repository.
+
+---
+
+## What is in this repo
+
+| | |
+| :--- | :--- |
+| `vc` | The course runner: `./vc` shows where you are and what to do next. |
+| `app/` | **The only folder that you edit.** One file for each stage, with its spec in its docstrings. |
+| `tests/` | The checks of each stage. They are the specification. You never edit them. |
+| `course/` | The notebooks, Part 0 to Part 8. `./vc guide` tells you which to open. |
+| `docs/` | The map, the method, the overview, and the proof log. |
+| `stages.yaml` | The list of the stages: what is given, what is asked, and why. `./vc` reads it. |
+| `LORE.md` | The derivations behind the stages. `./vc lore` prints the one-paragraph insight of your stage. |
+| `cudalib/` | Given: it compiles your `.cu` files and times the GPU honestly. |
+| `tvllm/` | Given: a plain-PyTorch Qwen3 model that hosts your parts ("t" for torch), and the live engine of `./vc run`. |
+| `jvllm/` | Given: the same model in JAX, for the JAX track ("j" for JAX). |
+| `runner/`, `dev/` | The code of `./vc`, and the tools of the course authors. |
+| `extras/` | Code that left the course. Nothing checks it. |
 
 ---
 

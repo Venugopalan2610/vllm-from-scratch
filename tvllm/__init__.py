@@ -1,7 +1,9 @@
-"""tvllm - the model that hosts the capstone.
+"""tvllm - the model that hosts your parts: a plain-torch Qwen3 ("t" for torch,
+as "j" in jvllm is for JAX).
 
 The repo gives you this package, like jvllm/ and tests/helpers.py. You do not
-edit it. Read tvllm/model.py before stage 21.
+edit it. tvllm/live.py runs your parts from stage 06 (`./vc run`). Read
+tvllm/model.py before stage 21, where you write the real runner on it.
 """
 
 from tvllm.model import (DenseReference, LayerWeights, Model, ModelConfig,

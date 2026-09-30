@@ -1,0 +1,115 @@
+  the four lines, on batch step at n = 8:
+    predict   floor                 3.6526 ms
+    measure   measured             11.4468 ms
+    divide    measured / floor        3.13    above 1 is the Python and the launches around the weight read. A doubling near 1: the rows are almost free
+    double    t(2n) / t(n)            1.00    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on engine step at n = 8:
+    predict   floor                 3.9492 ms
+    measure   measured             11.9000 ms
+    divide    measured / floor        3.01    the weights are read one time for all the rows, and the KV cache grows with them, so the doubling is above 1
+    double    t(2n) / t(n)            1.17    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on blocks at n = 100:
+    predict   predicted                  7.00
+    measure   measured                   7.00
+    divide    measured / predicted      1.000   1.0: a new block comes only when the last one is full
+    double    count(2n) / count(n)      1.857
+.
+  the four lines, on attention call at n = 8:
+    predict   floor                 0.3190 ms
+    measure   measured              3.9388 ms
+    divide    measured / floor       12.35    how far the gather is from the bytes that it must read
+    double    t(2n) / t(n)            1.99    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on attention call at n = 8:
+    predict   floor                 0.3189 ms
+    measure   measured              1.4713 ms
+    divide    measured / floor        4.61    against stage 07: the same bytes, a new kernel
+    double    t(2n) / t(n)            1.23    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on attention call at n = 8:
+    predict   floor                 0.3590 ms
+    measure   measured              0.9464 ms
+    divide    measured / floor        2.64    against stage 08: the same bytes, better loads
+    double    t(2n) / t(n)            1.09    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on attention call at n = 2:
+    predict   floor                 0.3590 ms
+    measure   measured              0.5670 ms
+    divide    measured / floor        1.58    at few sequences: near 1 means that your split gives the whole card work
+    double    t(2n) / t(n)            1.98    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on prompt tokens computed at n = 10:
+    predict   predicted                300.00
+    measure   measured                 336.00
+    divide    measured / predicted      1.120   above 1: the end of the system prompt shares a block with each question, so it is computed again
+    double    count(2n) / count(n)      1.714
+.
+  the four lines, on steps at n = 8:
+    predict   predicted                 21.00
+    measure   measured                  21.00
+    divide    measured / predicted      1.000   near 1: the requests share each step
+    double    count(2n) / count(n)      1.000
+.
+  the four lines, on prefill steps at n = 200:
+    predict   predicted                  4.00
+    measure   measured                   4.00
+    divide    measured / predicted      1.000   1.0: each step is full until the last chunk
+    double    count(2n) / count(n)      1.750
+.
+  the four lines, on graph replay at n = 4:
+    predict   floor                 0.0450 ms
+    measure   measured              0.1352 ms
+    divide    measured / floor        3.01    above 1: the weights are small, so the launches and the copies set the time
+    double    t(2n) / t(n)            0.92    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on sampler call at n = 32:
+    predict   floor                 0.0520 ms
+    measure   measured              3.3219 ms
+    divide    measured / floor       63.87    about the passes over the logits, or more if your sampler sorts them
+    double    t(2n) / t(n)            2.49    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on tokens at n = 1000:
+    predict   predicted               2305.60
+    measure   measured                2301.00
+    divide    measured / predicted      0.998   near 1: the formula predicts what the drafts give
+    double    count(2n) / count(n)      1.973
+.
+  the four lines, on int8 linear call at n = 1:
+    predict   floor                 0.3191 ms
+    measure   measured              3.0988 ms
+    divide    measured / floor        9.71    far above 1: PyTorch builds a bf16 copy of the weight first. Stage 18b removes the copy
+    double    t(2n) / t(n)            1.03    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on int8 linear call at n = 1:
+    predict   floor                 0.3193 ms
+    measure   measured              0.4495 ms
+    divide    measured / floor        1.41    against stage 18: near 1 at one row, because the kernel reads each int8 weight one time, with no copy
+    double    t(2n) / t(n)            1.04    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on decode step at n = 2:
+    predict   floor                 3.6573 ms
+    measure   measured              7.0353 ms
+    divide    measured / floor        1.92    how far your eager step is from the bytes that it must read
+    double    t(2n) / t(n)            1.00    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on decode step at n = 2:
+    predict   floor                 2.8355 ms
+    measure   measured              4.4717 ms
+    divide    measured / floor        1.58    against stage 21: the same bytes, with the launch gaps gone
+    double    t(2n) / t(n)            1.01    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on decode step at n = 1:
+    predict   floor                 1.4235 ms
+    measure   measured              2.8645 ms
+    divide    measured / floor        2.01    against stage 23: fewer weight bytes, so a lower floor
+    double    t(2n) / t(n)            1.11    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+  the four lines, on decode step at n = 4:
+    predict   floor                 3.3922 ms
+    measure   measured              5.7548 ms
+    divide    measured / floor        1.70    at a long context the KV cache is a large part of the floor, and FP8 halves it
+    double    t(2n) / t(n)            1.12    (about 1: flat, about 2: linear, about 4: quadratic)
+.
+19 passed, 1002 deselected in 181.10s (0:03:01)

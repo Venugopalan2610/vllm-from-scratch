@@ -40,8 +40,11 @@ The job runs:
   CPU, against the reference solutions.
 - The harness tests.
 
-There is no GPU job yet. A GPU job for the other stages, ideally on an L4 or
-an A100, is a welcome contribution. See `dev/verify.sh` for the commands.
+There is no GPU job yet. Until there is one, `docs/proof/` is the proof of the
+GPU stages: one full run of every check on one card, at one commit. Run
+`dev/proof.sh` to make it again, and commit the result with a change that
+touches a GPU stage. A GPU job, ideally on an L4 or an A100, is a welcome
+contribution.
 
 ## Code of conduct
 

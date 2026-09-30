@@ -1,0 +1,59 @@
+  YOUR ENGINE SO FAR
+  memory     yours  stage 09: refcounts and the prefix cache
+  attention  yours  stage 08c: your split-K kernel
+  scheduler  yours  stage 11: token budget, chunked prefill
+  launch     yours  stage 12: CUDA graphs for decode steps
+  sampler    yours  stage 13: one vectorized pass
+  text       yours  stage 14: incremental detokenizer
+  metrics    yours  stage 16: TTFT, ITL, KV use
+
+  computing the oracle: each request alone, once (it is kept)...
+
+  the workload: 24 requests, 1,408 tokens to generate, a KV pool of 192 blocks of 16 tokens
+
+                                     your engine
+  tokens/s                               1,718.4
+  seconds in steps                           0.8
+  steps                                      100
+  most requests at once                       24
+  peak KV blocks                             170
+  prompt tokens computed                   1,781
+  prompt tokens from cache                     0
+  preemptions                                  0
+  tokens computed again                        0
+  median step (ms)                           8.2
+  longest step (ms)                         19.1
+  graph replays                               92
+  streams = final text                     24/24
+
+  THE ORACLE  (move 6: each request alone, with the given attention)
+  identical: 10/24.  different from a near tie (a rounding flip, Part 0 assumption 6): 14.  real differences: 0.
+
+  STAGE 16: YOUR METRICS, ON THIS RUN
+  ttft_p50 37 ms   ttft_p99 122 ms   itl_p50 9 ms   itl_p99 168 ms   kv_utilization_max 89%
+
+  note: Your scheduler finishes a sequence by its count of tokens, so the engine ignores EOS, and an abort frees the blocks only when the count ends. The stage 10 contract has no abort. Stage 22 adds one.
+
+  note: The prefix cache is off: your stage 10 scheduler does not know about shared blocks. Stage 22 joins the two.
+
+  STAGE 15: YOUR SERVER, AROUND THE LIVE ENGINE
+  three streams, one engine: 40 and 40 deltas, and one client that left after 4.
+  the streams took turns 83 times: they ran together, not one after the other.
+  the client that left was aborted: True.  blocks still in use after the end: 0 (the prefix cache can keep some on purpose).
+
+  STAGE 17: YOUR N-GRAM DRAFTS, ON A COPY TASK
+  plain decode:      64 forward passes,     378 ms
+  with your drafts:  20 forward passes,     125 ms   -> 3.20 tokens for each pass, 3.02x
+  the same tokens as the plain decode up to token 34. There the plain decode's two best scores differ by 0.125: a near tie. A verify pass has more rows, so it adds in a different order (Part 0, assumption 6).
+
+  STAGE 19: YOUR GUIDED DECODER, ON ONE JSON REQUEST
+  with no mask:    '{\n  "name": "John Doe",\n  "age": 25,\n  "city": "New York"\n}\nAnswer:\n``'   parses: False
+  with your mask:  '{\n  "name": "Alice",\n  "age": 25,\n  "city": "Paris"\n}'   parses: True
+  (the mask allows 38 tokens: the pieces of some real JSON text)
+  your mask cache: 0 hits, 24 misses
+
+
+  STAGE 18: YOUR STAGE 18B GEMV, IN EVERY MATMUL
+  weight bytes of one decode step: 1.19 GB bf16 -> 0.75 GB
+  median batch-1 step: 4.97 ms bf16 -> 3.74 ms  (1.33x)
+  at the 64 tokens that bf16 chose (move 6): the same top token 100% of the time, KL from bf16 0.0045 nats (the stage 18 gate is 0.015)

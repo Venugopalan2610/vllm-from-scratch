@@ -44,6 +44,10 @@ def test_overview_counts_match_the_ladder():
     assert f"{len(in_jax)} stages in JAX" in overview
     assert f"the {shared} framework-free stages" in overview
     assert f"all {len(stages)} stages" in readme
+    core = len(stages) - len(extensions)
+    for text in (readme, overview):     # one count, in the words of the first screen
+        assert (f"**{len(stages)} stages:** {core} core stages and {len(extensions)} optional "
+                "extensions") in text, "the stage count of the README and OVERVIEW.md differs"
 
 
 def stage_numbers_in(text):

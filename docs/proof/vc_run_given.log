@@ -1,0 +1,31 @@
+  YOUR ENGINE SO FAR
+  memory     given  reserve max_model_len for each sequence
+  attention  given  DenseReference: one growing tensor for each sequence
+  scheduler  given  first come, first served, no preemption
+  launch     given  eager
+  sampler    given  argmax only
+  text       given  decode each token alone
+  metrics    given  none
+
+  You have no part in the engine yet. Stage 06 puts the first one in. This run shows the engine that your parts will replace.
+
+
+  the workload: 24 requests, 1,408 tokens to generate, a KV pool of 192 blocks of 16 tokens
+
+                                     your engine
+  tokens/s                                 139.5
+  seconds in steps                          10.1
+  steps                                      496
+  most requests at once                        3
+  peak KV blocks                             192
+  prompt tokens computed                   1,781
+  prompt tokens from cache                     0
+  preemptions                                  0
+  tokens computed again                        0
+  median step (ms)                          21.0
+  longest step (ms)                         32.9
+  graph replays                                0
+  streams = final text                     23/24
+
+  THE ORACLE  (move 6: each request alone, with the given attention)
+  identical: 10/24.  different from a near tie (a rounding flip, Part 0 assumption 6): 14.  real differences: 0.
