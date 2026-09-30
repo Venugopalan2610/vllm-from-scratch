@@ -8,17 +8,28 @@ At stage 28, the capstone, the same GPU runs an OpenAI-compatible inference serv
 
 - **35 stages:** 33 core stages and 2 optional extensions. The capstone is stage 21 to 28. [The full list](docs/OVERVIEW.md).
 - **Five CUDA kernels that you write by hand,** in real `.cu` files that `nvcc` compiles. Not Triton: paged attention three times (08, 08b, 08c), an int8 GEMV (18b), and paged attention over an FP8 KV cache (24b).
+- **How long it takes:** not stated yet, because it is not measured yet. `./vc` records the active time that you spend on each stage, and `./vc list` shows it. The estimate will come from those records, not from a guess.
 - **Start with [the map](docs/MAP.md).** It is one page: the whole engine in the words of a web service (router, service, repo, database), and the stage that builds each box.
 
 ---
 
 ## Proof, measured on one card
 
-Every number here is from one run of the reference solutions on an NVIDIA GeForce RTX 4080 Laptop GPU, on 2026-09-30. [The full log, and what it does not prove.](docs/proof/README.md) On your card the milliseconds differ. The ratios are the lesson.
+Every number here comes from one run of the reference solutions on an NVIDIA GeForce RTX 4080 Laptop GPU, on 2026-09-30. [The full log, and what it does not prove.](docs/proof/README.md) On your card the milliseconds differ. The ratios are the lesson.
 
-**Every check of the torch track:** 904 passed, 0 failed, 2 skipped (they need GPU performance counters).
+| What you build | Before | After |
+|---|---|---|
+| **The whole engine** (stage 28), on the same requests | your stage 05 engine: 610 tokens/s | your capstone: 2,233 tokens/s, **3.7x** |
+| The whole engine, against the least time that its steps can take | | 60% of that floor |
+| Paged attention: time over the memory floor (1.0 = as fast as the memory allows) | 12.33 (PyTorch gather, stage 07) | 1.38 (your split-K kernel, stage 08c) |
+| An int8 layer: time over the memory floor | 9.74 (PyTorch, stage 18) | 1.16 (your GEMV kernel, stage 18b) |
+| Speculative decoding on a copy task (stage 17) | 64 forward passes | 20 forward passes: 3.07x faster |
+| The live engine of stages 06 to 19, 24 requests | 129.1 tokens/s with the given parts (the slow default parts of the course) | 1,699.6 tokens/s with every part: 13.2x |
 
-**`./vc run`, with every part from stage 06 to 19:**
+**Every check of the torch track:** 908 passed, 0 failed, 2 skipped (they need GPU performance counters).
+
+<details>
+<summary>The output of <code>./vc run</code>, with every part from stage 06 to 19</summary>
 
 ```text
   YOUR ENGINE SO FAR
@@ -26,25 +37,26 @@ Every number here is from one run of the reference solutions on an NVIDIA GeForc
   attention  yours  stage 08c: your split-K kernel
   scheduler  yours  stage 11: token budget, chunked prefill
   launch     yours  stage 12: CUDA graphs for decode steps
+  sampler    yours  stage 13: one vectorized pass
+  text       yours  stage 14: incremental detokenizer
+  metrics    yours  stage 16: TTFT, ITL, KV use
   ...
                                      your engine
-  tokens/s                               1,718.4
+  tokens/s                               1,699.6
   ...
   most requests at once                       24
   ...
   graph replays                               92
   streams = final text                     24/24
 
-  THE ORACLE  (move 6: each request alone, with the given attention)
-  identical: 10/24.  different from a near tie (a rounding flip, Part 0 assumption 6): 14.  real differences: 0.
+  THE ORACLE  (each request run alone, with the given attention)
+  0 real differences in 24 requests.
+  10 identical. 14 took another token where the two best tokens scored almost
+  the same, so the rounding of the GPU decided. That is normal: a batch adds its
+  numbers in a different order than one request alone. Part 0 measures it.
 ```
 
-| What you build | Before | After |
-|---|---|---|
-| The whole live engine, 24 requests | 139.5 tokens/s (given parts) | 1,718.4 tokens/s (every part): 12.3x |
-| Paged attention, time over the memory floor | 12.35 (PyTorch gather, stage 07) | 1.58 (your split-K kernel, stage 08c) |
-| An int8 layer, time over the memory floor | 9.71 (PyTorch, stage 18) | 1.41 (your GEMV kernel, stage 18b) |
-| Speculative decoding on a copy task (stage 17) | 64 forward passes | 20 forward passes: 3.02x faster |
+</details>
 
 ---
 

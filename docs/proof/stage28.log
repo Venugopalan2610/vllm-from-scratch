@@ -1,0 +1,10 @@
+.....
+
+  6720 tokens in 3.08 s = 2184 tok/s over 384 steps. The roofline floor for the same steps is 1.83 s, so the engine runs at 60% of the roof.
+.[W930 13:14:09.692390538 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 23068672 bytes (free: 15007744, total: 12453019648).
+
+  stage 05: 610 tok/s   capstone: 2233 tok/s = 3.7x
+.
+  6720 tokens in 3.06 s = 2196 tok/s over 384 steps. The roofline floor for the same steps is 1.64 s, so the engine runs at 54% of the roof. Goodput: 2196 tok/s (48/48 requests met SLO, 100%).
+.
+8 passed in 27.90s
