@@ -189,3 +189,30 @@ def test_course_defines_each_term_before_it_uses_it():
     terms = [term for term in _glossary().values() if term.checked]
     early = early_uses(terms, reading_order())
     assert not early, "\n".join(f"{use.notebook.name}: {use.term.name}" for use in early)
+
+
+@pytest.mark.parametrize("backend", ["torch", "jax"])
+@pytest.mark.parametrize("stage", stages(), ids=lambda stage: stage["id"])
+def test_guide_prints_each_check_summary_in_full(stage, backend, capsys):
+    """`./vc guide` must not cut a check summary short.
+
+    The summary is the first paragraph of the test's docstring. The guide
+    wraps it to lines of at most 66 characters, and it must lose no word.
+    """
+    import re
+
+    from runner import cli
+
+    progress = {"backend": backend}
+    summaries = [summary for _, summary in cli.checks_for(stage, progress)]
+    cli.print_checks(stage, progress)
+    printed = re.sub(r"\033\[\d+m", "", capsys.readouterr().out)
+
+    summary_lines = [line[6:] for line in printed.splitlines()
+                     if line.startswith("      ")]
+    longest_line_characters = max(map(len, summary_lines), default=0)
+    assert longest_line_characters <= 66, (
+        f"a summary line has {longest_line_characters} characters")
+    for summary in summaries:
+        assert " ".join(summary.split()) in " ".join(printed.split()), (
+            f"the guide lost part of this summary:\n  {summary}")

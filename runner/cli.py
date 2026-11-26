@@ -35,6 +35,7 @@
     vc tui           launch the interactive terminal workbench (TUI)
 """
 
+import ast
 import json
 import re
 import subprocess
@@ -275,16 +276,19 @@ def check_files(stage, progress):
 
 
 def checks_for(stage, progress):
-    """(name, one-line description) for each check of the stage."""
+    """(name, summary) for each check of the stage.
+
+    The summary is the first paragraph of the test's docstring, made flat.
+    """
     checks = []
     for path in check_files(stage, progress):
-        source = path.read_text()
-        for test in re.finditer(r"^def (test_\w+)\(", source, re.M):
-            docstring = re.match(r'[^)]*\):\n\s*"""(.*?)(?:\n|""")',
-                                 source[test.end():], re.S)
-            description = (docstring.group(1).strip().rstrip('"').strip()
-                           if docstring else "")
-            checks.append((test.group(1), description))
+        tree = ast.parse(path.read_text())
+        for node in tree.body:
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name.startswith("test_")):
+                docstring = ast.get_docstring(node) or ""
+                summary = " ".join(docstring.split("\n\n")[0].split())
+                checks.append((node.name, summary))
     return checks
 
 
@@ -424,9 +428,8 @@ def print_checks(stage, progress):
     for name, description in checks:
         print("  " + paint("[ ]", "dim") + " " + name[5:].replace("_", " "))
         if description:
-            flat = " ".join(description.split())
-            short = flat[:63] + "..." if len(flat) > 66 else flat
-            print("      " + paint(short, "dim"))
+            for line in wrap(description, width=66, indent="").splitlines():
+                print("      " + paint(line, "dim"))
 
 
 def print_next_steps(ladder, stage):
