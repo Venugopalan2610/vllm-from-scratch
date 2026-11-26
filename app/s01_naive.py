@@ -25,4 +25,20 @@ def naive_generate(model, tokenizer, prompt: str, max_tokens: int) -> list[int]:
       - Do not use a cache here. Stage 02 measures its speedup against this
         number, and this number must be slow.
     """
-    raise NotImplementedError("stage 01: implement naive_generate")
+    def fetch_stop_tokens(model):
+        stop_tokens = model.generation_config.eos_token_id
+        if isinstance(stop_tokens, list):
+            return stop_tokens
+        return [stop_tokens]
+    output = []
+    device = next(model.parameters()).device
+    token_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    for _ in range(max_tokens):
+        logits = model(token_ids, use_cache=False).logits
+        next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+        if next_token in (fetch_stop_tokens(model)):
+            break
+        token_ids = torch.cat([token_ids, next_token], dim=1)
+        output.append(next_token.item())
+    
+    return output
