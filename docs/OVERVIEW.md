@@ -127,6 +127,8 @@ Inside this repository, two key companion documents guide your implementation:
 
 ```bash
 ./vc list             # The full ladder with your progress
+./vc map              # The engine, with the box that each stage builds
+./vc picture 8b       # The ASCII picture of a stage (docs/PICTURES.md)
 ./vc guide 12         # Read the guide for any specific stage
 ./vc test 7           # Run checks for any specific stage
 ./vc info             # Print measured GPU bandwidth, TFLOPs, and roofline ridge

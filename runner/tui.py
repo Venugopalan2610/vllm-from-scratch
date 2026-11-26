@@ -23,15 +23,18 @@ from runner.cli import (
     BACKENDS,
     checks_for,
     commit_stage,
+    current_stage,
     load_progress,
     load_stages,
     progress_counts,
     run_checks,
     save_progress,
+    set_backend,
     stage_files,
     stage_label,
     stage_name,
 )
+from runner import pictures
 from runner.glossary import terms_for_stage
 
 
@@ -60,13 +63,17 @@ class VcTUI:
         self.backend = self.progress["backend"]
         self.data, self.ladder = load_stages(self.backend)
         self.selected_idx = 0
-        self.active_tab = 0  # 0: Guide, 1: Lore, 2: Checks, 3: Console, 4: Solution
-        self.tabs = ["1: Guide", "2: Lore", "3: Checks", "4: Console", "5: Peek Solution"]
+        # 0: Guide, 1: Picture, 2: Lore, 3: Checks, 4: Console, 5: Solution
+        self.active_tab = 0
+        self.tabs = ["1:Guide", "2:Picture", "3:Lore", "4:Checks", "5:Console", "6:Peek"]
+        self.pictures = pictures.load()
+        self._solutions = {}
         self.console_lines = [
             "Welcome to the vc Stage Runner TUI.",
             "Select a stage on the left and press [e] to edit code in Vim.",
             "Press [t] to test, or [s] to submit and advance.",
-            "Use [1-5] or [h]/[l] to switch inspector tabs.",
+            "Use [1-6] or [h]/[l] to switch inspector tabs. [p] shows the picture.",
+            "[PgUp]/[PgDn] or [u]/[d] scroll a long tab.",
         ]
         self.is_running = False
         self.status_message = "Ready. [e] Edit (Vim) · [t] Test · [s] Submit · [Tab] Track · [q] Quit"
@@ -128,7 +135,7 @@ class VcTUI:
         """Run pytest for the stage and update console."""
         self.is_running = True
         self.status_message = f"Testing stage {stage_label(stage)}... please wait"
-        self.active_tab = 3  # Switch to console
+        self.active_tab = 4  # Switch to console
         self.console_lines.append("")
         self.console_lines.append(f"--- Testing Stage {stage_label(stage)}: {stage_name(stage, self.progress)} ---")
 
@@ -148,10 +155,17 @@ class VcTUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def submit_stage(self, stage):
-        """Submit the current stage."""
+        """Submit the current stage. A later stage cannot be banked before the
+        stages under it, and a completed stage is already banked."""
+        current = current_stage(self.ladder, self.progress)
+        if current is None or stage["id"] != current["id"]:
+            where = f"stage {stage_label(current)}" if current else "nothing"
+            self.status_message = (f"Only the current stage can be submitted: "
+                                   f"{where}. [t] tests any stage.")
+            return
         self.is_running = True
         self.status_message = f"Verifying and submitting stage {stage_label(stage)}..."
-        self.active_tab = 3  # Switch to console
+        self.active_tab = 4  # Switch to console
 
         def worker():
             code, passed, failed, output = run_checks(stage, self.progress)
@@ -243,11 +257,122 @@ class VcTUI:
                 pass
             self.init_colors()
             self.stdscr.erase()
-            self.active_tab = 3  # show console
+            self.active_tab = 4  # show console
             files_str = ", ".join(target_files)
             self.console_lines.append("")
             self.console_lines.append(f">>> Returned from {editor} editing {files_str}. Press [t] to test! <<<")
             self.status_message = f"Saved {files_str}. Press [t] to test, or [s] to submit!"
+
+    def picture_lines(self, stage, width):
+        """The ASCII picture of the stage, or a note that it has none."""
+        picture = pictures.for_stage(stage["id"], self.backend, self.pictures)
+        if picture is None:
+            return [("No picture for this stage in docs/PICTURES.md.", curses.color_pair(3))]
+        lines = [(wl, curses.color_pair(3) | curses.A_BOLD)
+                 for wl in textwrap.wrap(picture.caption, width)]
+        lines.append(("", 0))
+        art = picture.art.splitlines()
+        if max((len(line) for line in art), default=0) > width:
+            lines.append((f"(widen the terminal to {max(len(l) for l in art) + 50}"
+                          " columns for the whole picture)", curses.color_pair(7)))
+        lines += [(line, curses.color_pair(1)) for line in art]
+        return lines
+
+    def solution(self, stage):
+        """The reference files of the stage on this track, cached. It reads
+        only what is already here: a fetch would print over the screen."""
+        key = (stage["id"], self.backend)
+        if key not in self._solutions:
+            parts = []
+            for path in stage_files(stage, self.progress):
+                name = Path(path).name
+                local = ROOT / ".solutions" / name
+                text = local.read_text() if local.exists() else None
+                for ref in ("solutions", "origin/solutions"):
+                    if text is None:
+                        out = subprocess.run(["git", "show", f"{ref}:.solutions/{name}"],
+                                             cwd=ROOT, capture_output=True, text=True)
+                        text = out.stdout if out.returncode == 0 else None
+                parts.append(f"--- {path} ---")
+                parts += (text or "Not here yet. Run in a shell: ./vc peek").splitlines()
+                parts.append("")
+            self._solutions[key] = parts
+        return self._solutions[key]
+
+    def tab_lines(self, stage, inner_w):
+        """-> [(text, curses attr)] for the active tab, before the scroll."""
+        plain, head = curses.color_pair(7), curses.color_pair(3) | curses.A_BOLD
+
+        def para(text, indent="  "):
+            return [(indent + wl, plain)
+                    for wl in textwrap.wrap(" ".join(str(text).split()),
+                                            width=inner_w - len(indent))]
+
+        if self.active_tab == 0:  # Guide
+            lines = [(f"NAME:       {stage_name(stage, self.progress)}", plain),
+                     (f"ARC:        {stage['arc_id']} - {stage['arc']}", plain),
+                     (f"DIFFICULTY: {'★' * stage['difficulty']}"
+                      f"{'☆' * (5 - stage['difficulty'])}", plain),
+                     (f"FILES:      {', '.join(stage_files(stage, self.progress))}", plain),
+                     (f"YOU ARE HERE: {stage.get('layer', '')}", plain),
+                     ("", 0), ("THE PROBLEM THAT ASKS FOR THIS STAGE", head)]
+            lines += para(stage.get("because", ""))
+            lines += [("", 0), ("WHAT IS GIVEN", head)]
+            for item in stage.get("given", []):
+                for index, wl in enumerate(textwrap.wrap(item, width=inner_w - 6)):
+                    lines.append((("  - " if index == 0 else "    ") + wl, plain))
+            deliver = (stage.get("jax_deliver", stage["deliver"])
+                       if self.backend == "jax" else stage["deliver"])
+            lines += [("", 0), ("WHAT IS ASKED", head)] + para(deliver)
+            lines += [("", 0), ("WHY THIS STAGE EXISTS", head)] + para(stage.get("insight", ""))
+            if self.backend == "jax" and stage.get("jax_insight"):
+                lines += [("", 0), ("WHAT CHANGES IN JAX", head)] + para(stage["jax_insight"])
+            lines += [("", 0), ("THE PICTURE", head)] + self.picture_lines(stage, inner_w)
+            lines += [("", 0), ("HOW YOU WILL KNOW IT WORKED", head)]
+            lines += para(stage.get("measure", ""))
+            terms = terms_for_stage(stage_label(stage), [stage_label(s) for s in self.ladder])
+            if terms:
+                lines += [("", 0), ("NEW WORDS IN THIS STAGE", head)]
+                for term in terms:
+                    lines += para(f"• {term.name}: {term.definition}")
+            return lines
+
+        if self.active_tab == 1:  # Picture
+            return ([(f"Stage {stage_label(stage)}  {stage_name(stage, self.progress)}", head),
+                     ("", 0)] + self.picture_lines(stage, inner_w))
+
+        if self.active_tab == 2:  # Lore
+            lines = [(f"THE INSIGHT OF STAGE {stage_label(stage)}", head), ("", 0)]
+            lines += para(stage.get("insight", "No insight recorded."), "")
+            if self.backend == "jax" and stage.get("jax_insight"):
+                lines += [("", 0), ("IN JAX", head)] + para(stage["jax_insight"], "")
+            lines += [("", 0), ("LORE.md in the repo root has the long form, "
+                                "with all the arithmetic.", curses.color_pair(1))]
+            return lines
+
+        if self.active_tab == 3:  # Checks
+            checks = checks_for(stage, self.progress)
+            lines = [(f"THE CHECKS ({len(checks)})", head), ("", 0)]
+            for name, desc in checks:
+                lines.append(("[ ] " + name[5:].replace("_", " "), plain))
+                lines += [(line, curses.color_pair(1)) for line in para(desc, "    ")]
+            return lines
+
+        if self.active_tab == 4:  # Console
+            lines = []
+            for item in self.console_lines:
+                for line in str(item).splitlines():
+                    attr = plain
+                    if "SUCCESS" in line or "BANKED" in line or " passed" in line:
+                        attr = curses.color_pair(2) | curses.A_BOLD
+                    elif "FAILED" in line or "ERROR" in line or "REJECTED" in line:
+                        attr = curses.color_pair(4) | curses.A_BOLD
+                    elif line.startswith("---") or line.startswith(">>>"):
+                        attr = curses.color_pair(1) | curses.A_BOLD
+                    lines.append((line, attr))
+            return lines
+
+        return [(line, plain) for line in self.solution(stage)]  # Peek
 
     def render(self):
         self.stdscr.erase()
@@ -340,145 +465,33 @@ class VcTUI:
         content_y = body_y + 2
         content_h = body_h - 3
         inner_w = right_w - 4
+        lines = self.tab_lines(cur_stage, inner_w)   # [(text, curses attr)]
 
-        if self.active_tab == 0:  # Guide
-            lines = [
-                f"NAME:       {stage_name(cur_stage, self.progress)}",
-                f"ARC:        {cur_stage['arc_id']} - {cur_stage['arc']}",
-                f"DIFFICULTY: {'★' * cur_stage['difficulty']}{'☆' * (5 - cur_stage['difficulty'])}",
-                f"FILES:      {', '.join(stage_files(cur_stage, self.progress))}",
-                f"YOU ARE HERE: {cur_stage.get('layer', '')}",
-                "",
-                "THE PROBLEM THAT ASKS FOR THIS STAGE:",
-            ]
-            for wl in textwrap.wrap(" ".join(cur_stage.get("because", "").split()),
-                                    width=inner_w - 4):
-                lines.append(f"  {wl}")
-            lines += ["", "WHAT IS GIVEN:"]
-            for item in cur_stage.get("given", []):
-                for index, wl in enumerate(textwrap.wrap(item, width=inner_w - 6)):
-                    lines.append(("  - " if index == 0 else "    ") + wl)
-            lines += ["", "WHAT IS ASKED:"]
-            for wl in textwrap.wrap(" ".join(cur_stage.get("deliver", "").split()), width=inner_w - 4):
-                lines.append(f"  {wl}")
-            lines += ["", "THE INSIGHT:"]
-            for l in cur_stage.get("insight", "").strip().splitlines():
-                for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
-                    lines.append(f"  {wl}")
-            lines.append("")
-            lines.append("DELIVER:")
-            for l in cur_stage.get("deliver", "").strip().splitlines():
-                for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
-                    lines.append(f"  {wl}")
-            lines.append("")
-            lines.append("MEASURE:")
-            for l in cur_stage.get("measure", "").strip().splitlines():
-                for wl in textwrap.wrap(l, width=inner_w - 4) or [""]:
-                    lines.append(f"  {wl}")
-
-            terms = terms_for_stage(
-                stage_label(cur_stage), [stage_label(item) for item in self.ladder]
-            )
-            if terms:
-                lines.append("")
-                lines.append("NEW TERMS INTRODUCED:")
-                for t in terms:
-                    term_str = f"• {t.name}: {t.definition}"
-                    for wl in textwrap.wrap(term_str, width=inner_w - 4):
-                        lines.append(f"  {wl}")
-
-            for i, line in enumerate(lines[:content_h]):
-                clean = line.rstrip("\r\n")[:inner_w]
+        if self.active_tab == 4:      # the console follows its newest line
+            visible = lines[-content_h:]
+        else:
+            last_top = max(0, len(lines) - content_h)
+            self.right_scroll = max(0, min(self.right_scroll, last_top))
+            visible = lines[self.right_scroll:self.right_scroll + content_h]
+            if len(lines) > content_h:
+                more = (f" {self.right_scroll + 1}-{self.right_scroll + len(visible)}"
+                        f" of {len(lines)}  [u/d] ")
                 try:
-                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
+                    self.stdscr.addstr(body_y + body_h - 1, left_w + right_w - len(more) - 2,
+                                       more, curses.color_pair(3))
                 except curses.error:
                     pass
-
-        elif self.active_tab == 1:  # Lore
-            insight = cur_stage.get("insight", "No lore recorded for this stage.")
-            lore_lines = [
-                f"LORE INSIGHT: Stage {stage_label(cur_stage)}",
-                "=" * len(f"LORE INSIGHT: Stage {stage_label(cur_stage)}"),
-                "",
-            ]
-            for l in insight.splitlines():
-                for wl in textwrap.wrap(l, width=inner_w - 2) or [""]:
-                    lore_lines.append(wl)
-            lore_lines.append("")
-            lore_lines.append("See LORE.md in the repo root for the complete mathematical derivation.")
-            for i, line in enumerate(lore_lines[:content_h]):
-                clean = line.rstrip("\r\n")[:inner_w]
-                try:
-                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
-                except curses.error:
-                    pass
-
-        elif self.active_tab == 2:  # Checks
-            checks = checks_for(cur_stage, self.progress)
-            check_lines = [
-                f"TEST CHECKS ({len(checks)} total):",
-                "------------------------------",
-            ]
-            for name, desc in checks:
-                check_lines.append(f"• {name}")
-                if desc:
-                    for wl in textwrap.wrap(desc, width=inner_w - 6):
-                        check_lines.append(f"    {wl}")
-            for i, line in enumerate(check_lines[:content_h]):
-                clean = line.rstrip("\r\n")[:inner_w]
-                try:
-                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
-                except curses.error:
-                    pass
-
-        elif self.active_tab == 3:  # Console
-            flat_console = []
-            for item in self.console_lines:
-                for sub in str(item).splitlines():
-                    flat_console.append(sub)
-            visible_console = flat_console[-content_h:]
-            for i, line in enumerate(visible_console):
-                color = curses.color_pair(7)
-                if "SUCCESS" in line or "ALL" in line:
-                    color = curses.color_pair(2) | curses.A_BOLD
-                elif "FAILED" in line or "ERROR" in line:
-                    color = curses.color_pair(4) | curses.A_BOLD
-                elif line.startswith("---") or line.startswith(">>>"):
-                    color = curses.color_pair(1) | curses.A_BOLD
-                clean = line.rstrip("\r\n")[:inner_w]
-                try:
-                    self.stdscr.addstr(content_y + i, left_w + 2, clean, color)
-                except curses.error:
-                    pass
-
-        elif self.active_tab == 4:  # Peek Solution
-            sol_content = "Loading reference solution from solutions branch..."
+        for i, (line, attr) in enumerate(visible):
             try:
-                out = subprocess.run(
-                    ["git", "show", f"solutions:.solutions/{cur_stage['file'].split('/')[-1]}"],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                )
-                if out.returncode == 0:
-                    sol_content = out.stdout
-                else:
-                    sol_content = "Solution file not available or not yet fetched."
-            except Exception as e:
-                sol_content = f"Error reading solution: {e}"
-
-            sol_lines = sol_content.splitlines()
-            for i, line in enumerate(sol_lines[:content_h]):
-                clean = line.rstrip("\r\n")[:inner_w]
-                try:
-                    self.stdscr.addstr(content_y + i, left_w + 2, clean, curses.color_pair(7))
-                except curses.error:
-                    pass
+                self.stdscr.addstr(content_y + i, left_w + 2,
+                                   line.rstrip("\r\n")[:inner_w], attr)
+            except curses.error:
+                pass
 
         # 3. Footer Bar
         try:
             self.stdscr.addstr(max_y - 2, 2, self.status_message[: max_x - 4], curses.color_pair(3) | curses.A_BOLD)
-            help_bar = " [↑/↓/j/k] Select · [e] Edit (Vim) · [t] Test · [s] Submit · [1-5] Tab · [Tab] Track · [q] Quit"
+            help_bar = " [↑/↓/j/k] Select · [e] Edit (Vim) · [t] Test · [s] Submit · [1-6] Tab · [p] Picture · [u/d] Scroll · [Tab] Track · [q] Quit"
             self.stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(6))
         except curses.error:
             pass
@@ -517,9 +530,18 @@ class VcTUI:
             elif ch in (curses.KEY_UP, ord("k")):
                 if self.selected_idx > 0:
                     self.selected_idx -= 1
+                    self.right_scroll = 0
             elif ch in (curses.KEY_DOWN, ord("j")):
                 if self.selected_idx < len(self.ladder) - 1:
                     self.selected_idx += 1
+                    self.right_scroll = 0
+            elif ch in (curses.KEY_NPAGE, ord("d"), ord(" ")):
+                self.right_scroll += max(1, self.stdscr.getmaxyx()[0] // 2)
+            elif ch in (curses.KEY_PPAGE, ord("u")):
+                self.right_scroll = max(0, self.right_scroll - max(1, self.stdscr.getmaxyx()[0] // 2))
+            elif ch in (ord("p"), ord("P")):
+                self.active_tab = 1
+                self.right_scroll = 0
             elif ch in (ord("e"), ord("E")):
                 if not self.is_running:
                     self.edit_stage(self.ladder[self.selected_idx])
@@ -527,16 +549,22 @@ class VcTUI:
             elif ch in (ord("\t"),):  # Tab toggles backend
                 new_backend = "jax" if self.backend == "torch" else "torch"
                 self.backend = new_backend
-                self.progress["backend"] = new_backend
+                # set_backend also swaps progress["completed"] to the list of
+                # the new track. Without it, a submit banks the wrong track.
+                set_backend(self.progress, new_backend)
                 self.data, self.ladder = load_stages(new_backend)
                 self.selected_idx = min(self.selected_idx, len(self.ladder) - 1)
+                self.right_scroll = 0
                 self.status_message = f"Switched to {new_backend.upper()} track."
-            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
+            elif ord("1") <= ch < ord("1") + len(self.tabs):
                 self.active_tab = ch - ord("1")
+                self.right_scroll = 0
             elif ch in (ord("h"), curses.KEY_LEFT):
                 self.active_tab = max(0, self.active_tab - 1)
+                self.right_scroll = 0
             elif ch in (ord("l"), curses.KEY_RIGHT):
                 self.active_tab = min(len(self.tabs) - 1, self.active_tab + 1)
+                self.right_scroll = 0
             elif ch in (ord("t"), ord("T")):
                 if not self.is_running:
                     self.run_stage_test(self.ladder[self.selected_idx])

@@ -1,0 +1,81 @@
+# Review 1 (before commit 116731c)
+
+A developer who lands on this repo by chance probably reads it in this order: the README, the file tree, `docs/MAP.md`, and one stage file. That is what I read, and my review follows. I did not run `setup.sh` or any stage.
+
+## First 30 seconds: the README
+
+**The good parts:**
+
+- **The promise is clear and concrete.** "Stage 01 is the slowest engine you will ever write. At stage 28, the same GPU runs an OpenAI-compatible server." I know the start and the end.
+- **The five questions are a strong hook.** "Why do 32 concurrent users cost almost the same as 1 user?" makes a backend developer want the answer.
+- **"The machine tells you" is a real difference.** Most "build your own X" repos have no measured gates. This repo has them.
+- **The quickstart is short, and it has a Colab option.** A developer with no GPU can still start.
+- **The disclaimer about the vLLM project is correct and near the top.** That builds trust.
+
+**The parts that make me stop:**
+
+- **"Do not stop. Continue. Be better than before."** This line sounds like a motivational poster. A developer who arrives by chance cannot see why it is there. It lowers trust a little. I would remove it.
+- **I see no proof that the repo works.** The README shows no terminal output, no screenshot, and no table of measured numbers. For a repo that says "a measurement proves it", this is the largest gap. One table would help, for example "stage 01: X tok/s, stage 28: Y tok/s on an L4".
+- **The README does not state the effort.** I do not know if the course takes 2 weekends or 3 months. That fact decides if I start.
+
+## The next 2 minutes: the file tree
+
+This is where the repo starts to look large and hard to learn.
+
+- **The stage count is not the same in all documents.** The README says the capstone is stage 28. `OVERVIEW.md` says 35 stages in 9 arcs. `app/` also has 08b, 08c, 18b, 24b, the `j*` files, and practicums I, J and K. The git log mentions a "Stage 32 Jev". A new reader asks: "How many stages are there?"
+- **The course has two entry points.** The README tells me to read `MAP.md` and then the Part 0 notebooks. It also tells me that `./vc` "always shows" the next step. There are 94 notebooks and about 1,900 cells. I do not know which path is primary.
+- **Some names do not explain themselves.** `jvllm/`, `tvllm/`, `cudalib/`, `extras/typed_decisions/` and `vc` tell me nothing without a search. `LORE.md` (59 KB) and `stages.yaml` (50 KB) at the root look like internal files.
+- **The requirements are high.** You need at least 10 GB of VRAM, `nvcc` and Python 3.12. Many developers stop here. The Colab link reduces this problem, so put it first. The README already does this, which is correct.
+
+## When I open the files: the quality is high
+
+- **`docs/MAP.md` is the best file in the repo.** It maps the engine to router, service, repo and database, and it gives the stage number for each box. A backend developer understands it immediately. It deserves a link in the first screen of the README, not in the third section.
+- **The stage stubs are good specifications.** `app/s05_continuous.py` gives the required attributes, the order of the steps in `step()`, and the traps. It is clear and it respects the reader.
+- **The real `.cu` files are a strong selling point.** Five hand-written CUDA kernels, not Triton, make this repo different from nano-vllm and similar projects. The README does not mention them. Only `OVERVIEW.md` does.
+- **`CONTRIBUTING.md` is honest.** It says that CI has no GPU job. A skeptical developer notices this in a good way. It also means that the GPU stages have no public proof.
+
+## My verdict as that developer
+
+I would star the repo. I would probably read `MAP.md` and stage 01. I would start the course only if I had a GPU and a clear time estimate. The content looks better than the first screen makes it look.
+
+## The five changes with the largest effect
+
+1. Add a proof block near the top: a short sample of `./vc` output and one table of measured speedups.
+2. Give one stage count and one time estimate. Use the same numbers in the README, `OVERVIEW.md` and `./vc`.
+3. Move the `MAP.md` link and the "5 hand-written CUDA kernels" fact into the first screen.
+4. Remove the slogan line.
+5. Explain `jvllm`, `tvllm` and `cudalib`, or move them. Consider a move of `LORE.md` and `stages.yaml` out of the root.
+
+I can make a draft of the new README top section if you want.
+
+---
+
+# Review 2 (after commit 116731c)
+
+I cloned the repo again from GitHub into my scratchpad (commit `116731c`) and read it as a new visitor. The new README fixes four of my five points. The first screen now gives a developer a reason to trust the repo.
+
+## What is fixed
+
+1. **You added proof.** The README now shows real `./vc run` output and a table of before and after numbers. `docs/proof/` has the raw logs, the machine details, and a section "What this does not prove". That section builds more trust than the numbers do.
+2. **The stage count is the same everywhere.** The README, `OVERVIEW.md` and `stages.yaml` all agree: 33 core stages and 2 extensions, 35 in total. I counted `stages.yaml`, and the numbers match.
+3. **The kernels and the map are on the first screen.** "Five CUDA kernels that you write by hand, not Triton" is now the second fact a reader sees.
+4. **The slogan is gone.**
+5. **Every folder has a name and a purpose.** The table "What is in this repo" explains `tvllm`, `jvllm`, `cudalib` and `extras`. The note "You do not need to browse the notebooks" solves the problem of two entry points.
+
+Also, `./vc` in a new clone with no setup prints one clear line: "No virtualenv yet. Run: ./setup.sh". That is correct.
+
+## What still stops a new visitor
+
+- **The effort is still unknown.** The README does not say how long the course takes. The proof log gives "about 15 minutes" for `dev/proof.sh`, but I cannot find a time estimate for a learner. One line is sufficient, for example "about N hours for the core stages".
+- **One line of the proof block makes the engine look wrong.** "identical: 10/24. different from a near tie ... : 14" tells a new reader that 14 of 24 outputs differ. The line also uses internal terms: "move 6" and "Part 0 assumption 6". A new reader does not know them yet. Put the summary first: "0 real differences from the oracle. 14 rounding flips at near ties." Or remove the line from the README and keep it in the log.
+- **Some table terms need an explanation.** "Time over the memory floor" and "given parts" are not clear on the first screen. Add a short phrase, for example "(1.0 = as fast as the memory allows)". Also explain that "given parts" means the course's slow default parts.
+- **The README promises a stage 01 to stage 28 journey, but the proof shows 06 to 19.** The headline is 12.3x with the parts from 06 to 19. The proof log has decode numbers for stages 21 and 23, but the README does not show a stage 28 number, so the start and the end do not connect. A number from stage 01 against stage 28 would make the promise concrete.
+
+## Smaller points
+
+- The first screen is now dense. The disclaimer, two paragraphs, three bullets and a large code block all come before the questions. This is acceptable, but I think it is at the upper limit.
+- The git history still has "Stage 32 TypeSafe Jev" in old commit messages. Only a very curious reader sees it, so leave it.
+
+## Verdict
+
+Before, I would star the repo. Now I would also run `setup.sh`, if I had a GPU. The last large gap is the time estimate. After that, fix the oracle line: a skeptical developer can read it as "the outputs are wrong".

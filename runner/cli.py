@@ -20,6 +20,8 @@
 
   REFERENCE
     vc list          the whole ladder
+    vc map           the engine, and the box that each stage builds
+    vc picture [n]   the ASCII picture of a stage (docs/PICTURES.md)
     vc lore [stage]  the one-paragraph insight of a stage
     vc info          the roofline of your GPU
     vc math [B] [n]  read and compute times, with every division shown
@@ -43,6 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from runner import momentum  # noqa: E402
+from runner import pictures  # noqa: E402
 from runner.glossary import terms_for_stage  # noqa: E402
 from runner.notebooks import notebooks_for_stage  # noqa: E402
 from runner.style import paint  # noqa: E402  (needs ROOT on the path)
@@ -390,6 +393,18 @@ def print_files(stage, progress):
                            "dim"))
 
 
+def print_picture(stage, progress, title="THE PICTURE"):
+    """The ASCII picture of the stage, from docs/PICTURES.md."""
+    picture = pictures.for_stage(stage["id"], progress["backend"])
+    if picture is None:
+        return
+    if title:
+        heading(title)
+    print("  " + paint(picture.caption, "dim") + "\n")
+    for line in picture.art.splitlines():
+        print("  " + paint(line, "cyan"))
+
+
 def print_notebooks(stage):
     label = stage_label(stage)
     nbs = notebooks_for_stage(label)
@@ -453,6 +468,7 @@ def cmd_guide(ladder, progress, stage_id=None):
     if progress["backend"] == "jax" and stage.get("jax_insight"):
         heading("WHAT CHANGES IN JAX")
         print(wrap(" ".join(stage["jax_insight"].split())))
+    print_picture(stage, progress)
     print_notebooks(stage)
     heading("HOW YOU WILL KNOW IT WORKED")
     print(wrap(stage["measure"]))
@@ -620,6 +636,7 @@ def cmd_status(ladder, progress):
         print("  " + paint(f"active time on this stage so far: {momentum.format_minutes(spent)}", "dim"))
     print_momentum(stage, progress)
     print("\n  " + paint("./vc guide", "cyan") + "   what to build and why")
+    print("  " + paint("./vc map", "cyan") + "     where it lives in the engine")
     print("  " + paint("./vc test", "cyan") + "    run the checks")
     print("  " + paint("./vc submit", "cyan") + "  bank it, open the next stage")
     print("\n  " + paint(momentum.MOTTO, "dim") + "\n")
@@ -703,10 +720,45 @@ def cmd_lore(ladder, progress, stage_id=None):
     if progress["backend"] == "jax" and stage.get("jax_insight"):
         heading("In JAX")
         print(wrap(" ".join(stage["jax_insight"].split())))
+    print_picture(stage, progress, "The picture")
     heading("Deliver")
     print("  " + stage_text(stage, progress, "deliver"))
     heading("Measure")
     print(f"  {stage['measure']}\n")
+    return 0
+
+
+def cmd_picture(ladder, progress, stage_id=None):
+    stage = resolve_or_report(ladder, progress, stage_id)
+    if not stage:
+        return 1
+    if pictures.for_stage(stage["id"], progress["backend"]) is None:
+        print(paint(f"No picture for {stage['id']} in docs/PICTURES.md.", "yellow"))
+        return 1
+    print("\n" + paint(f"Stage {stage_label(stage)}  {stage_name(stage, progress)}",
+                       "bold", "cyan"))
+    print_picture(stage, progress, "")
+    print()
+    return 0
+
+
+def cmd_map(ladder, progress):
+    """The map of the engine, with the label of each stage colored."""
+    picture = pictures.load().get("map")
+    if picture is None:
+        print(paint("No map in docs/PICTURES.md.", "yellow"))
+        return 1
+    current = current_stage(ladder, progress)
+    done = {stage_label(stage) for stage in ladder
+            if stage["id"] in progress["completed"]}
+    print("\n" + paint("THE ENGINE", "bold", "cyan") + "   "
+          + paint(picture.caption, "dim") + "\n")
+    print(pictures.color_map("\n".join("  " + line for line in picture.art.splitlines()),
+                             done, current and stage_label(current), paint))
+    print("\n  " + paint("done", "green") + "   "
+          + paint("current", "yellow", "bold") + "   " + paint("ahead", "dim")
+          + "      " + paint(f"{count_text(ladder, progress)} complete. "
+                             "The words: docs/MAP.md", "dim") + "\n")
     return 0
 
 
@@ -846,6 +898,9 @@ def main():
             "list": lambda: cmd_list(ladder, progress),
             "ls": lambda: cmd_list(ladder, progress),
             "lore": lambda: cmd_lore(ladder, progress, stage_id),
+            "picture": lambda: cmd_picture(ladder, progress, stage_id),
+            "pic": lambda: cmd_picture(ladder, progress, stage_id),
+            "map": lambda: cmd_map(ladder, progress),
             "peek": lambda: (cmd_peek_apply(ladder, progress, stage_id)
                              if "--apply" in arguments
                              else cmd_peek(ladder, progress, stage_id)),

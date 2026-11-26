@@ -87,3 +87,50 @@ def test_every_stage_says_where_it_is_why_and_what_is_given(stage):
     assert stage.get("layer", "").strip(), "no `layer:`: where on docs/MAP.md?"
     assert stage.get("because", "").strip(), "no `because:`: which bill asks for it?"
     assert stage.get("given"), "no `given:`: what does the learner have before they start?"
+
+
+# ---------------------------------------------------------------- pictures
+# docs/PICTURES.md has one ASCII picture for each stage. `./vc guide`, `./vc
+# picture` and the TUI show it, so a missing or broken picture is a hole in
+# the guide. The rules are at the top of docs/PICTURES.md.
+
+PICTURE_WIDTH = 72
+
+
+def pictures():
+    from runner import pictures as module
+    return module.load()
+
+
+@pytest.mark.parametrize("stage", all_stages(), ids=lambda stage: stage["id"])
+def test_every_stage_has_a_picture(stage):
+    picture = pictures().get(stage["id"])
+    assert picture, f"docs/PICTURES.md has no '## {stage['id']}' entry"
+    assert picture.caption and picture.art.strip()
+
+
+def test_pictures_name_only_real_stages():
+    real = {stage["id"] for stage in all_stages()} | {"map"}
+    keys = {key.removesuffix(" jax") for key in pictures()}
+    assert not keys - real, f"pictures of stages that do not exist: {keys - real}"
+    for key in pictures():
+        if key.endswith(" jax"):
+            stage = next(s for s in all_stages() if s["id"] == key.removesuffix(" jax"))
+            assert "jax_file" in stage, f"'{key}': the stage is not on the JAX track"
+
+
+@pytest.mark.parametrize("key", sorted(pictures()))
+def test_picture_is_plain_ascii_and_fits(key):
+    for number, line in enumerate(pictures()[key].art.splitlines(), 1):
+        assert line.isascii(), f"{key}, line {number} is not plain ASCII: {line!r}"
+        assert len(line) <= PICTURE_WIDTH, (
+            f"{key}, line {number} has {len(line)} columns, more than "
+            f"{PICTURE_WIDTH}: {line!r}")
+
+
+def test_the_picture_map_names_only_real_stages():
+    from runner.pictures import LABEL
+    real = {label(stage) for stage in all_stages()}
+    named = set(LABEL.findall(pictures()["map"].art))
+    assert not named - real, f"the map names stages that do not exist: {named - real}"
+    assert not real - named, f"the map leaves out these stages: {real - named}"

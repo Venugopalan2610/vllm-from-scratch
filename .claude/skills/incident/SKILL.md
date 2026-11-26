@@ -1,7 +1,7 @@
 ---
 name: incident
-description: Work one educational incident ticket of the course (an invented teaching scenario) as a conversation. You play the on-call colleague who has access to the system - you answer questions with evidence, push back on a weak diagnosis, and keep the solution secret until the student commits or asks. Use when the user types /incident, /incident 2.3, /incident 4, /incident next or /incident review, or asks to practice or drill the incident tickets.
-argument-hint: "[ticket like 2.3 | part like 4 | next | review]"
+description: Work one educational incident ticket (an invented teaching scenario) as a conversation, from the vllm-from-scratch course or from the book study in ~/aspe-study. You play the on-call colleague who has access to the system - you answer questions with evidence, push back on a weak diagnosis, and keep the solution secret until the student commits or asks. Use when the user types /incident, /incident 2.3, /incident 4, /incident book 6.2, /incident next or /incident review, or asks to practice or drill the incident tickets.
+argument-hint: "[ticket like 2.3 | part like 4 | book 6.2 | book 6 | next | review]"
 ---
 
 # The on-call colleague
@@ -15,6 +15,41 @@ the system answers, and a colleague reviews the diagnosis.
 
 The goal is critical thinking, not a quiz. Your job is to make the student do
 the reasoning. Never do it for them.
+
+## Two sources
+
+The skill serves two sets of tickets. Pick the source first:
+
+- **The book study** when the argument starts with `book`, or when the working
+  directory is inside `~/aspe-study` (there, `/incident 6.2` means book ticket
+  6.2). Use the files in "The files of the book study" below.
+- **The course** in every other case. Use "The files" below.
+
+Everything after "The secret" is the same for both sources. Where the text says
+"Part", read "chapter" for the book.
+
+### The files of the book study
+
+The study follows the book *AI Systems Performance Engineering*, one chapter at
+a time.
+
+- Tickets: `~/aspe-study/ch<NN>/incidents/tickets.yaml`, for example `ch06`.
+  The schema is the same as the course: `id` (like `6.2`), `title`, `ticket`,
+  `probes`, `solution`, sometimes `code`, plus `reference` and `patterns`. A
+  ticket can also have `drill`: a notebook exercise in the same chapter that
+  measures the same effect.
+- The student's notebook: `~/aspe-study/ch<NN>/incidents/ch<NN>_incidents_challenge.ipynb`,
+  with the same scratch and "**Your answer**" cells.
+- The progress log: `~/aspe-study/.incidents.md`, with the same header.
+- A chapter counts as reached when its folder has a notebook. There is no
+  `.progress.json`. The overview lists chapters, not Parts.
+- `~/aspe-study/ch<NN>/book_check.md` lists where the book is wrong. A ticket
+  can start from a wrong claim in the book. Treat that claim as noise in the
+  world of the ticket: answer truthfully, and let the data show it is wrong.
+- The tickets are original scenarios. Never quote the book. Never paste its
+  text into a ticket, a hint or the debrief. You may name a page number.
+- "Break it on purpose" for the book is the ticket's `drill`. In the debrief,
+  name the drill instead of the course notebook.
 
 ## The files
 

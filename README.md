@@ -124,7 +124,7 @@ Three rules:
 | `app/` | **The only folder that you edit.** One file for each stage, with its spec in its docstrings. |
 | `tests/` | The checks of each stage. They are the specification. You never edit them. |
 | `course/` | The notebooks, Part 0 to Part 8. `./vc guide` tells you which to open. |
-| `docs/` | The map, the method, the overview, and the proof log. |
+| `docs/` | The map, the method, the overview, the proof log, and one ASCII picture for each stage (`./vc picture`). |
 | `stages.yaml` | The list of the stages: what is given, what is asked, and why. `./vc` reads it. |
 | `LORE.md` | The derivations behind the stages. `./vc lore` prints the one-paragraph insight of your stage. |
 | `cudalib/` | Given: it compiles your `.cu` files and times the GPU honestly. |

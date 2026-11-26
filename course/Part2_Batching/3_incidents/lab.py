@@ -65,6 +65,30 @@ def batched_greedy(model, tokenizer, prompts, max_tokens):
     return generated
 
 
+@torch.inference_mode()
+def top_two_logits(model, tokenizer, prompt, max_tokens):
+    """The run of greedy_alone, with the two largest logits at each token.
+
+    Entry k holds (largest, second largest) of the logits that chose token k
+    of greedy_alone. The distance between them says how close the argmax was
+    to another token."""
+    device = next(model.parameters()).device
+    ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
+    stops = stop_ids(model)
+    forward_pass = model(ids, use_cache=True)
+    cache, pairs = forward_pass.past_key_values, []
+    for _ in range(max_tokens):
+        logits = forward_pass.logits[0, -1]
+        largest, second = logits.float().topk(2).values.tolist()
+        pairs.append((largest, second))
+        next_token = int(logits.argmax())
+        if next_token in stops or len(pairs) == max_tokens:
+            break
+        forward_pass = model(torch.tensor([[next_token]], device=device), past_key_values=cache, use_cache=True)
+        cache = forward_pass.past_key_values
+    return pairs
+
+
 def first_difference(generated, expected):
     for position, (got, want) in enumerate(zip(generated, expected)):
         if got != want:

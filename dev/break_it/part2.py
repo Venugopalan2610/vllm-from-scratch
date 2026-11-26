@@ -303,10 +303,184 @@ kept = max(batch_size for batch_size in steps if 1000 / steps[batch_size] >= PRO
 print(f'the fastest batch: {best}. The largest batch that keeps the promise: {kept}, '
       f'which costs {1 - (kept / steps[kept]) / (best / steps[best]):.0%} of the total throughput')
 '''),
+    ('d9', '''
+# Exercise 9: the order of eight additions
+
+Exercises 9, 10 and 11 have no bug in the code. The fault is an assumption:
+"at temperature 0, the same prompt gives the same tokens at every batch
+size". Part 1, Ticket 5 showed the symptom. These three exercises show the
+cause, one level at a time: one sum, one layer, one whole answer.
+
+A **reduction** combines many values into one value. A sum is a reduction.
+The **reduction order** is the sequence in which the additions happen. In
+exact arithmetic the order has no effect. In floating point, the hardware
+rounds the result after each addition, so the order can change the result.
+
+**Given:**
+
+- float32 holds 24 bits of precision. Near 100,000,000 the distance between
+  two neighbouring float32 numbers is 8. So float32 holds 100,000,000 and
+  100,000,008, and no number between them.
+- The eight values `[100000000, 3, 3, 3, 3, 3, 3, 3]`. The exact sum is
+  100,000,021.
+- Three orders of the same additions:
+  1. Left to right, one value at a time.
+  2. Right to left, one value at a time.
+  3. Two **tiles** of 4 values: the sum of values 0 to 3, the sum of values 4
+     to 7, then the sum of the two tile sums. A GPU kernel adds in tiles like
+     this.
+
+**Asked:** the float32 result of each order. This cell runs on the CPU.
+''', '''
+values = torch.tensor([100_000_000.0, 3, 3, 3, 3, 3, 3, 3], dtype=torch.float32)
+
+def sum_in_order(terms):
+  """Add the terms one at a time, in float32, in the order given."""
+  running_sum = torch.tensor(0.0, dtype=torch.float32)
+  for term in terms:
+    running_sum = running_sum + term                                  # rounds to float32 after each addition
+  return running_sum
+
+spacing_near_1e8 = (torch.nextafter(values[0], torch.tensor(float('inf'))) - values[0]).item()
+tile_sums = torch.stack([sum_in_order(values[0:4]), sum_in_order(values[4:8])])
+print(f'distance between neighbouring float32 numbers near 1e8: {spacing_near_1e8:.0f}')
+print(f'exact sum:     {sum(int(value) for value in values.tolist()):,}')
+print(f'left to right: {int(sum_in_order(values)):,}')
+print(f'right to left: {int(sum_in_order(values.flip(0))):,}')
+print(f'tiles of 4:    {int(sum_in_order(tile_sums)):,}   (the tile sums: {[int(tile_sum) for tile_sum in tile_sums]})')
+'''),
+    ('d10', '''
+# Exercise 10: one layer at six batch sizes
+
+**Given:**
+
+- `gate_proj` of layer 0 of Qwen3-1.7B is a linear layer with 2048 inputs and
+  6144 outputs. Each output is a dot product of 2048 terms, so each output is
+  a reduction.
+- One input row is "the user". The other rows of the batch are random rows:
+  the other users.
+- The cell computes the output of the user row at batch sizes 1, 2, 8, 32, 64
+  and 128, in bfloat16. It compares each output with the output at batch 1,
+  bit for bit. The input of the user row is the same at every batch size.
+- The profiler prints the name of each CUDA kernel that ran. A name with
+  `gemv` is a matrix times one vector (**GEMV**). A name with `gemm` is a
+  matrix times a matrix (**GEMM**). A kernel named `splitKreduce` means
+  **split-K**: the kernel divides the terms of each dot product among
+  several thread blocks, and a second kernel adds their partial sums.
+- Then the cell does the same in float32, with `gate_proj` of Qwen3-0.6B
+  (1024 inputs, 3072 outputs).
+
+**Asked:**
+
+- Is the user row at batch 64 bit-identical to the user row at batch 1?
+- How many different kernels run over the six batch sizes?
+- Does float32 remove the differences, or only make them smaller?
+''', '''
+from torch.profiler import profile, ProfilerActivity
+
+def kernel_names(layer, inputs):
+  """The names of the CUDA kernels that one call of the layer runs, cut to 60 characters."""
+  with profile(activities=[ProfilerActivity.CUDA]) as trace:
+    layer(inputs)
+    torch.cuda.synchronize()
+  return [event.key[:60] for event in trace.key_averages() if event.device_type.name == 'CUDA']
+
+@torch.inference_mode()
+def one_row_at_each_batch(layer, dtype):
+  torch.manual_seed(0)
+  user_row = torch.randn(1, layer.in_features, device=device, dtype=dtype)
+  user_output_alone = layer(user_row)[0]
+  for batch in (1, 2, 8, 32, 64, 128):
+    other_rows = torch.randn(batch - 1, layer.in_features, device=device, dtype=dtype)
+    inputs = torch.cat([user_row, other_rows])
+    user_output_in_batch = layer(inputs)[0]
+    outputs_that_differ = (user_output_in_batch != user_output_alone).sum().item()
+    largest_difference = (user_output_in_batch.float() - user_output_alone.float()).abs().max().item()
+    print(f'  batch {batch:3d}: {outputs_that_differ:4d} of {user_output_alone.numel()} outputs differ, '
+          f'largest {largest_difference:.2e}   {kernel_names(layer, inputs)}')
+
+print('Qwen3-1.7B, gate_proj of layer 0, bfloat16')
+one_row_at_each_batch(model.model.layers[0].mlp.gate_proj, torch.bfloat16)
+exact = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-0.6B', dtype=torch.float32).cuda().eval()
+print('Qwen3-0.6B, gate_proj of layer 0, float32')
+one_row_at_each_batch(exact.model.layers[0].mlp.gate_proj, torch.float32)
+'''),
+    ('d11', '''
+# Exercise 11: the same prompt at batch 1 and batch 64
+
+**Given:**
+
+- `lab.batched_greedy` is correct. In Exercise 2 it matched every row alone
+  in float32.
+- The batch holds the **same prompt** many times. So the batch has no pads,
+  and every row has exactly the same input.
+- Three prompts, 40 tokens each, at batch sizes 8, 32, 48, 64 and 96. First
+  in bfloat16 on Qwen3-1.7B, then in float32 on Qwen3-0.6B.
+- `lab.top_two_logits` repeats the run alone, and gives the largest and the
+  second largest logit at each token. Their distance is the **gap**. A small
+  gap means that the argmax was close to another token.
+- `largest_logit_change` runs one prompt at batch 1 and at batch 64, and
+  gives the largest change of any logit at the first decode step: the noise
+  that the batch size adds after all 28 layers.
+- One bfloat16 step is the distance between two neighbouring bfloat16
+  numbers. Between 16 and 32 it is 0.125. Between 32 and 64 it is 0.25.
+
+**Asked:**
+
+- At which batch sizes does row 0 differ from the row alone?
+- Inside one batch, do the rows differ from each other?
+- What is the gap at the first different token, in bfloat16 steps?
+- Does a larger batch always differ more?
+''', '''
+PROMPTS_REPEATED = ['The three largest cities in Japan are',
+                    'My favourite recipe for pancakes is',
+                    'The first person to walk on the moon was']
+ANSWER_TOKENS = 40
+
+def step_at(value, dtype):
+  """The distance from `value` to the next larger number of `dtype`."""
+  number = torch.tensor(value, dtype=dtype)
+  return (torch.nextafter(number, torch.tensor(float('inf'), dtype=dtype)) - number).item()
+
+@torch.inference_mode()
+def largest_logit_change(model_under_test, prompt, batch):
+  """The largest change of any logit at the first decode step, between batch 1 and `batch`."""
+  ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
+  first_token = model_under_test(ids).logits[:, -1].argmax(-1, keepdim=True)
+  logits_by_batch = []
+  for rows in (1, batch):
+    prefill = model_under_test(ids.repeat(rows, 1), use_cache=True)
+    decode = model_under_test(first_token.repeat(rows, 1), past_key_values=prefill.past_key_values, use_cache=True)
+    logits_by_batch.append(decode.logits[0, -1].float())
+  return (logits_by_batch[1] - logits_by_batch[0]).abs().max().item()
+
+def same_prompt_at_each_batch(model_under_test, dtype, name):
+  print(name)
+  for prompt in PROMPTS_REPEATED:
+    reference = lab.greedy_alone(model_under_test, tokenizer, prompt, ANSWER_TOKENS)
+    top_two = lab.top_two_logits(model_under_test, tokenizer, prompt, ANSWER_TOKENS)
+    print(f'  {prompt!r}: smallest gap in the run alone {min(largest - second for largest, second in top_two):.3f}, '
+          f'largest logit change from batch 1 to batch 64 {largest_logit_change(model_under_test, prompt, 64):.2e}')
+    for batch in (8, 32, 48, 64, 96):
+      rows = lab.batched_greedy(model_under_test, tokenizer, [prompt] * batch, ANSWER_TOKENS)
+      rows_agree = all(row == rows[0] for row in rows)
+      position = lab.first_difference(rows[0], reference)
+      if position is None:
+        where = 'never'
+      else:
+        largest, second = top_two[position]
+        where = (f'at token {position}: gap alone {largest - second:.3f} = '
+                 f'{(largest - second) / step_at(largest, dtype):.1f} steps of {dtype} at {largest:.2f}')
+      print(f'    batch {batch:3d}: rows of the batch all equal: {rows_agree!s:5s}   first difference from alone: {where}')
+
+same_prompt_at_each_batch(model, torch.bfloat16, 'Qwen3-1.7B, bfloat16')
+same_prompt_at_each_batch(exact, torch.float32, 'Qwen3-0.6B, float32')
+del exact; torch.cuda.empty_cache()
+'''),
 ]
 
 MYSTERY = '''
-# Exercise 9: three mystery batches
+# Exercise 12: three mystery batches
 
 The module `mystery.py` holds three batched loops: `mystery_a`, `mystery_b`
 and `mystery_c`. Each one takes a list of prompts and returns one answer for
@@ -338,7 +512,8 @@ MYSTERY_NAMES = ['mystery_a', 'mystery_b', 'mystery_c']
 FINGERPRINT_ROWS = ['right padding, read position -1', 'the mask only in the prefill',
                     'a larger batch that reads more KV', 'a static batch with one long answer',
                     'no eviction at the stop token', 'arrivals above the service rate',
-                    'the pad id is the end-of-turn id', 'the fastest batch breaks the promise']
+                    'the pad id is the end-of-turn id', 'the fastest batch breaks the promise',
+                    'temperature 0 at another batch size']
 
 SOLUTIONS = {
     'd1': '''
@@ -517,6 +692,123 @@ With a cache that does not copy, the step grows more slowly, and the same
 promise allows a larger batch. The rule is the same: choose the batch from the
 promise to each user, then maximize the total.
 ''',
+    'd9': '''
+### What happens
+
+| Order | The steps | float32 result |
+|---|---|---|
+| left to right | `100000000 + 3` = 100,000,003, which rounds to 100,000,000. The same happens 7 times. | 100,000,000 |
+| tiles of 4 | Tile 1: each `+ 3` rounds away, so 100,000,000. Tile 2: `3+3+3+3` = 12, exact. Then `100000000 + 12` = 100,000,012, which is halfway between 100,000,008 and 100,000,016. The tie rounds to the even neighbour: 100,000,016. | 100,000,016 |
+| right to left | `3+3+...+3` = 21, exact. Then `21 + 100000000` = 100,000,021, which rounds to 100,000,024. | 100,000,024 |
+
+The same eight values give three different sums. None of them is the exact
+sum, 100,000,021. Each order lost a different amount in the rounding.
+
+- **Crash?** No.
+- **When?** Each time that a small value meets a large running sum.
+- **What?** A result that depends on the order, with no error and no warning.
+- **The surprise.** The right-to-left order is the closest. The small values
+  first add up to a number large enough to survive the rounding. No order is
+  "the correct one" in float32. Each order is a different, valid rounding.
+
+**The fingerprint.** The same values, a different order, a different last
+bit.
+''',
+    'd10': '''
+### What happens
+
+In the reference run (one RTX 4080 Laptop GPU, torch 2.13):
+
+| batch | bfloat16: outputs that differ from batch 1 | float32: outputs that differ from batch 1 | the kernel, bfloat16 | the kernel, float32 |
+|---|---|---|---|---|
+| 1 | 0 of 6144 | 0 of 3072 | GEMV | GEMV |
+| 2 | 10, by 0.0078 | 2672, by 1.2e-6 | CUTLASS GEMM | `gemmSN` GEMM |
+| 8 | 10, by 0.0078 | 2672, by 1.2e-6 | CUTLASS GEMM | `gemmSN` GEMM |
+| 32 | 10, by 0.0078 | 2804, by 2.2e-6 | CUTLASS GEMM | `sgemm 128x32` + `splitKreduce` |
+| 64 | 10, by 0.0078 | 2804, by 2.2e-6 | `gemm 128x64` | `sgemm 128x64` + `splitKreduce` |
+| 128 | 10, by 0.0078 | 2804, by 2.2e-6 | `gemm 128x128` | `sgemm 128x64` |
+
+- **Crash?** No.
+- **When?** From batch 2 on. The input of the user row never changed. Only
+  the number of the other rows changed.
+- **What?** cuBLAS selects a kernel from the shape of the whole matrix. Batch
+  1 is a matrix times one vector, so it gets a GEMV kernel. Batch 2 and more
+  get a GEMM kernel. In bfloat16 there are 5 kernels over the 6 batch sizes,
+  with tiles of 128x64 and 128x128. Each kernel adds the 2048 terms of a dot
+  product in its own order. In float32, batch 32 and 64 use split-K: the
+  `splitKreduce` kernel adds the partial sums of several thread blocks. At
+  batch 128 there are enough output tiles to fill the card, and split-K goes
+  away again.
+- **The surprise.** bfloat16 shows **fewer** differences than float32: 10 of
+  6144 against about 2700 of 3072. The kernels accumulate in float32 inside,
+  and then round the output to bfloat16. A bfloat16 number has only 8 bits of
+  precision, so most of the small float32 differences round to the same
+  bfloat16 number. But a difference that survives is a whole bfloat16 step,
+  0.0078, not a small fraction of one. float32 differs almost everywhere, by
+  0.0000012 to 0.0000022.
+
+So float32 does not remove the differences. It makes each one 3,500 to 6,500
+times smaller.
+
+**The fingerprint.** The row is the same, the batch size is different, the
+kernel name is different, and the last bits are different.
+''',
+    'd11': '''
+### What happens
+
+In the reference run (the same card):
+
+| prompt | batch 8 | batch 32 | batch 48 | batch 64 | batch 96 | gap alone at the first difference |
+|---|---|---|---|---|---|---|
+| cities of Japan, bfloat16 | same | same | same | token 14 | token 14 | 0.125 = 1 bfloat16 step at 27.75 |
+| pancakes, bfloat16 | same | same | token 23 | token 23 | token 23 | 0.125 = 1 bfloat16 step at 23.75 |
+| moon, bfloat16 | same | token 13 | token 13 | same | same | 0.25 = 2 bfloat16 steps at 19.25 |
+| all three, float32 | same | same | same | same | same | (the smallest gaps were 0.026 to 0.072) |
+
+- **Crash?** No.
+- **When?** Late in the answer: at token 13, 14 or 23 of 40. The answers are
+  identical up to that token.
+- **What?** Fluent text that is different from that token on. One different
+  token changes the input of every step after it, so the answers never join
+  again.
+- **The rows inside a batch.** They were **always** equal. Each row runs
+  through the same kernel with the same tiles, and the rows do not mix in a
+  matmul. So the result depends on the **size** of the batch, not on the
+  position of the row in it.
+- **The gap and the noise.** At each first difference, the gap of the run
+  alone was 1 or 2 bfloat16 steps. The noise is larger than one layer
+  suggests: from batch 1 to batch 64, the largest logit changed by 0.19 to
+  0.38. Exercise 10 showed 10 outputs of one layer that moved by one step.
+  Each layer passes its changes to the next, and after 28 layers some logits
+  move by 1 to 3 bfloat16 steps. That is enough to swap two tokens with a gap
+  of 1 or 2 steps. This is the number of Part 1, Ticket 5.
+- **The surprise.** A larger batch does not always differ more. The moon
+  prompt differs at batch 32 and 48, and it is identical at 64 and 96. Batch
+  64 uses another kernel (Exercise 10), and its rounding at token 13 happens
+  to agree with batch 1. The variable is the kernel, not the size.
+
+The pancakes prompt had a gap of 0.000 at one token, an exact tie in
+bfloat16, and that token did not change. The tie was the same in both runs,
+and the argmax took the same index. A small gap is necessary for a swap. It
+is not sufficient.
+
+In float32 every answer matched, although Exercise 10 showed that the bits
+differ. The largest logit change was 0.00002 to 0.00003, and the smallest gap
+was 0.026: about 1,000 times larger than the noise. That is why the tests of
+this repo compare in float32: the bits still move, and the tokens do not. It
+is a margin, not a guarantee. A prompt with a gap below 0.0001 can still
+swap in float32.
+
+**The guard.** Never test "temperature 0 gives the same tokens" across batch
+sizes in bfloat16. Compare in float32. In production, log the gap of the top
+two logits. A first difference at a gap of 1 or 2 bfloat16 steps is the
+signature of the reduction order, not of a bug.
+
+**The fix, when a customer needs it.** A **batch-invariant** kernel uses one
+reduction order for a row at every batch size: no GEMV for batch 1, no
+split-K that depends on the shape, and fixed tiles. It costs speed, because
+split-K and the special kernels exist to make small batches fast.
+''',
 }
 
 MYSTERY_SOL = '''
@@ -566,6 +858,7 @@ FINGERPRINTS_SOL = '''
 | arrivals above the service rate | no | from the first minute | a wait that grows linearly | arrival rate against service rate |
 | the pad id is the end-of-turn id | no | token 0, chats with turns | a different answer | zeros in the mask = pads |
 | the fastest batch breaks the promise | no | above batch 32 here | slow text for each user | TPOT against the promise |
+| temperature 0 at another batch size | no | late, at a gap of 1 or 2 bf16 steps | fluent, different from that token on | compare in float32; log the top-two gap |
 
 Exercise 3 found a second problem that the ticket did not describe: a cache
 that grows by concatenation spends more than half of each step on copies.
