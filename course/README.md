@@ -86,6 +86,11 @@ Part3_PagedAttention/3_kernels/
   stay. You write the lines.
 - **A solution** is the same notebook, complete. Its output is empty, so your
   own run shows you the answer.
+- **A picture** is a drawing of the mechanism, not a plot of data. A demo calls
+  it in one line. `course/pictures.py` draws it, and needs no GPU.
+  `dev/add_cells.py` puts the pictures in the notebooks.
+- **The last cell of a section** is a table: which stage uses what, and what
+  is new in the stage. Read its right column before you start the stage.
 
 ## How to run them
 
